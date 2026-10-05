@@ -33,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dock: DockController?
     private var welcomeWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    /// Set while Side Tabs activates itself to show one of its own windows.
+    private var presentingOwnWindow = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
@@ -81,6 +83,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.save()
     }
 
+    /// Side Tabs only becomes the active app to show its own windows, or when the sidebar
+    /// itself is picked, e.g. in Mission Control. In that case the user wants Safari.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        let ownWindowShowing = [welcomeWindow, settingsWindow].contains { $0?.isVisible == true }
+        guard !presentingOwnWindow, !ownWindowShowing else { return }
+        dock?.bringSafariForward()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showSettings()
         return false
@@ -126,6 +136,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func present(_ window: NSWindow?) {
+        presentingOwnWindow = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.presentingOwnWindow = false
+        }
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
     }
