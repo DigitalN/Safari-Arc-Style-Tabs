@@ -29,6 +29,8 @@ final class SafariTracker {
 
     private var appElement: AXUIElement?
     private var observer: AXObserver?
+    /// Safari's File → Open Location… menu item, found once per Safari launch.
+    private var openLocationItem: AXUIElement?
     private var workspaceTokens: [NSObjectProtocol] = []
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "tracker")
     private var lastWindowDescription = ""
@@ -164,6 +166,7 @@ final class SafariTracker {
         observer = nil
         appElement = nil
         window = nil
+        openLocationItem = nil
     }
 
     private func handle(_ name: String, element: AXUIElement) {
@@ -313,6 +316,48 @@ final class SafariTracker {
         var id: CGWindowID = 0
         guard _AXUIElementGetWindow(window, &id) == .success, id != 0 else { return nil }
         return Int(id)
+    }
+
+    /// Puts the cursor in Safari's own address bar, like pressing ⌘L. Presses the menu
+    /// item whose shortcut is ⌘L (so it works in any language and keyboard layout), or
+    /// sends the keystroke if that item can't be found.
+    func openLocation() {
+        focusSafari()
+        if openLocationItem == nil {
+            openLocationItem = findMenuItem(commandKey: "L")
+        }
+        if let item = openLocationItem, AXUIElementPerformAction(item, kAXPressAction as CFString) == .success {
+            return
+        }
+        openLocationItem = nil
+        log.notice("Open Location menu item not found; sending ⌘L instead")
+        guard let pid = app?.processIdentifier else { return }
+        let source = CGEventSource(stateID: .hidSystemState)
+        for keyDown in [true, false] {
+            let event = CGEvent(keyboardEventSource: source, virtualKey: 0x25, keyDown: keyDown) // L
+            event?.flags = .maskCommand
+            event?.postToPid(pid)
+        }
+    }
+
+    /// A menu item whose shortcut is ⌘ plus `commandKey`. Starts with the File menu,
+    /// where Open Location lives, to keep the search short.
+    private func findMenuItem(commandKey: String) -> AXUIElement? {
+        guard let appElement, let menuBar = element(appElement, kAXMenuBarAttribute) else { return nil }
+        var menus = elements(menuBar, kAXChildrenAttribute)
+        if menus.count > 2 {
+            menus.insert(menus.remove(at: 2), at: 0)
+        }
+        for menuBarItem in menus {
+            for menu in elements(menuBarItem, kAXChildrenAttribute) {
+                for item in elements(menu, kAXChildrenAttribute) {
+                    guard string(item, kAXMenuItemCmdCharAttribute) == commandKey,
+                          (copy(item, kAXMenuItemCmdModifiersAttribute) as? Int) == 0 else { continue }
+                    return item
+                }
+            }
+        }
+        return nil
     }
 
     /// Brings Safari and the docked window to the front.

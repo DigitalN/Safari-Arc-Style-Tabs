@@ -402,6 +402,10 @@ final class DockController {
         }
     }
 
+    func openSafariAddressBar() {
+        tracker.openLocation()
+    }
+
     /// Clicking the sidebar while another app is in front should bring Safari forward.
     func bringSafariForward() {
         if !tracker.isSafariFrontmost {

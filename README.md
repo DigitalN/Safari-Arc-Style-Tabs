@@ -9,16 +9,24 @@ the app about your tabs, and the app draws the sidebar next to Safari's window.
 
 ## Features
 
+- **Address bar**: the top of the sidebar shows the current site, with ↻ to reload it.
+  Click the site to jump into Safari's own address bar, the same as ⌘L, so you keep
+  Safari's autocomplete, history and search suggestions. Extensions can't read those, so
+  the sidebar can't offer its own.
 - **Tabs**: click to switch. Close with the ✕ (shown on the current tab and on hover) or a
-  middle-click. Drag to reorder. Right-click for Rename, Add to Bookmarks, Copy Link,
-  Duplicate, Reload, Close Other Tabs and Close Tabs Below.
+  middle-click. Right-click for Rename, Add to Bookmarks, Copy Link, Duplicate, Reload,
+  Close Other Tabs and Close Tabs Below.
+- **Drag to reorder**: drag a tab or bookmark and the other rows slide apart to open a
+  highlighted slot where it will land. Drag a tab up into Bookmarks to bookmark it at
+  that spot; the tab stays open.
 - **Rename**: double-click a tab, or right-click → Rename Tab…. The new name shows only in
   the sidebar; Safari's own tab bar keeps the page title. Clear the name (or choose Reset
   Name) to go back. Names are kept across Safari restarts.
-- **Bookmarks**: click + next to *Bookmarks*, or drag a tab or a link onto the list.
-  Clicking a bookmark switches to its tab if it's already open in the window (a dot
-  marks open ones), otherwise opens it in a new tab. ⌘-click always opens a new tab.
-  Drag to reorder; right-click to rename, replace with the current page, or remove.
+- **Bookmarks**: click + next to *Bookmarks*, drag a tab up into the list, or drop a link
+  from a web page onto it. Clicking a bookmark switches to its tab if it's already open
+  in the window (a dot marks open ones), otherwise opens it in a new tab. ⌘-click always
+  opens a new tab. Right-click to rename, replace with the current page, or remove.
+  Dropping a link onto *Tabs* opens it in a new tab.
 - **Docking**: the sidebar follows Safari's front window and narrows Safari to make room
   when needed. Hiding the sidebar gives that space back to Safari.
 - **Full screen**: Safari's window can't be resized in full screen, so the sidebar hides.
@@ -108,7 +116,8 @@ separate window that the app keeps attached to Safari's window:
   - `TabStore` holds tabs, bookmarks and custom names.
   - `FaviconStore` downloads and caches icons.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
-  - `Views/` is the SwiftUI sidebar, setup window and settings.
+  - `Views/` is the SwiftUI sidebar, setup window and settings. `SidebarDrag` handles
+    reordering with its own drag gesture rather than system drag and drop.
 - `scripts/`: `install.sh` builds and installs; `make-icons.swift` regenerates the app
   and toolbar icons.
 
@@ -117,6 +126,9 @@ Bookmarks and tab names are stored in `~/Library/Application Support/Side Tabs/s
 ## Limitations
 
 - Safari's own tab bar stays at the top. No extension can remove it.
+- Tabs and bookmarks can't be dragged out of the sidebar into other apps.
+- The sidebar doesn't scroll by itself while you drag, so with a long list you can't
+  drag a row past the visible area.
 - In full screen, the sidebar slides out *over* the page rather than beside it.
 - In full screen, Safari opens its own sidebar (Tab Groups, Bookmarks…) when the pointer
   reaches the left edge, so it appears alongside Side Tabs. Safari has no setting to turn

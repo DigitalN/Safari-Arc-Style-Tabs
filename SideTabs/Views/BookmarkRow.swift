@@ -1,13 +1,16 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct BookmarkRow: View {
     let bookmark: Bookmark
 
     @Environment(TabStore.self) private var store
+    @Environment(AppSettings.self) private var settings
+    @Environment(SidebarDrag.self) private var drag
     @State private var hovering = false
+    @State private var rowTop: CGFloat = 0
 
     private var isRenaming: Bool { store.renaming == .bookmark(bookmark.id) }
+    private var isSlot: Bool { drag.isSlot(bookmark: bookmark) }
 
     var body: some View {
         let openTab = store.openTab(for: bookmark)
@@ -35,14 +38,29 @@ struct BookmarkRow: View {
         }
         .font(.system(size: 13))
         .padding(.horizontal, 8)
-        .frame(height: 30)
-        .background(RowBackground(isActive: openTab?.active == true, isHovering: hovering))
+        .frame(height: SidebarDrag.rowHeight)
+        .background(RowBackground(isActive: openTab?.active == true, isHovering: hovering && !drag.isActive))
         .background(MouseTracking(onHover: { hovering = $0 }))
+        .opacity(isSlot ? 0 : 1)
+        .overlay {
+            if isSlot {
+                DropSlot()
+            }
+        }
         .contentShape(Rectangle())
         .onTapGesture {
             guard !isRenaming else { return }
             store.open(bookmark, inNewTab: NSEvent.modifierFlags.contains(.command))
         }
+        .sidebarDraggable(
+            .bookmark(bookmark),
+            drag: drag,
+            store: store,
+            settings: settings,
+            rowTop: rowTop,
+            enabled: !isRenaming
+        )
+        .onSidebarTop { rowTop = $0 }
         .contextMenu {
             Button("Open") { store.open(bookmark) }
             Button("Open in New Tab") { store.open(bookmark, inNewTab: true) }
@@ -53,53 +71,8 @@ struct BookmarkRow: View {
             Divider()
             Button("Remove Bookmark") { store.removeBookmark(bookmark) }
         }
-        .onDrag {
-            store.beginDrag(.bookmark(bookmark.id))
-            if let url = URL(string: bookmark.url) {
-                return NSItemProvider(object: url as NSURL)
-            }
-            return NSItemProvider(object: bookmark.title as NSString)
-        }
-        .onDrop(of: [.url, .plainText], delegate: BookmarkDropDelegate(target: bookmark, store: store))
         .help("\(bookmark.title)\n\(bookmark.url)")
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
-    }
-}
-
-/// Reorders bookmarks, and turns dropped tabs or links into bookmarks.
-struct BookmarkDropDelegate: DropDelegate {
-    /// nil means "append to the end".
-    let target: Bookmark?
-    let store: TabStore
-
-    func dropEntered(info: DropInfo) {
-        guard let target, case .bookmark(let id)? = store.dragging else { return }
-        withAnimation(.easeInOut(duration: 0.15)) {
-            store.previewMove(bookmark: id, over: target)
-        }
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        if case .bookmark? = store.dragging {
-            return DropProposal(operation: .move)
-        }
-        return DropProposal(operation: .copy)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        let index = target.flatMap { target in store.bookmarks.firstIndex { $0.id == target.id } }
-        switch store.dragging {
-        case .bookmark?:
-            store.finishDrag()
-            return true
-        case .tab(let key)?:
-            store.cancelDrag()
-            guard let tab = store.tab(for: key) else { return false }
-            store.addBookmark(from: tab, instance: key.instance, at: index)
-            return true
-        case nil:
-            return loadDroppedURL(info) { url in store.addBookmark(url: url, at: index) }
-        }
     }
 }

@@ -62,11 +62,6 @@ enum RenameTarget: Hashable {
     case bookmark(UUID)
 }
 
-enum DragItem: Hashable {
-    case tab(TabKey)
-    case bookmark(UUID)
-}
-
 extension String {
     /// URL used to decide whether a bookmark is already open: ignores the fragment
     /// and a trailing slash.

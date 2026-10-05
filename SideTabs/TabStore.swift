@@ -18,7 +18,6 @@ final class TabStore {
     private(set) var bookmarkLinks: [UUID: TabKey] = [:]
 
     var renaming: RenameTarget?
-    @ObservationIgnored var dragging: DragItem?
 
     /// Hints from SafariTracker, used to pick the window the sidebar is docked to.
     var safariIsFrontmost = false
@@ -34,13 +33,13 @@ final class TabStore {
     @ObservationIgnored var sendCommand: (([String: Any]) -> Void)?
     @ObservationIgnored var onToggleSidebar: (() -> Void)?
     @ObservationIgnored var onRenameStateChanged: ((Bool) -> Void)?
+    @ObservationIgnored var onOpenAddressBar: (() -> Void)?
 
     /// Names whose tab ids are gone (Safari restarted), keyed by URL so they can be
     /// given back to the restored tabs.
     @ObservationIgnored private var orphanNames: [String: String] = [:]
     @ObservationIgnored private var pendingBookmarkOpens: [String: (bookmark: UUID, at: Date)] = [:]
     @ObservationIgnored private var saveWork: DispatchWorkItem?
-    @ObservationIgnored private var dragTimer: Timer?
     /// When the last tab switch was requested, to log how long Safari took to confirm it.
     @ObservationIgnored private var pendingActivation: (key: TabKey, at: Date)?
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "store")
@@ -303,6 +302,23 @@ final class TabStore {
         }
     }
 
+    // MARK: - Address bar
+
+    var activeTab: (tab: BrowserTab, instance: String)? {
+        guard let selection = currentWindow, let tab = selection.window.tabs.first(where: \.active) else { return nil }
+        return (tab, selection.instance)
+    }
+
+    func reloadActiveTab() {
+        guard let active = activeTab else { return }
+        reload(active.tab, instance: active.instance)
+    }
+
+    /// Opens Safari's own address bar, which has its full autocomplete.
+    func openAddressBar() {
+        onOpenAddressBar?()
+    }
+
     // MARK: - Tab commands
 
     func tab(for key: TabKey) -> BrowserTab? {
@@ -377,66 +393,20 @@ final class TabStore {
         NSPasteboard.general.setString(url, forType: .string)
     }
 
-    /// Live reorder while dragging; the move is sent to Safari on drop.
-    func previewMove(tab dragged: TabKey, over target: BrowserTab) {
-        guard dragged.tabId != target.id, let window = window(instance: dragged.instance, id: target.windowId) else { return }
-        guard window.tabs.contains(where: { $0.id == dragged.tabId }) else { return }
-        mutateWindow(instance: dragged.instance, windowId: target.windowId) { window in
-            guard let from = window.tabs.firstIndex(where: { $0.id == dragged.tabId }),
-                  let to = window.tabs.firstIndex(where: { $0.id == target.id }) else { return }
-            let tab = window.tabs.remove(at: from)
-            window.tabs.insert(tab, at: to)
-            for index in window.tabs.indices {
-                window.tabs[index].index = index
+    /// Moves a tab to `index` (its position once moved) and tells Safari.
+    func moveTab(_ tab: BrowserTab, instance: String, to index: Int) {
+        var destination = index
+        mutateWindow(instance: instance, windowId: tab.windowId) { window in
+            guard let from = window.tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+            let moved = window.tabs.remove(at: from)
+            destination = min(max(index, 0), window.tabs.count)
+            window.tabs.insert(moved, at: destination)
+            for position in window.tabs.indices {
+                window.tabs[position].index = position
             }
         }
-    }
-
-    func commitMove(tab key: TabKey) {
-        guard let tab = tab(for: key) else { return }
-        send(["action": "move", "tabId": key.tabId, "index": tab.index], to: key.instance)
-    }
-
-    // MARK: - Dragging
-
-    /// SwiftUI doesn't report drags that end outside a drop target, so watch for the
-    /// mouse button going up and commit whatever order is showing.
-    func beginDrag(_ item: DragItem) {
-        dragging = item
-        dragTimer?.invalidate()
-        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                if NSEvent.pressedMouseButtons & 1 == 0 {
-                    self?.finishDrag()
-                }
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        dragTimer = timer
-    }
-
-    func finishDrag() {
-        dragTimer?.invalidate()
-        dragTimer = nil
-        guard let item = dragging else { return }
-        dragging = nil
-        switch item {
-        case .tab(let key):
-            commitMove(tab: key)
-        case .bookmark:
-            commitBookmarkOrder()
-        }
-    }
-
-    /// The drag turned into something else (a tab dropped on the bookmarks), so undo any
-    /// reordering it previewed.
-    func cancelDrag() {
-        dragTimer?.invalidate()
-        dragTimer = nil
-        if case .tab? = dragging {
-            requestSnapshot()
-        }
-        dragging = nil
+        guard destination != tab.index else { return }
+        send(["action": "move", "tabId": tab.id, "index": destination], to: instance)
     }
 
     private func window(instance: String, id: Int) -> BrowserWindow? {
@@ -544,15 +514,11 @@ final class TabStore {
         scheduleSave()
     }
 
-    func previewMove(bookmark dragged: UUID, over target: Bookmark) {
-        guard dragged != target.id,
-              let from = bookmarks.firstIndex(where: { $0.id == dragged }),
-              let to = bookmarks.firstIndex(where: { $0.id == target.id }) else { return }
+    /// Moves a bookmark to `index` (its position once moved).
+    func moveBookmark(_ id: UUID, to index: Int) {
+        guard let from = bookmarks.firstIndex(where: { $0.id == id }) else { return }
         let bookmark = bookmarks.remove(at: from)
-        bookmarks.insert(bookmark, at: to)
-    }
-
-    func commitBookmarkOrder() {
+        bookmarks.insert(bookmark, at: min(max(index, 0), bookmarks.count))
         scheduleSave()
     }
 

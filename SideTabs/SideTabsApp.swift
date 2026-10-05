@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         store.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
+        store.onOpenAddressBar = { [weak self] in self?.dock?.openSafariAddressBar() }
 
         dock.start()
         store.requestSnapshot()

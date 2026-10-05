@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct TabRow: View {
     let tab: BrowserTab
@@ -7,9 +6,12 @@ struct TabRow: View {
 
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
+    @Environment(SidebarDrag.self) private var drag
     @State private var hovering = false
+    @State private var rowTop: CGFloat = 0
 
     private var key: TabKey { TabKey(instance: instance, tabId: tab.id) }
+    private var isSlot: Bool { drag.isSlot(tab: tab) }
     private var isRenaming: Bool { store.renaming == .tab(key) }
     private var showsClose: Bool {
         !isRenaming && (settings.closeButtonMode == .always || hovering || tab.active)
@@ -67,8 +69,14 @@ struct TabRow: View {
         .font(.system(size: 13))
         .padding(.leading, 8)
         .padding(.trailing, 4)
-        .frame(height: 30)
-        .background(RowBackground(isActive: tab.active, isHovering: hovering))
+        .frame(height: SidebarDrag.rowHeight)
+        .background(RowBackground(isActive: tab.active, isHovering: hovering && !drag.isActive))
+        .opacity(isSlot ? 0 : 1)
+        .overlay {
+            if isSlot {
+                DropSlot()
+            }
+        }
         .background(MouseTracking(onHover: { hovering = $0 }, onMiddleClick: { store.close([tab], instance: instance) }))
         .contentShape(Rectangle())
         .onTapGesture {
@@ -81,15 +89,16 @@ struct TabRow: View {
                 store.activate(tab, instance: instance)
             }
         }
+        .sidebarDraggable(
+            .tab(tab, instance: instance),
+            drag: drag,
+            store: store,
+            settings: settings,
+            rowTop: rowTop,
+            enabled: !isRenaming
+        )
+        .onSidebarTop { rowTop = $0 }
         .contextMenu { contextMenu }
-        .onDrag {
-            store.beginDrag(.tab(key))
-            if let url = tab.url.flatMap(URL.init(string:)) {
-                return NSItemProvider(object: url as NSURL)
-            }
-            return NSItemProvider(object: store.displayTitle(for: tab, instance: instance) as NSString)
-        }
-        .onDrop(of: [.url, .plainText], delegate: TabDropDelegate(target: tab, instance: instance, store: store))
         .help(tooltip)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(tab.active ? [.isButton, .isSelected] : .isButton)
@@ -142,7 +151,7 @@ struct NewTabRow: View {
         .font(.system(size: 13))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 8)
-        .frame(height: 30)
+        .frame(height: SidebarDrag.rowHeight)
         .background(RowBackground(isActive: false, isHovering: hovering))
         .background(MouseTracking(onHover: { hovering = $0 }))
         .contentShape(Rectangle())
@@ -151,43 +160,9 @@ struct NewTabRow: View {
     }
 }
 
-/// Reorders tabs while dragging; opens dropped links in a new tab.
-struct TabDropDelegate: DropDelegate {
-    let target: BrowserTab?
-    let instance: String
-    let store: TabStore
-
-    func dropEntered(info: DropInfo) {
-        guard let target, case .tab(let key)? = store.dragging, key.instance == instance else { return }
-        withAnimation(.easeInOut(duration: 0.15)) {
-            store.previewMove(tab: key, over: target)
-        }
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        if case .tab? = store.dragging {
-            return DropProposal(operation: .move)
-        }
-        return DropProposal(operation: store.dragging == nil ? .copy : .forbidden)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        switch store.dragging {
-        case .tab?:
-            store.finishDrag()
-            return true
-        case .bookmark?:
-            store.finishDrag()
-            return false
-        case nil:
-            return loadDroppedURL(info) { url in store.newTab(url: url.absoluteString) }
-        }
-    }
-}
-
-/// Reads the first URL from a drop, e.g. a link dragged from a web page.
-func loadDroppedURL(_ info: DropInfo, completion: @escaping @MainActor (URL) -> Void) -> Bool {
-    guard let provider = info.itemProviders(for: [.url]).first else { return false }
+/// Reads the first URL from dropped items, e.g. a link dragged from a web page.
+func loadDroppedURL(from providers: [NSItemProvider], completion: @escaping @MainActor (URL) -> Void) -> Bool {
+    guard let provider = providers.first(where: { $0.canLoadObject(ofClass: URL.self) }) else { return false }
     _ = provider.loadObject(ofClass: URL.self) { url, _ in
         guard let url else { return }
         DispatchQueue.main.async {
