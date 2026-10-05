@@ -142,9 +142,10 @@ final class DockController {
             store.dockedWindowTitle = title
         }
 
-        // The sidebar follows Safari's window between Spaces (`moveToActiveSpace`), so only
-        // show it on the Space where that window is; otherwise it would cover other apps.
-        if !tracker.isSafariFrontmost && !tracker.isOnActiveSpace(window) {
+        // The sidebar follows Safari between Spaces (`moveToActiveSpace`), so only show it on
+        // the Space where its window is. Otherwise it would cover other apps' Spaces, and
+        // full-screen videos, which Safari shows in their own window and Space.
+        if !tracker.isOnActiveSpace(window) {
             note("hidden: Safari window is on another Space")
             hide()
             return

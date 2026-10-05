@@ -305,11 +305,12 @@ final class SafariTracker {
         return bottom
     }
 
-    /// Whether the window is on the Space being shown (full-screen windows have their own Space).
+    /// Whether the window is on the Space being shown. Full-screen windows have their own
+    /// Space, and so do full-screen videos, which Safari shows in a separate window.
     func isOnActiveSpace(_ window: AXUIElement) -> Bool {
         guard let number = windowNumber(of: window) else { return true }
-        let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-        return onScreen.contains { ($0[kCGWindowNumber as String] as? Int) == number }
+        let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(number)) as? [[String: Any]]
+        return info?.first?[kCGWindowIsOnscreen as String] as? Bool ?? false
     }
 
     func windowNumber(of window: AXUIElement) -> Int? {
