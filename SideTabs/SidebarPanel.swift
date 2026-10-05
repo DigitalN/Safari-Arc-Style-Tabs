@@ -44,6 +44,17 @@ final class SidebarPanel: NSPanel {
         contentView = FirstMouseHostingView(rootView: PanelChrome(style: style) { rootView })
     }
 
+    /// Called on left and middle mouse-down anywhere in the panel, before the click is
+    /// handled. Right-clicks are left alone so context menus open without switching apps.
+    var onMouseDown: (() -> Void)?
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown || event.type == .otherMouseDown {
+            onMouseDown?()
+        }
+        super.sendEvent(event)
+    }
+
     /// Needed for renaming; `becomesKeyOnlyIfNeeded` keeps plain clicks from taking focus.
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }

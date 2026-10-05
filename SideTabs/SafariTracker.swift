@@ -322,7 +322,12 @@ final class SafariTracker {
     /// item whose shortcut is ⌘L (so it works in any language and keyboard layout), or
     /// sends the keystroke if that item can't be found.
     func openLocation() {
-        focusSafari()
+        focusSafari { [weak self] in
+            self?.pressOpenLocation()
+        }
+    }
+
+    private func pressOpenLocation() {
         if openLocationItem == nil {
             openLocationItem = findMenuItem(commandKey: "L")
         }
@@ -361,15 +366,65 @@ final class SafariTracker {
     }
 
     /// Brings Safari and the docked window to the front.
-    func focusSafari() {
+    ///
+    /// macOS ignores ordinary activation requests from apps that aren't in front, and Side
+    /// Tabs never is (its sidebar doesn't take focus). So ask through Accessibility first,
+    /// then the usual way, and if Safari still isn't in front shortly after, have
+    /// LaunchServices open it, which brings an already-running app forward.
+    func focusSafari(then completion: (() -> Void)? = nil) {
+        guard let app, !app.isTerminated else { return }
         if let window {
             AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         }
+        if isSafariFrontmost {
+            completion?()
+            return
+        }
         if let appElement {
             AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
         }
-        app?.activate(options: [])
+        app.activate(from: .current, options: [])
+
+        waitForSafari(attempts: 6) { [weak self] inFront in
+            guard let self else { return }
+            if inFront {
+                completion?()
+                return
+            }
+            self.log.notice("Safari didn't come forward; asking LaunchServices")
+            guard let url = app.bundleURL else { return }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            configuration.addsToRecentItems = false
+            NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, _ in
+                DispatchQueue.main.async {
+                    self.waitForSafari(attempts: 10) { _ in completion?() }
+                }
+            }
+        }
+    }
+
+    /// When Safari is in front but another of its windows has focus (Settings, a second
+    /// window), makes the window the sidebar is docked to the focused one.
+    func raiseDockedWindowIfNeeded() {
+        guard let appElement, let window else { return }
+        if let focused = element(appElement, kAXFocusedWindowAttribute), CFEqual(focused, window) {
+            return
+        }
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+    }
+
+    /// Polls every 25 ms until Safari is the frontmost app or the attempts run out.
+    private func waitForSafari(attempts: Int, _ done: @escaping (Bool) -> Void) {
+        if isSafariFrontmost || attempts <= 0 {
+            done(isSafariFrontmost)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { [weak self] in
+            self?.waitForSafari(attempts: attempts - 1, done)
+        }
     }
 
     // MARK: - AX helpers

@@ -54,6 +54,8 @@ final class DockController {
 
     func start() {
         tracker.onEvent = { [weak self] event in self?.handle(event) }
+        // Any click on the sidebar means "take me to Safari".
+        panel.onMouseDown = { [weak self] in self?.bringSafariForward() }
         tracker.start()
         observeSettings()
         update(makeRoom: true)
@@ -408,7 +410,9 @@ final class DockController {
 
     /// Clicking the sidebar while another app is in front should bring Safari forward.
     func bringSafariForward() {
-        if !tracker.isSafariFrontmost {
+        if tracker.isSafariFrontmost {
+            tracker.raiseDockedWindowIfNeeded()
+        } else {
             tracker.focusSafari()
         }
     }

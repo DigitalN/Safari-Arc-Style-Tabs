@@ -22,7 +22,7 @@ struct SideTabsApp: App {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let settings = AppSettings()
     let store = TabStore()
     let favicons = FaviconStore()
@@ -57,11 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bridge.start()
 
         store.sendCommand = { [weak self] command in
-            guard let self else { return }
-            self.bridge.send(command)
-            if let action = command["action"] as? String, action == "activate" || action == "create" {
-                self.dock?.bringSafariForward()
-            }
+            self?.bridge.send(command)
         }
         store.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
@@ -131,8 +127,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = title
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
+        window.delegate = self
         window.center()
         return window
+    }
+
+    /// Side Tabs has nothing to show once its last window closes, so step aside and let
+    /// macOS give focus back to the previous app instead of leaving keystrokes going nowhere.
+    func windowWillClose(_ notification: Notification) {
+        let closing = notification.object as? NSWindow
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let stillOpen = [self.welcomeWindow, self.settingsWindow].contains { $0 !== closing && $0?.isVisible == true }
+            if !stillOpen && NSApp.isActive {
+                NSApp.deactivate()
+            }
+        }
     }
 
     private func present(_ window: NSWindow?) {
