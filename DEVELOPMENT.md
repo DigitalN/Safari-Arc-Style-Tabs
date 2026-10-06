@@ -27,16 +27,16 @@ bundles, and codesign rejects bundles that have it.
 
 1. Raise `MARKETING_VERSION` (and `CURRENT_PROJECT_VERSION`) for both targets in
    `SideTabs.xcodeproj`.
-2. Run `scripts/package.sh`. It builds and signs the app and creates two files:
-   - `dist/Side-Tabs-<version>.dmg`, which people download. Opening it shows Side Tabs and
-     the Applications folder over a background with a drag arrow. The artwork comes from
-     `scripts/make-dmg-background.swift`, and Finder arranges the window, so the first run
-     asks to let Terminal control Finder.
-   - `dist/Side-Tabs-<version>.zip`, which installed copies download to update themselves.
-3. Create a GitHub release tagged `v<version>` with both files attached. For the notes,
-   list what's new and paste in the Install section of the README:
+2. Run `scripts/package.sh`. It builds and signs the app and creates
+   `dist/Side-Tabs-<version>.dmg`, which people download and installed copies update
+   themselves from. Opening it shows Side Tabs and the Applications folder over a
+   background with a drag arrow. The artwork comes from
+   `scripts/make-dmg-background.swift`, and Finder arranges the window, so the first run
+   asks to let Terminal control Finder.
+3. Create a GitHub release tagged `v<version>` with the disk image attached. For the
+   notes, list what's new and paste in the Install section of the README:
    ```bash
-   gh release create v1.1 dist/Side-Tabs-1.1.dmg dist/Side-Tabs-1.1.zip --title "Side Tabs 1.1"
+   gh release create v1.2 dist/Side-Tabs-1.2.dmg --title "Side Tabs 1.2"
    ```
    Everyone's copy picks it up the next time they start Safari. Drafts and pre-releases are
    skipped, so publish as a pre-release to try a build before it goes out.
@@ -112,7 +112,7 @@ older version number than the latest release gets replaced. Turn off *Update aut
 in Settings while working on an older version. To try the updater without publishing,
 point it at a stand-in for GitHub's
 [latest release](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
-response, with a `.zip` asset whose `browser_download_url` is also a `file://` URL:
+response, with a `.dmg` asset whose `browser_download_url` is also a `file://` URL:
 
 ```bash
 defaults write com.digitaln.sidetabs UpdateFeedURL file:///path/to/latest.json

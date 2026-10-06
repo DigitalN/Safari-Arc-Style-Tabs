@@ -6,14 +6,12 @@ import os.log
 /// Keeps Side Tabs up to date from its GitHub releases, with nothing to click or drag.
 ///
 /// Each time Safari starts, it asks GitHub for the latest release. If that's newer, it
-/// downloads the release's zipped app in the background, unpacks it, and checks
-/// that it's signed by the same developer team as this copy. Then, at a moment when nobody is
-/// using the Mac, it swaps the new app in and relaunches into it.
+/// downloads the release's disk image in the background, copies the app out of it, and
+/// checks that it's signed by the same developer team as this copy. Then, at a moment when
+/// nobody is using the Mac, it swaps the new app in and relaunches into it.
 ///
 /// A release counts when it's the repository's latest (not a draft or pre-release), its tag
-/// is the version (`v1.2`), and the `.zip` from `scripts/package.sh` is attached. (People
-/// download the `.dmg`; the updater doesn't use it, because reading a mounted disk image can
-/// be blocked by macOS's file access protection.)
+/// is the version (`v1.2`), and the `.dmg` from `scripts/package.sh` is attached.
 ///
 /// An app downloaded this way isn't marked as coming from the internet, so macOS doesn't ask
 /// to approve it again. The signature check is what makes that safe: only an app signed with
@@ -179,8 +177,8 @@ final class Updater {
             tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
         }
 
-        var archive: URL? {
-            assets.first { $0.name.lowercased().hasSuffix(".zip") }?.browserDownloadUrl
+        var diskImage: URL? {
+            assets.first { $0.name.lowercased().hasSuffix(".dmg") }?.browserDownloadUrl
         }
     }
 
@@ -211,8 +209,8 @@ final class Updater {
     }
 
     private func download(_ release: Release) async throws -> StagedUpdate {
-        guard let source = release.archive, let teamIdentifier else {
-            throw UpdateError.noArchive
+        guard let source = release.diskImage, let teamIdentifier else {
+            throw UpdateError.noDiskImage
         }
         let installed = Bundle.main.bundleURL
         let folder = try FileManager.default.url(
@@ -223,13 +221,14 @@ final class Updater {
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 throw UpdateError.server(http.statusCode)
             }
-            let archive = folder.appending(path: "update.zip")
-            try FileManager.default.moveItem(at: downloaded, to: archive)
+            let image = folder.appending(path: "update.dmg")
+            try FileManager.default.moveItem(at: downloaded, to: image)
+            let app = folder.appending(path: installed.lastPathComponent)
             let bundleIdentifier = Bundle.main.bundleIdentifier ?? SideTabsBridge.appBundleIdentifier
-            let (app, version) = try await Task.detached {
-                let app = try Self.unpack(archive, bundleIdentifier: bundleIdentifier)
-                try? FileManager.default.removeItem(at: archive)
-                return (app, try Self.verify(app, teamIdentifier: teamIdentifier, bundleIdentifier: bundleIdentifier))
+            let version = try await Task.detached {
+                try Self.copyApp(from: image, to: app, bundleIdentifier: bundleIdentifier)
+                try? FileManager.default.removeItem(at: image)
+                return try Self.verify(app, teamIdentifier: teamIdentifier, bundleIdentifier: bundleIdentifier)
             }.value
             // The tag can be newer than the app inside if a release was put together wrong.
             guard Self.isVersion(version, newerThan: Self.currentVersion) else {
@@ -242,16 +241,25 @@ final class Updater {
         }
     }
 
-    /// Unpacks the zipped app next to the archive and returns it.
-    nonisolated private static func unpack(_ archive: URL, bundleIdentifier: String) throws -> URL {
-        let folder = archive.deletingLastPathComponent()
-        try run("/usr/bin/ditto", ["-x", "-k", archive.path, folder.path])
-        let apps = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "app" }
+    /// Opens the disk image without showing it in Finder, copies Side Tabs out of it, and
+    /// ejects it. It's mounted in /Volumes like any other disk image: mounted anywhere else,
+    /// macOS's file access protection blocks reading it.
+    nonisolated private static func copyApp(from image: URL, to destination: URL, bundleIdentifier: String) throws {
+        let output = try run("/usr/bin/hdiutil", ["attach", image.path, "-nobrowse", "-readonly", "-noautoopen", "-plist"])
+        let plist = try PropertyListSerialization.propertyList(from: output, format: nil) as? [String: Any]
+        let entities = plist?["system-entities"] as? [[String: Any]] ?? []
+        guard let mountPath = entities.compactMap({ $0["mount-point"] as? String }).first else {
+            throw UpdateError.appNotFound
+        }
+        defer { try? run("/usr/bin/hdiutil", ["detach", mountPath, "-force"]) }
+
+        let apps = try FileManager.default.contentsOfDirectory(
+            at: URL(fileURLWithPath: mountPath, isDirectory: true), includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "app" }
         guard let app = apps.first(where: { infoValue("CFBundleIdentifier", in: $0) == bundleIdentifier }) else {
             throw UpdateError.appNotFound
         }
-        return app
+        try run("/usr/bin/ditto", [app.path, destination.path])
     }
 
     /// Checks that the whole app, extension included, is intact and signed by this team for
@@ -387,7 +395,7 @@ final class Updater {
 
 nonisolated enum UpdateError: LocalizedError {
     case server(Int)
-    case noArchive
+    case noDiskImage
     case appNotFound
     case untrusted(OSStatus)
     case notNewer(String)
@@ -397,10 +405,10 @@ nonisolated enum UpdateError: LocalizedError {
         switch self {
         case .server(let code):
             "GitHub answered with an error (\(code))."
-        case .noArchive:
-            "The latest release has no zipped app attached."
+        case .noDiskImage:
+            "The latest release has no disk image attached."
         case .appNotFound:
-            "The latest release's zip doesn't contain Side Tabs."
+            "The latest release's disk image doesn't contain Side Tabs."
         case .untrusted(let status):
             "The downloaded app was changed or isn't signed by the Side Tabs developer (\(status))."
         case .notNewer(let version):
