@@ -120,6 +120,10 @@ struct WelcomeView: View {
             while !Task.isCancelled {
                 accessibility = Permissions.accessibilityGranted
                 extensionEnabled = await Permissions.extensionEnabled()
+                if accessibility && extensionEnabled && !settings.hasCompletedSetup {
+                    // From here on, Side Tabs starts quietly even if setup is left open.
+                    settings.hasCompletedSetup = true
+                }
                 now = Date()
                 try? await Task.sleep(for: .seconds(1))
             }

@@ -27,6 +27,7 @@ final class AppSettings {
         didSet { defaults.set(showBookmarks, forKey: "showBookmarks") }
     }
 
+    /// Accessibility and the Safari extension have both been turned on.
     var hasCompletedSetup: Bool {
         didSet { defaults.set(hasCompletedSetup, forKey: "hasCompletedSetup") }
     }
@@ -49,6 +50,16 @@ final class AppSettings {
 
     /// Bumped so views re-read `launchAtLogin`, which lives in ServiceManagement.
     private var launchAtLoginRevision = 0
+
+    /// Open at login starts out on. It's only switched on once, so turning it off sticks.
+    /// Call this from Applications: the login item points at wherever the app is running.
+    func turnOnLaunchAtLoginByDefault() {
+        guard !defaults.bool(forKey: "launchAtLoginDefaultApplied") else { return }
+        defaults.set(true, forKey: "launchAtLoginDefaultApplied")
+        if !launchAtLogin {
+            launchAtLogin = true
+        }
+    }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
 
