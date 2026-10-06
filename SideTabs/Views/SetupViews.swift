@@ -314,6 +314,10 @@ struct SettingsView: View {
                     get: { settings.launchAtLoginStatus() },
                     set: { settings.launchAtLogin = $0 }
                 ))
+                Toggle(isOn: $settings.updatesAutomatically) {
+                    Text("Update automatically")
+                    Text("Checks GitHub when Safari starts and installs new versions when you're not using your Mac.")
+                }
             }
 
             Section {
@@ -378,8 +382,17 @@ struct MenuContent: View {
         Button("Settings…") { app.showSettings() }
             .keyboardShortcut(",")
         Divider()
-        Text("Side Tabs \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
-        Button("Check for Updates…") { NSWorkspace.shared.open(AppLocation.releasesURL) }
+        Text("Side Tabs \(Updater.currentVersion)")
+        switch app.updater.status {
+        case .idle:
+            Button("Check for Updates…") { app.updater.checkNow() }
+        case .checking:
+            Text("Checking for Updates…")
+        case .downloading(let version):
+            Text("Downloading Side Tabs \(version)…")
+        case .ready(let version):
+            Button("Restart to Update to \(version)") { app.updater.checkNow() }
+        }
         Divider()
         Button("Quit Side Tabs") { NSApp.terminate(nil) }
             .keyboardShortcut("q")

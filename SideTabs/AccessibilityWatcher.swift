@@ -113,10 +113,6 @@ final class AccessibilityWatcher {
 
     /// Starts a new copy of the app once this one has quit, picking up setup where it left off.
     static func relaunch() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 1; /usr/bin/open \"$1\" --args \"$2\"", "sh", Bundle.main.bundlePath, resumeSetupArgument]
-        try? process.run()
-        NSApp.terminate(nil)
+        AppLocation.relaunch(arguments: [resumeSetupArgument])
     }
 }

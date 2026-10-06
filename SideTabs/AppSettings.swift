@@ -27,6 +27,11 @@ final class AppSettings {
         didSet { defaults.set(showBookmarks, forKey: "showBookmarks") }
     }
 
+    /// Check GitHub for new versions and install them in the background.
+    var updatesAutomatically: Bool {
+        didSet { defaults.set(updatesAutomatically, forKey: "updatesAutomatically") }
+    }
+
     /// Accessibility and the Safari extension have both been turned on.
     var hasCompletedSetup: Bool {
         didSet { defaults.set(hasCompletedSetup, forKey: "hasCompletedSetup") }
@@ -70,12 +75,14 @@ final class AppSettings {
             "closeButtonMode": CloseButtonMode.hover.rawValue,
             "showBookmarks": true,
             "hasCompletedSetup": false,
+            "updatesAutomatically": true,
         ])
         sidebarVisible = defaults.bool(forKey: "sidebarVisible")
         width = defaults.double(forKey: "sidebarWidth").clamped(to: Self.widthRange)
         closeButtonMode = CloseButtonMode(rawValue: defaults.string(forKey: "closeButtonMode") ?? "") ?? .hover
         showBookmarks = defaults.bool(forKey: "showBookmarks")
         hasCompletedSetup = defaults.bool(forKey: "hasCompletedSetup")
+        updatesAutomatically = defaults.bool(forKey: "updatesAutomatically")
     }
 
     func launchAtLoginStatus() -> Bool {
