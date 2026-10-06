@@ -20,63 +20,24 @@ go to **System Settings → Privacy & Security**, scroll down, and click **Open 
 only do this once. It's needed because Side Tabs is free and isn't distributed through
 Apple, so Apple hasn't checked it; all of its code is on this page.
 
-### Updating
-
-Side Tabs updates itself. Each time Safari starts, it checks GitHub for a newer version
-and downloads it in the background. It installs it the next time you leave your Mac alone
-for a few seconds, and the sidebar disappears for a moment while it restarts. There's
-nothing to download or drag, and macOS doesn't ask you to approve it again. **Check for
-Updates…** in the menu bar icon updates right away, and Settings → *Update automatically*
-turns this off.
-
-If the sidebar doesn't come back after an update, see *The sidebar doesn't appear* under
-Troubleshooting.
-
-### Uninstall
-
-Quit Side Tabs from its icon in the menu bar, then drag it from Applications to the
-Trash. That removes the Safari extension too. Your saved bookmarks and tab names are in
-`~/Library/Application Support/Side Tabs/` if you want to delete those as well.
-
 ## Features
 
-- **Address bar**: the top of the sidebar shows the current site, with ↻ to reload it.
-  Click the site to jump into Safari's own address bar (the same as ⌘L), so you keep
-  Safari's autocomplete, history and search suggestions.
-- **Tabs**: click to switch. Close with the ✕ (shown on the current tab and on hover) or a
-  middle-click. Right-click for Rename, Add to Bookmarks, Copy Link, Duplicate, Reload,
-  Close Other Tabs and Close Tabs Below.
-- **Drag to reorder**: drag a tab or bookmark and the other rows slide apart to show where
-  it will land. Drag a tab up into Bookmarks to bookmark it at that spot; the tab stays
-  open.
-- **Rename tabs**: double-click a tab, or right-click → Rename Tab…. The new name shows
-  only in the sidebar; Safari's own tab bar keeps the page title. Clear the name (or choose
-  Reset Name) to go back. Names are kept across Safari restarts.
-- **Bookmarks**: click + next to *Bookmarks*, drag a tab up into the list, or drop a link
-  from a web page onto it. Clicking a bookmark switches to its tab if it's already open
-  (a dot marks open ones), otherwise opens it in a new tab. ⌘-click always opens a new
-  tab. Right-click to rename, replace with the current page, or remove. Dropping a link
-  onto *Tabs* opens it in a new tab.
-- **Stays out of the way**: the sidebar follows Safari's front window and narrows Safari
-  to make room. Clicking the sidebar from another app brings Safari forward. Hiding the
-  sidebar gives the space back to Safari.
-- **Full screen**: Safari's window can't be resized in full screen, so the sidebar hides.
-  Move the pointer to the left edge of the screen, or use the toolbar button, to slide it
-  out over the page. It stays hidden during full-screen videos. To keep the sidebar
-  *beside* the page at full height, use Window → Fill (Fn+Control+F) instead of full
-  screen.
-- **Show or hide** the sidebar with the Side Tabs button in Safari's toolbar or the menu
-  bar icon.
+- **Tabs**: click to switch, ✕ or middle-click to close, right-click for more.
+- **Bookmarks**: favorite sites pinned at the top. A dot marks the ones already open.
+- **Drag to reorder** tabs and bookmarks. Drag a tab into Bookmarks to save it.
+- **Rename tabs**: double-click a tab to give it your own name.
+- **Address bar**: shows the current site. Click it to type a new address or search.
+- **Stays out of the way**: follows Safari's window and makes room for itself. In full
+  screen, move the pointer to the left edge to slide it out.
 
-Settings (menu bar icon → Settings…) cover the sidebar width, when close buttons show,
-whether bookmarks show, opening Side Tabs at login, and updating automatically (both on
-by default).
+Show or hide the sidebar with the Side Tabs button in Safari's toolbar. Settings are in the
+menu bar icon.
 
 ## Troubleshooting
 
 - **macOS won't open Side Tabs.** Go to System Settings → Privacy & Security, scroll
-  down, and click **Open Anyway** (see Install). If macOS says the app *is damaged*, open Terminal, paste the
-  command below, and press Return:
+  down, and click **Open Anyway** (see Install). If macOS says the app *is damaged*, open
+  Terminal, paste the command below, and press Return:
   ```bash
   xattr -dr com.apple.quarantine "/Applications/Side Tabs.app"
   ```
@@ -98,16 +59,3 @@ by default).
 - **Tab names and icons are missing.** Allow the extension on every website (setup step 3).
 - **The sidebar says "Connecting to Safari…".** That's normal for a few seconds after
   Safari or Side Tabs starts.
-
-## Limitations
-
-- Safari's own tab bar stays at the top. No extension can remove it.
-- In full screen, the sidebar slides out *over* the page rather than beside it. Safari also
-  opens its own sidebar when the pointer reaches the left edge in full screen, and has no
-  setting to turn that off.
-- Tabs and bookmarks can't be dragged out of the sidebar into other apps.
-- The sidebar doesn't scroll by itself while you drag, so with a long list you can't drag
-  a row past the visible area.
-- Tabs in private windows appear only if you allow the extension in private browsing
-  (Safari → Settings → Extensions).
-- Safari's Settings window and other non-browser windows don't get a sidebar.

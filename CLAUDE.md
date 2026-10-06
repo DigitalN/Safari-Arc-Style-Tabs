@@ -19,8 +19,9 @@ Building, the release checklist, how it works, and testing the updater are in
 
 ## The public page
 
-- README.md is for people using Side Tabs: install, updating, features, troubleshooting,
-  limitations. Developer notes go in DEVELOPMENT.md.
+- README.md is for people using Side Tabs, and short: install, a brief features list,
+  troubleshooting. No sections on updating, uninstalling or limitations. Developer notes
+  go in DEVELOPMENT.md.
 - The maintainer is currently the only user. No notes for people on older versions
   ("coming from 1.0", "1.0 can't update itself") in the README, release notes, or app.
 - Releases have only the `.dmg`. The page should list only the current release.
