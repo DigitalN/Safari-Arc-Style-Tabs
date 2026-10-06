@@ -23,25 +23,86 @@ Builds go to `~/Library/Developer/Xcode/DerivedData/SideTabs-CLI`, not the repos
 Folders synced by iCloud Drive (such as `~/Documents`) add Finder metadata to app
 bundles, and codesign rejects bundles that have it.
 
-## Make a release
+## Release checklist
 
-1. Raise `MARKETING_VERSION` (and `CURRENT_PROJECT_VERSION`) for both targets in
-   `SideTabs.xcodeproj`.
-2. Run `scripts/package.sh`. It builds and signs the app and creates
-   `dist/Side-Tabs-<version>.dmg`, which people download and installed copies update
-   themselves from. Opening it shows Side Tabs and the Applications folder over a
-   background with a drag arrow. The artwork comes from
-   `scripts/make-dmg-background.swift`, and Finder arranges the window, so the first run
-   asks to let Terminal control Finder.
-3. Create a GitHub release tagged `v<version>` with the disk image attached. For the
-   notes, list what's new and paste in the Install section of the README:
-   ```bash
-   gh release create v1.2 dist/Side-Tabs-1.2.dmg --title "Side Tabs 1.2"
-   ```
-   Everyone's copy picks it up the next time they start Safari. Drafts and pre-releases are
-   skipped, so publish as a pre-release to try a build before it goes out.
-4. Check that the README still matches the app (install steps, features, settings,
-   troubleshooting), and that its download link gives the new version.
+Go through all of it for every release. Releases are public, and installed copies update
+themselves from the latest one the next time Safari starts, so a mistake reaches everyone.
+Merging a pull request doesn't release anything: the download links only change when a
+release is published.
+
+### Before building
+
+- [ ] Everything going out is merged into `main`, and the local `main` matches GitHub
+  (`git pull`).
+- [ ] `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` are raised in
+  `SideTabs.xcodeproj` for both targets, the app and the extension (four build
+  configurations). The version must be higher than the latest release, or installed
+  copies won't update.
+- [ ] The signing certificate is valid and not about to expire:
+  `security find-identity -v -p codesigning` lists an *Apple Development* identity from the
+  same team as the last release. If the certificate's name has changed since then,
+  everyone has to allow Accessibility again after updating (see *Signing* below).
+- [ ] The README matches what's shipping: install steps, updating, features, settings,
+  troubleshooting, limitations. It's only for people using Side Tabs; developer notes go
+  in this file.
+
+### Build and check the disk image
+
+- [ ] `scripts/package.sh` makes `dist/Side-Tabs-<version>.dmg`. That's the only file a
+  release has: people download it, and installed copies update from it. No `.zip`.
+- [ ] Open the DMG: Side Tabs and Applications with the arrow between them, and the
+  first-launch card at the bottom easy to read.
+- [ ] The app inside has the new version, a valid signature, and the right team:
+  ```bash
+  M=$(hdiutil attach -nobrowse -readonly -noautoopen dist/Side-Tabs-1.2.dmg | grep -o '/Volumes/.*$')
+  defaults read "$M/Side Tabs.app/Contents/Info" CFBundleShortVersionString
+  codesign --verify --deep --strict "$M/Side Tabs.app" && codesign -dvv "$M/Side Tabs.app" 2>&1 | grep TeamIdentifier
+  hdiutil detach "$M"
+  ```
+
+### Test updating, if the updater, packaging or signing changed
+
+- [ ] An installed copy updates to a higher-version build from a stand-in release (see
+  *Testing the updater* below): it downloads, swaps, relaunches, keeps Accessibility, and
+  the extension reconnects.
+- [ ] It refuses a build changed after signing, a build signed by someone else, and a
+  release whose tag is newer than the app inside it.
+- [ ] Afterwards, `UpdateFeedURL` is removed, the test builds are deleted, and a normal
+  build is reinstalled with `scripts/install.sh`.
+
+### Publish
+
+- [ ] Release notes: what's new in this version, then the README's Install section. Only
+  the current version: no notes for people on older versions, and nothing about files
+  that aren't attached.
+- [ ] Publish it, tagged `v<version>`, from the commit it was built from:
+  ```bash
+  gh release create v1.2 dist/Side-Tabs-1.2.dmg --title "Side Tabs 1.2" --notes-file notes.md
+  ```
+  Drafts and pre-releases are skipped by the updater, so publish a pre-release first to
+  try a build before everyone gets it.
+- [ ] Turn the previous release into a draft, so the page lists only the current one.
+  This hides it without deleting it:
+  ```bash
+  gh release edit v1.1 --draft=true
+  ```
+
+### After publishing
+
+- [ ] `https://github.com/DigitalN/Safari-Arc-Style-Tabs/releases/latest` goes to the new
+  tag.
+- [ ] GitHub's API, which the updater reads, shows the new tag with only the `.dmg`:
+  ```bash
+  curl -s https://api.github.com/repos/DigitalN/Safari-Arc-Style-Tabs/releases/latest | grep -E '"tag_name"|"name": "Side-Tabs'
+  ```
+- [ ] The DMG downloaded from the page is identical to the one in `dist/`
+  (`shasum -a 256`).
+- [ ] The repository's main page shows *Releases 1* with the new version, and the release
+  page has nothing stale in it.
+- [ ] An installed copy, restarted while Safari is open, logs `up to date at <version>` (or
+  updates itself, if it was older).
+
+### Signing
 
 Releases are signed with a free development certificate. They aren't notarized by Apple,
 so people have to click **Open Anyway** the first time (see Install in the README). An
@@ -107,16 +168,42 @@ To watch live logs from the app and the extension, run the command below. In zsh
 The extension's own console is in Safari → Develop → Web Extension Background Content →
 Side Tabs.
 
+## Testing the updater
+
 Copies installed with `scripts/install.sh` update themselves too, so a local build with an
 older version number than the latest release gets replaced. Turn off *Update automatically*
-in Settings while working on an older version. To try the updater without publishing,
-point it at a stand-in for GitHub's
-[latest release](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
-response, with a `.dmg` asset whose `browser_download_url` is also a `file://` URL:
+in Settings while working on an older version.
 
-```bash
-defaults write com.digitaln.sidetabs UpdateFeedURL file:///path/to/latest.json
-```
+To try an update without publishing anything:
 
-The signature check still applies. Remove it with
-`defaults delete com.digitaln.sidetabs UpdateFeedURL`.
+1. Build a copy with a higher version, signed the same way as `build.sh` signs, outside
+   the usual build folder:
+   ```bash
+   xcodebuild -project SideTabs.xcodeproj -scheme "Side Tabs" -configuration Release \
+     -derivedDataPath ~/Library/Developer/Xcode/DerivedData/SideTabs-UpdateTest \
+     CODE_SIGN_STYLE=Manual "CODE_SIGN_IDENTITY=Apple Development" DEVELOPMENT_TEAM=<team id> \
+     PROVISIONING_PROFILE_SPECIFIER= MARKETING_VERSION=9.9 build
+   ```
+   Then run `lsregister -u` on it (the full path is in `install.sh`), so Safari doesn't
+   pick up a second copy of the extension.
+2. Put it in a disk image with `hdiutil create -srcfolder`, and write a stand-in for
+   GitHub's
+   [latest release](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
+   response whose `.dmg` asset's `browser_download_url` is a `file://` URL.
+3. Point the installed copy at it and restart Side Tabs with Safari open:
+   ```bash
+   defaults write com.digitaln.sidetabs UpdateFeedURL file:///path/to/latest.json
+   ```
+   The signature check still applies. `log stream` (above) shows `downloading`,
+   `ready to install`, then `installed <version>; relaunching` once the Mac has been idle
+   for 10 seconds.
+4. To check that bad updates are refused, change the test app's `Info.plist` after it's
+   signed, or re-sign it with `codesign --force --deep -s -`. Each should log
+   `update check failed` and leave the installed copy alone.
+5. Clean up: `defaults delete com.digitaln.sidetabs UpdateFeedURL`, delete the test build
+   folder, and reinstall with `scripts/install.sh`.
+
+The updater mounts the disk image in `/Volumes`, like any other disk image, but hidden
+from Finder. Mounted anywhere else, macOS's file access protection stops Side Tabs from
+reading it. `hdiutil attach` is deprecated in macOS 27 in favor of `diskutil image attach`;
+it still works.
