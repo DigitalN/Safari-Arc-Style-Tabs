@@ -42,9 +42,8 @@ release is published.
   `security find-identity -v -p codesigning` lists an *Apple Development* identity from the
   same team as the last release. If the certificate's name has changed since then,
   everyone has to allow Accessibility again after updating (see *Signing* below).
-- [ ] The README matches what's shipping: install steps, updating, features, settings,
-  troubleshooting, limitations. It's only for people using Side Tabs; developer notes go
-  in this file.
+- [ ] The README matches what's shipping: install steps, features, troubleshooting. It's
+  only for people using Side Tabs and kept short; developer notes go in this file.
 
 ### Build and check the disk image
 
