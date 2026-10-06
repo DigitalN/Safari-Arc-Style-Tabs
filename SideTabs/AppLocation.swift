@@ -5,7 +5,9 @@ import AppKit
 /// translocation"), so Safari can't find the extension and the Accessibility permission
 /// doesn't stick. On launch from anywhere else, offer to move it.
 enum AppLocation {
-    static let releasesURL = URL(string: "https://github.com/DigitalN/Safari-Arc-Style-Tabs/releases")!
+    /// The GitHub repository that releases (and updates) come from.
+    static let repository = "DigitalN/Safari-Arc-Style-Tabs"
+    static let releasesURL = URL(string: "https://github.com/\(repository)/releases")!
 
     static var isInApplicationsFolder: Bool {
         let path = Bundle.main.bundleURL.resolvingSymlinksInPath().path
@@ -58,10 +60,23 @@ enum AppLocation {
         return false
     }
 
-    private static func relaunch(from url: URL) {
+    /// Quits, then opens the app at `url` once this copy has exited. Waiting for the exit
+    /// matters: if this copy were still running, `open` would just find it again.
+    /// `inBackground` keeps the new copy from taking focus from whatever the user is doing.
+    static func relaunch(from url: URL = Bundle.main.bundleURL, arguments: [String] = [], inBackground: Bool = false) {
+        var openArguments = inBackground ? ["-g"] : []
+        openArguments.append(url.path)
+        if !arguments.isEmpty {
+            openArguments += ["--args"] + arguments
+        }
+        let script = """
+            pid=$1; shift; tries=0
+            while kill -0 "$pid" 2>/dev/null && [ $tries -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+            exec /usr/bin/open "$@"
+            """
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 1; /usr/bin/open \"$1\"", "sh", url.path]
+        process.arguments = ["-c", script, "sh", String(ProcessInfo.processInfo.processIdentifier)] + openArguments
         try? process.run()
         NSApp.terminate(nil)
     }

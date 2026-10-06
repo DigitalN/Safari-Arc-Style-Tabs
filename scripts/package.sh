@@ -1,8 +1,9 @@
 #!/bin/bash
-# Builds Side Tabs and packages it as a disk image for sharing:
-#   dist/Side-Tabs-<version>.dmg
-# When opened, it shows Side Tabs and the Applications folder on a background with an
-# arrow between them. Attach the .dmg to a GitHub release.
+# Builds Side Tabs and packages it for a GitHub release:
+#   dist/Side-Tabs-<version>.dmg   what people download. When opened, it shows Side Tabs
+#                                  and the Applications folder with an arrow between them.
+#   dist/Side-Tabs-<version>.zip   what the app's built-in updater downloads.
+# Attach both to a release tagged v<version>.
 #
 # Finder lays out the window, so the first run asks to let Terminal control Finder.
 
@@ -18,6 +19,7 @@ BUILT=$(scripts/build.sh "$@")
 
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$BUILT/Contents/Info.plist")
 DMG="dist/Side-Tabs-$VERSION.dmg"
+ZIP="dist/Side-Tabs-$VERSION.zip"
 
 # Work outside the repo, which may be synced by iCloud Drive (see build.sh).
 WORK="$HOME/Library/Developer/Xcode/DerivedData/SideTabs-CLI/dmg"
@@ -90,4 +92,8 @@ rm -f "$DMG"
 hdiutil convert -quiet "$WORK/layout.dmg" -format UDZO -imagekey zlib-level=9 -o "$DMG"
 rm -rf "$WORK"
 
+rm -f "$ZIP"
+ditto -c -k --keepParent "$BUILT" "$ZIP"
+
 echo "$DMG"
+echo "$ZIP"

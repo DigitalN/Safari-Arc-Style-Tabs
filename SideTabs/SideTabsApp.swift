@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let settings = AppSettings()
     let store = TabStore()
     let favicons = FaviconStore()
+    private(set) lazy var updater = Updater(settings: settings)
 
     private let bridge = ExtensionBridge()
     private let tracker = SafariTracker()
@@ -35,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var settingsWindow: NSWindow?
     /// Set while Side Tabs activates itself to show one of its own windows.
     private var presentingOwnWindow = false
+    /// Set when quitting to relaunch into an update.
+    private var relaunchingForUpdate = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         replaceOlderCopies()
@@ -71,6 +74,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             settings.turnOnLaunchAtLoginByDefault()
         }
         showSetupIfNeeded()
+
+        updater.isBusy = { [weak self] in
+            guard let self else { return true }
+            return self.store.renaming != nil || [self.welcomeWindow, self.settingsWindow].contains { $0?.isVisible == true }
+        }
+        updater.willRelaunch = { [weak self] in self?.relaunchingForUpdate = true }
+        updater.start()
     }
 
     /// Setup shows until Accessibility and the Safari extension are both on, and again right
@@ -107,7 +117,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        dock?.restoreSafariFrame()
+        // After an update, the new copy docks right where this one is, so leave Safari's
+        // window alone rather than widening it only to narrow it again a second later.
+        if !relaunchingForUpdate {
+            dock?.restoreSafariFrame()
+        }
         store.save()
     }
 
@@ -115,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// itself is picked, e.g. in Mission Control. In that case the user wants Safari.
     func applicationDidBecomeActive(_ notification: Notification) {
         let ownWindowShowing = [welcomeWindow, settingsWindow].contains { $0?.isVisible == true }
-        guard !presentingOwnWindow, !ownWindowShowing else { return }
+        guard !presentingOwnWindow, !ownWindowShowing, NSApp.modalWindow == nil else { return }
         dock?.bringSafariForward()
     }
 

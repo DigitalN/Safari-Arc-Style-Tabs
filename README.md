@@ -22,11 +22,16 @@ hasn't checked it; all of its code is on this page.
 
 ### Updating
 
-Download the new `.dmg` from the
-[releases page](https://github.com/DigitalN/Safari-Arc-Style-Tabs/releases) and drag Side
-Tabs into Applications again, replacing the old copy. The menu bar icon's **Check for
-Updates…** opens that page. If the sidebar doesn't come back after updating, see
-*The sidebar doesn't appear* under Troubleshooting.
+Side Tabs updates itself. Each time Safari starts, it checks GitHub for a newer version
+and downloads it in the background. It installs it the next time you leave your Mac alone
+for a few seconds, and the sidebar disappears for a moment while it restarts. There's nothing to download or drag, and macOS doesn't ask you to approve it
+again. **Check for Updates…** in the menu bar icon updates right away, and
+Settings → *Update automatically* turns this off.
+
+Version 1.0 can't update itself: download the latest `.dmg` from the
+[releases page](https://github.com/DigitalN/Safari-Arc-Style-Tabs/releases) once and drag
+Side Tabs into Applications, replacing the old copy. If the sidebar doesn't come back after
+updating, see *The sidebar doesn't appear* under Troubleshooting.
 
 ### Uninstall
 
@@ -65,7 +70,8 @@ Trash. That removes the Safari extension too. Your saved bookmarks and tab names
   bar icon.
 
 Settings (menu bar icon → Settings…) cover the sidebar width, when close buttons show,
-whether bookmarks show, and opening Side Tabs at login (on by default).
+whether bookmarks show, opening Side Tabs at login, and updating automatically (both on
+by default).
 
 ## Troubleshooting
 
@@ -131,14 +137,21 @@ bundles, and codesign rejects bundles that have it.
 
 ### Make a release
 
-1. Raise `MARKETING_VERSION` for both targets in `SideTabs.xcodeproj`.
-2. Run `scripts/package.sh`. It builds and signs the app and creates
-   `dist/Side-Tabs-<version>.dmg`. Opening the image shows Side Tabs and the Applications
-   folder over a background with a drag arrow. The artwork comes from
-   `scripts/make-dmg-background.swift`, and Finder arranges the window, so the first run
-   asks to let Terminal control Finder.
-3. Create a GitHub release (for example `gh release create v1.0 dist/Side-Tabs-1.0.dmg`)
-   and paste in the install steps above.
+1. Raise `MARKETING_VERSION` (and `CURRENT_PROJECT_VERSION`) for both targets in
+   `SideTabs.xcodeproj`.
+2. Run `scripts/package.sh`. It builds and signs the app and creates two files:
+   - `dist/Side-Tabs-<version>.dmg`, which people download. Opening it shows Side Tabs and
+     the Applications folder over a background with a drag arrow. The artwork comes from
+     `scripts/make-dmg-background.swift`, and Finder arranges the window, so the first run
+     asks to let Terminal control Finder.
+   - `dist/Side-Tabs-<version>.zip`, which installed copies download to update themselves.
+3. Create a GitHub release tagged `v<version>` with both files attached, and paste in the
+   install steps above:
+   ```bash
+   gh release create v1.1 dist/Side-Tabs-1.1.dmg dist/Side-Tabs-1.1.zip --title "Side Tabs 1.1"
+   ```
+   Everyone's copy picks it up the next time they start Safari. Drafts and pre-releases are skipped, so
+   publish as a pre-release to try a build before it goes out.
 
 Releases are signed with a free development certificate. They aren't notarized by Apple,
 so people have to click **Open Anyway** the first time (see Install). An
@@ -146,6 +159,12 @@ so people have to click **Open Anyway** the first time (see Install). An
 signing with Developer ID and notarizing, which removes that step. Development
 certificates last a year, so package a new release with a fresh certificate before the
 old one expires.
+
+Installed copies only accept an update signed by the same team (the `OU` of the signing
+certificate), so always sign releases with a certificate from the same Apple account.
+macOS ties the Accessibility permission to the certificate's full name, though: if a
+renewed certificate has a different name, people have to allow Accessibility again once
+after that update. Side Tabs notices and opens setup to walk them through it.
 
 ### How it works
 
@@ -178,6 +197,8 @@ separate window that the app keeps attached to Safari's window:
   - `FaviconStore` downloads and caches icons.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
   - `AppLocation` offers to move the app into Applications.
+  - `Updater` checks GitHub for new releases, verifies the download's code signature
+    against the app's own team, and swaps it in at a quiet moment.
   - `Views/` is the SwiftUI sidebar, setup window and settings. `SidebarDrag` handles
     reordering with its own drag gesture rather than system drag and drop.
 - `scripts/`: `install.sh` builds and installs, `package.sh` makes the release disk
@@ -195,3 +216,17 @@ To watch live logs from the app and the extension, run the command below. In zsh
 
 The extension's own console is in Safari → Develop → Web Extension Background Content →
 Side Tabs.
+
+Copies installed with `scripts/install.sh` update themselves too, so a local build with an
+older version number than the latest release gets replaced. Turn off *Update automatically*
+in Settings while working on an older version. To try the updater without publishing,
+point it at a stand-in for GitHub's
+[latest release](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
+response, with a `.zip` asset whose `browser_download_url` is also a `file://` URL:
+
+```bash
+defaults write com.digitaln.sidetabs UpdateFeedURL file:///path/to/latest.json
+```
+
+The signature check still applies. Remove it with
+`defaults delete com.digitaln.sidetabs UpdateFeedURL`.
