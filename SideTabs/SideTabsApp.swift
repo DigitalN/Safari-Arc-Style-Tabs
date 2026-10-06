@@ -67,8 +67,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         accessibilityWatcher.onGranted = { AccessibilityWatcher.relaunch() }
         accessibilityWatcher.start()
 
-        if !settings.hasCompletedSetup || !Permissions.accessibilityGranted {
+        if AppLocation.isInApplicationsFolder {
+            settings.turnOnLaunchAtLoginByDefault()
+        }
+        showSetupIfNeeded()
+    }
+
+    /// Setup shows until Accessibility and the Safari extension are both on, and again right
+    /// after the restart that follows granting Accessibility. After that, Side Tabs starts
+    /// quietly in the menu bar. (The sidebar itself explains website access if it's missing.)
+    private func showSetupIfNeeded() {
+        if CommandLine.arguments.contains(AccessibilityWatcher.resumeSetupArgument) || !Permissions.accessibilityGranted {
             showWelcome()
+            return
+        }
+        guard !settings.hasCompletedSetup else { return }
+        Task { @MainActor in
+            if await Permissions.extensionEnabled() {
+                settings.hasCompletedSetup = true
+            } else {
+                showWelcome()
+            }
         }
     }
 
@@ -119,7 +138,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if welcomeWindow == nil {
             let view = WelcomeView(
                 onFinish: { [weak self] in
-                    self?.settings.hasCompletedSetup = true
                     self?.welcomeWindow?.close()
                     self?.dock?.bringSafariForward()
                 },
@@ -129,7 +147,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 onStepCompleted: { [weak self] in
                     // The step was finished in System Settings or Safari; show what's next.
                     guard let window = self?.welcomeWindow, window.isVisible else { return }
-                    window.orderFrontRegardless()
                     self?.present(window)
                 }
             )
@@ -170,6 +187,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// macOS may refuse to make Side Tabs the active app, e.g. right after it restarts itself
+    /// while System Settings is in front. Then `makeKeyAndOrderFront` leaves the window
+    /// behind the active app, so also order it front regardless; clicking it activates us.
     private func present(_ window: NSWindow?) {
         presentingOwnWindow = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
@@ -177,5 +197,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
     }
 }

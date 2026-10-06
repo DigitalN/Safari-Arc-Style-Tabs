@@ -79,8 +79,8 @@ func render(scale: CGFloat) -> NSBitmapImageRep {
     )
     drawText(
         "Then open it from your Applications folder to finish setting up.",
-        font: .systemFont(ofSize: 13, weight: .regular),
-        color: color(0x6E6E73),
+        font: .systemFont(ofSize: 14, weight: .regular),
+        color: color(0x48484A),
         centeredAt: 70
     )
 
@@ -116,16 +116,89 @@ func render(scale: CGFloat) -> NSBitmapImageRep {
     head.stroke()
     NSGraphicsContext.restoreGraphicsState()
 
-    // The one step the app can't walk people through, because it can't run until it's done.
-    drawText(
-        "First time? If macOS won't open Side Tabs, go to System Settings → Privacy & Security and click Open Anyway.",
-        font: .systemFont(ofSize: 11, weight: .regular),
-        color: color(0x8E8E93),
-        centeredAt: 380
-    )
+    drawFirstLaunchNote()
 
     NSGraphicsContext.restoreGraphicsState()
     return rep
+}
+
+/// The one step the app can't walk people through, because it can't run until it's done:
+/// approving it in Privacy & Security. Drawn as a card so it doesn't read as fine print.
+func drawFirstLaunchNote() {
+    // Below the icon names (y ≈ 285), 16 pt above the bottom of the window.
+    let card = NSRect(x: 36, y: 16, width: size.width - 72, height: 100)
+    let cardPath = NSBezierPath(roundedRect: card, xRadius: 14, yRadius: 14)
+    NSGraphicsContext.saveGraphicsState()
+    let shadow = NSShadow()
+    shadow.shadowColor = color(0x1D1D1F, 0.10)
+    shadow.shadowBlurRadius = 12
+    shadow.shadowOffset = NSSize(width: 0, height: -3)
+    shadow.set()
+    color(0xFFFFFF).setFill()
+    cardPath.fill()
+    NSGraphicsContext.restoreGraphicsState()
+    color(0x4532D4, 0.14).setStroke()
+    cardPath.lineWidth = 1
+    cardPath.stroke()
+
+    // A shield badge on the left.
+    let badge = NSRect(x: card.minX + 20, y: card.midY - 22, width: 44, height: 44)
+    color(0x5B5BEA, 0.12).setFill()
+    NSBezierPath(roundedRect: badge, xRadius: 11, yRadius: 11).fill()
+    let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 21, weight: .semibold)
+        .applying(NSImage.SymbolConfiguration(paletteColors: [color(0x4F46E5)]))
+    if let symbol = NSImage(systemSymbolName: "lock.shield.fill", accessibilityDescription: nil)?
+        .withSymbolConfiguration(symbolConfiguration) {
+        let symbolSize = symbol.size
+        symbol.draw(in: NSRect(
+            x: badge.midX - symbolSize.width / 2, y: badge.midY - symbolSize.height / 2,
+            width: symbolSize.width, height: symbolSize.height
+        ))
+    }
+
+    // Title and steps, with the things to click in bold.
+    let textX = badge.maxX + 16
+    let textWidth = card.maxX - 22 - textX
+    let paragraph = NSMutableParagraphStyle()
+    paragraph.lineSpacing = 2
+    let regular: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 13, weight: .regular),
+        .foregroundColor: color(0x3A3A3C),
+        .paragraphStyle: paragraph,
+    ]
+    var bold = regular
+    bold[.font] = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    bold[.foregroundColor] = color(0x1D1D1F)
+
+    let text = NSMutableAttributedString(
+        string: "Opening Side Tabs for the first time?\n",
+        attributes: [
+            .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
+            .foregroundColor: color(0x1D1D1F),
+            .paragraphStyle: { () -> NSParagraphStyle in
+                let style = NSMutableParagraphStyle()
+                style.paragraphSpacing = 5
+                return style
+            }(),
+        ]
+    )
+    for (part, isBold) in [
+        ("If macOS says it can't be opened, click ", false), ("Done", true),
+        // No-break spaces keep the path on one line.
+        (". Then go to ", false), ("System\u{A0}Settings\u{A0}→\u{A0}Privacy\u{A0}&\u{A0}Security", true),
+        (", scroll down, and click ", false), ("Open Anyway", true),
+        (". You only do this once.", false),
+    ] {
+        text.append(NSAttributedString(string: part, attributes: isBold ? bold : regular))
+    }
+    let textHeight = text.boundingRect(
+        with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
+        options: [.usesLineFragmentOrigin, .usesFontLeading]
+    ).height
+    text.draw(
+        with: NSRect(x: textX, y: card.midY - textHeight / 2, width: textWidth, height: textHeight),
+        options: [.usesLineFragmentOrigin, .usesFontLeading]
+    )
 }
 
 guard CommandLine.arguments.count == 2 else {

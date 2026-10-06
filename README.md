@@ -16,8 +16,8 @@ favorite sites pinned at the top.
 3. **Open Side Tabs** from Applications. It walks you through the rest of setup.
 
 The first time you open it, macOS may say it can't verify Side Tabs. Click **Done**, then
-go to **System Settings → Privacy & Security** and click **Open Anyway**. You only do this
-once. It's needed because Side Tabs is free and isn't distributed through Apple, so Apple
+go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway**. You
+only do this once. It's needed because Side Tabs is free and isn't distributed through Apple, so Apple
 hasn't checked it; all of its code is on this page.
 
 ### Updating
@@ -65,12 +65,12 @@ Trash. That removes the Safari extension too. Your saved bookmarks and tab names
   bar icon.
 
 Settings (menu bar icon → Settings…) cover the sidebar width, when close buttons show,
-whether bookmarks show, and opening Side Tabs at login.
+whether bookmarks show, and opening Side Tabs at login (on by default).
 
 ## Troubleshooting
 
-- **macOS won't open Side Tabs.** Do step 4 of the install: System Settings → Privacy &
-  Security → **Open Anyway**. If macOS says the app *is damaged*, open Terminal, paste the
+- **macOS won't open Side Tabs.** Go to System Settings → Privacy & Security, scroll
+  down, and click **Open Anyway** (see Install). If macOS says the app *is damaged*, open Terminal, paste the
   command below, and press Return:
   ```bash
   xattr -dr com.apple.quarantine "/Applications/Side Tabs.app"
@@ -141,7 +141,7 @@ bundles, and codesign rejects bundles that have it.
    and paste in the install steps above.
 
 Releases are signed with a free development certificate. They aren't notarized by Apple,
-so people have to click **Open Anyway** the first time (install step 4). An
+so people have to click **Open Anyway** the first time (see Install). An
 [Apple Developer Program](https://developer.apple.com/programs/) membership would allow
 signing with Developer ID and notarizing, which removes that step. Development
 certificates last a year, so package a new release with a fresh certificate before the

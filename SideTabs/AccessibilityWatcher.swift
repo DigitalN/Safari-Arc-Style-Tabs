@@ -31,6 +31,8 @@ enum AccessibilityAccess {
 /// and relaunch once access is granted.
 final class AccessibilityWatcher {
     static let checkArgument = "--check-accessibility"
+    /// Passed to the relaunched copy so it brings setup back to show the next step.
+    static let resumeSetupArgument = "--resume-setup"
 
     var onGranted: (() -> Void)?
 
@@ -109,11 +111,11 @@ final class AccessibilityWatcher {
         onGranted?()
     }
 
-    /// Starts a new copy of the app once this one has quit.
+    /// Starts a new copy of the app once this one has quit, picking up setup where it left off.
     static func relaunch() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 1; /usr/bin/open \"$1\"", "sh", Bundle.main.bundlePath]
+        process.arguments = ["-c", "sleep 1; /usr/bin/open \"$1\" --args \"$2\"", "sh", Bundle.main.bundlePath, resumeSetupArgument]
         try? process.run()
         NSApp.terminate(nil)
     }
