@@ -68,6 +68,10 @@ final class DockController {
                 self.tracker.attachIfNeeded()
                 if !wasAttached && self.tracker.isAttached || self.mode == .hidden {
                     self.update(makeRoom: true)
+                } else if let window = self.tracker.window, !self.tracker.isOnActiveSpace(window) {
+                    // macOS doesn't announce every change of Space, so make sure the sidebar
+                    // isn't left showing over another one.
+                    self.update(makeRoom: false)
                 }
             }
         }

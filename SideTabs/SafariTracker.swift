@@ -7,6 +7,17 @@ import os.log
 @_silgen_name("_AXUIElementGetWindow")
 private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
 
+/// Private but long-stable window server calls (also used by most window managers) that
+/// say which Spaces a window is on and which Space each display is showing.
+@_silgen_name("CGSMainConnectionID")
+private func CGSMainConnectionID() -> Int32
+
+@_silgen_name("CGSCopySpacesForWindows")
+private func CGSCopySpacesForWindows(_ connection: Int32, _ mask: Int32, _ windowIDs: CFArray) -> Unmanaged<CFArray>?
+
+@_silgen_name("CGSCopyManagedDisplaySpaces")
+private func CGSCopyManagedDisplaySpaces(_ connection: Int32) -> Unmanaged<CFArray>?
+
 /// Watches Safari through the Accessibility API: which browser window is in front, where
 /// it is, and whether it's full screen, minimized or hidden.
 final class SafariTracker {
@@ -305,10 +316,23 @@ final class SafariTracker {
         return bottom
     }
 
-    /// Whether the window is on the Space being shown. Full-screen windows have their own
+    /// Whether the window is on a Space being shown. Full-screen windows have their own
     /// Space, and so do full-screen videos, which Safari shows in a separate window.
+    ///
+    /// Compares Spaces rather than asking whether the window is on screen: while a swipe
+    /// between Spaces is in progress, windows on both Spaces count as on screen, even if
+    /// the swipe is then taken back.
     func isOnActiveSpace(_ window: AXUIElement) -> Bool {
         guard let number = windowNumber(of: window) else { return true }
+        let connection = CGSMainConnectionID()
+        let allSpaces: Int32 = 0x7 // current, other and user Spaces
+        let windowSpaces = CGSCopySpacesForWindows(connection, allSpaces, [number] as CFArray)?
+            .takeRetainedValue() as? [Int] ?? []
+        let displays = CGSCopyManagedDisplaySpaces(connection)?.takeRetainedValue() as? [[String: Any]] ?? []
+        let shownSpaces = displays.compactMap { ($0["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? Int }
+        if !windowSpaces.isEmpty && !shownSpaces.isEmpty {
+            return windowSpaces.contains(where: shownSpaces.contains)
+        }
         let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(number)) as? [[String: Any]]
         return info?.first?[kCGWindowIsOnscreen as String] as? Bool ?? false
     }
