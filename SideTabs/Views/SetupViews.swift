@@ -5,6 +5,13 @@ import SwiftUI
 enum Permissions {
     static var accessibilityGranted: Bool { AccessibilityAccess.isGranted }
 
+    /// macOS 27 renamed the Accessibility list in Privacy & Security.
+    static var accessibilityPaneName: String {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27
+            ? "Device Control and Data Access"
+            : "Accessibility"
+    }
+
     static func requestAccessibility() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
@@ -54,7 +61,7 @@ struct WelcomeView: View {
             SetupStep(
                 number: 1,
                 title: "Allow Accessibility access",
-                detail: "Lets Side Tabs keep the sidebar attached to your Safari window and make room for it. In System Settings → Privacy & Security → Device Control and Data Access, turn on Side Tabs. If it's already on but the sidebar doesn't appear, select Side Tabs, click −, then + to add it again.",
+                detail: "Lets Side Tabs keep the sidebar attached to your Safari window and make room for it. In System Settings → Privacy & Security → \(Permissions.accessibilityPaneName), turn on Side Tabs. If it's already on but the sidebar doesn't appear, select Side Tabs, click −, then + to add it again.",
                 done: accessibility
             ) {
                 Button("Grant Access…") { Permissions.requestAccessibility() }
@@ -234,6 +241,9 @@ struct MenuContent: View {
         Button("Set Up…") { app.showWelcome() }
         Button("Settings…") { app.showSettings() }
             .keyboardShortcut(",")
+        Divider()
+        Text("Side Tabs \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
+        Button("Check for Updates…") { NSWorkspace.shared.open(AppLocation.releasesURL) }
         Divider()
         Button("Quit Side Tabs") { NSApp.terminate(nil) }
             .keyboardShortcut("q")

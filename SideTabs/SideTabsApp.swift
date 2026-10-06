@@ -37,10 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var presentingOwnWindow = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
-            .filter { $0 != NSRunningApplication.current }
-        if !others.isEmpty {
-            NSApp.terminate(nil)
+        replaceOlderCopies()
+        if !AppLocation.isInApplicationsFolder, AppLocation.offerToMove() {
             return
         }
 
@@ -72,6 +70,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !settings.hasCompletedSetup || !Permissions.accessibilityGranted {
             showWelcome()
         }
+    }
+
+    /// The most recently opened copy wins, so opening a freshly downloaded update takes
+    /// over from the old one still running (and from a copy opened off the disk image).
+    /// The old copy has to be gone first: it holds the extension's message port.
+    private func replaceOlderCopies() {
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .filter { $0 != NSRunningApplication.current }
+        guard !others.isEmpty else { return }
+        others.forEach { $0.terminate() }
+        let deadline = Date().addingTimeInterval(3)
+        while others.contains(where: { !$0.isTerminated }) && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        others.filter { !$0.isTerminated }.forEach { $0.forceTerminate() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
