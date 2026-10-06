@@ -9,32 +9,16 @@ favorite sites pinned at the top.
 
 ## Install
 
-It takes about five minutes, and you don't need to be technical.
-
 1. **Download** `Side-Tabs-….dmg` from the
    [latest release](https://github.com/DigitalN/Safari-Arc-Style-Tabs/releases/latest)
-   and double-click it to open it.
-2. **Drag Side Tabs onto the Applications folder** in the window that opens.
-3. **Open Side Tabs** from your Applications folder. macOS will say it can't verify the
-   app. Click **Done**.
-   > This happens because Side Tabs is free and isn't distributed through Apple, so
-   > Apple hasn't checked it. All of its code is on this page. You only approve it once.
-4. **Approve it:** open **System Settings → Privacy & Security**, scroll down to
-   **Security**, find *"Side Tabs" was blocked…*, and click **Open Anyway**. Enter your
-   password, then click **Open Anyway** again.
-5. **Follow the setup window** that appears. It has three steps and shows a green check
-   as each one is done:
-   1. **Allow Accessibility access**, so the sidebar can stay attached to Safari's window.
-      This is under Privacy & Security → *Device Control and Data Access* on macOS 27, or
-      *Accessibility* on macOS 26.
-   2. **Turn on the extension** in Safari → Settings → Extensions by checking
-      **Side Tabs**.
-   3. **Allow it on every website:** in the same place, click **Edit Websites…** and set
-      *When visiting other websites* to **Allow**. Without this, Safari hides tab names
-      and icons from the sidebar.
+   and open it.
+2. **Drag Side Tabs into Applications**, as the arrow shows.
+3. **Open Side Tabs** from Applications. It walks you through the rest of setup.
 
-That's it: your tabs now appear in a sidebar beside Safari. The setup window also has an
-option to open Side Tabs automatically when you log in.
+The first time you open it, macOS may say it can't verify Side Tabs. Click **Done**, then
+go to **System Settings → Privacy & Security** and click **Open Anyway**. You only do this
+once. It's needed because Side Tabs is free and isn't distributed through Apple, so Apple
+hasn't checked it; all of its code is on this page.
 
 ### Updating
 
@@ -149,8 +133,10 @@ bundles, and codesign rejects bundles that have it.
 
 1. Raise `MARKETING_VERSION` for both targets in `SideTabs.xcodeproj`.
 2. Run `scripts/package.sh`. It builds and signs the app and creates
-   `dist/Side-Tabs-<version>.dmg`, containing the app, a shortcut to Applications and
-   `How to Install.txt`.
+   `dist/Side-Tabs-<version>.dmg`. Opening the image shows Side Tabs and the Applications
+   folder over a background with a drag arrow. The artwork comes from
+   `scripts/make-dmg-background.swift`, and Finder arranges the window, so the first run
+   asks to let Terminal control Finder.
 3. Create a GitHub release (for example `gh release create v1.0 dist/Side-Tabs-1.0.dmg`)
    and paste in the install steps above.
 
@@ -195,7 +181,8 @@ separate window that the app keeps attached to Safari's window:
   - `Views/` is the SwiftUI sidebar, setup window and settings. `SidebarDrag` handles
     reordering with its own drag gesture rather than system drag and drop.
 - `scripts/`: `install.sh` builds and installs, `package.sh` makes the release disk
-  image, `build.sh` is shared by both, and `make-icons.swift` regenerates the icons.
+  image (with artwork from `make-dmg-background.swift`), `build.sh` is shared by both,
+  and `make-icons.swift` regenerates the icons.
 
 Bookmarks and tab names are stored in `~/Library/Application Support/Side Tabs/state.json`.
 

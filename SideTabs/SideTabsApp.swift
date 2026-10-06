@@ -117,10 +117,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func showWelcome() {
         if welcomeWindow == nil {
-            let view = WelcomeView(onDone: { [weak self] in
-                self?.settings.hasCompletedSetup = true
-                self?.welcomeWindow?.close()
-            })
+            let view = WelcomeView(
+                onFinish: { [weak self] in
+                    self?.settings.hasCompletedSetup = true
+                    self?.welcomeWindow?.close()
+                    self?.dock?.bringSafariForward()
+                },
+                onLater: { [weak self] in
+                    self?.welcomeWindow?.close()
+                },
+                onStepCompleted: { [weak self] in
+                    // The step was finished in System Settings or Safari; show what's next.
+                    guard let window = self?.welcomeWindow, window.isVisible else { return }
+                    window.orderFrontRegardless()
+                    self?.present(window)
+                }
+            )
             .environment(store)
             .environment(settings)
             welcomeWindow = makeWindow(title: "Set Up Side Tabs", content: view)
