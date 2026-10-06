@@ -4,6 +4,8 @@ Arc-style vertical tabs for Safari on the Mac. A sidebar sits against the left e
 your Safari window and lists that window's tabs, each with its icon and title, with your
 favorite sites pinned at the top.
 
+![Side Tabs next to a Safari window](docs/screenshot.png)
+
 **[⬇︎ Download the latest version](https://github.com/DigitalN/Safari-Arc-Style-Tabs/releases/latest)**
 (free, for macOS 26 or later)
 
