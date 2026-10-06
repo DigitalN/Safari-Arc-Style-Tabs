@@ -28,10 +28,8 @@ for a few seconds, and the sidebar disappears for a moment while it restarts. Th
 again. **Check for Updates…** in the menu bar icon updates right away, and
 Settings → *Update automatically* turns this off.
 
-Version 1.0 can't update itself: download the latest `.dmg` from the
-[releases page](https://github.com/DigitalN/Safari-Arc-Style-Tabs/releases) once and drag
-Side Tabs into Applications, replacing the old copy. If the sidebar doesn't come back after
-updating, see *The sidebar doesn't appear* under Troubleshooting.
+If the sidebar doesn't come back after an update, see *The sidebar doesn't appear* under
+Troubleshooting.
 
 ### Uninstall
 
