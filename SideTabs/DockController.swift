@@ -60,7 +60,8 @@ final class DockController {
         observeSettings()
         update(makeRoom: true)
 
-        // Picks up Accessibility access being granted, Safari windows appearing, etc.
+        // Picks up Accessibility access being granted, Safari windows appearing, etc., and
+        // puts the sidebar right after changes macOS didn't announce.
         healthTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -68,10 +69,9 @@ final class DockController {
                 self.tracker.attachIfNeeded()
                 if !wasAttached && self.tracker.isAttached || self.mode == .hidden {
                     self.update(makeRoom: true)
-                } else if let window = self.tracker.window, !self.tracker.isOnActiveSpace(window) {
-                    // macOS doesn't announce every change of Space, so make sure the sidebar
-                    // isn't left showing over another one.
-                    self.update(makeRoom: false)
+                } else if let problem = self.placementProblem() {
+                    self.log.notice("fixing: \(problem, privacy: .public)")
+                    self.update(makeRoom: NSEvent.pressedMouseButtons == 0)
                 }
             }
         }
@@ -162,14 +162,7 @@ final class DockController {
         }
         stopOverlay()
 
-        // The panel reaches under Safari's window by `cornerFill` to fill its corner notches.
-        let frame = axFrame.flippedScreenCoordinates
-        let target = NSRect(
-            x: frame.minX - settings.width,
-            y: frame.minY,
-            width: settings.width + SidebarPanel.cornerFill,
-            height: frame.height
-        ).integral
+        let target = dockedFrame(beside: axFrame)
         panel.style.attached = true
         if panel.frame != target {
             panel.setFrame(target, display: true)
@@ -186,9 +179,54 @@ final class DockController {
         }
     }
 
+    /// The panel's frame beside a Safari window at `axFrame`. It reaches under Safari's
+    /// window by `cornerFill` to fill its corner notches.
+    private func dockedFrame(beside axFrame: CGRect) -> NSRect {
+        let frame = axFrame.flippedScreenCoordinates
+        return NSRect(
+            x: frame.minX - settings.width,
+            y: frame.minY,
+            width: settings.width + SidebarPanel.cornerFill,
+            height: frame.height
+        ).integral
+    }
+
+    /// Why the sidebar isn't where `update` would put it, if it isn't. macOS doesn't announce
+    /// every change: a swipe toward another Space that's taken back never changes Spaces, and
+    /// leaving full screen can finish after the last event about it.
+    private func placementProblem() -> String? {
+        guard mode != .hidden else { return nil }
+        guard settings.sidebarVisible, tracker.app?.isHidden == false,
+              let window = tracker.window, let frame = tracker.frame(of: window) else {
+            return "Safari or its window is gone or hidden"
+        }
+        if !tracker.isOnActiveSpace(window) {
+            return "Safari's window is on another Space"
+        }
+        let fullScreen = tracker.isFullScreen(window)
+        if mode == .overlay {
+            return fullScreen ? nil : "Safari left full screen"
+        }
+        if fullScreen {
+            return "Safari is full screen"
+        }
+        if !panel.isVisible || panel.alphaValue < 1 || !tracker.isOnActiveSpace(windowNumber: panel.windowNumber) {
+            return "sidebar isn't showing"
+        }
+        if panel.frame != dockedFrame(beside: frame) {
+            return "sidebar isn't beside Safari"
+        }
+        return nil
+    }
+
     /// Keeps the panel directly behind Safari's window: in front of everything Safari is in
     /// front of, and with its corner fill hidden under Safari.
     private func orderPanel(below window: AXUIElement) {
+        // Left on another Space (such as the one Safari just left full screen from), the panel
+        // has to be ordered out and back in to move to the Space being shown.
+        if panel.isVisible && !tracker.isOnActiveSpace(windowNumber: panel.windowNumber) {
+            panel.orderOut(nil)
+        }
         if let number = tracker.windowNumber(of: window) {
             panel.order(.below, relativeTo: number)
         }
@@ -391,7 +429,11 @@ final class DockController {
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, !self.overlayRevealed else { return }
-                self.panel.orderOut(nil)
+                // Safari may have left full screen while the sidebar faded out. If the
+                // sidebar is docked beside it now, leave it showing.
+                if self.mode == .overlay {
+                    self.panel.orderOut(nil)
+                }
                 self.panel.alphaValue = 1
             }
         })
