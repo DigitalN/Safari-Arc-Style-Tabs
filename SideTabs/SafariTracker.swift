@@ -324,6 +324,11 @@ final class SafariTracker {
     /// the swipe is then taken back.
     func isOnActiveSpace(_ window: AXUIElement) -> Bool {
         guard let number = windowNumber(of: window) else { return true }
+        return isOnActiveSpace(windowNumber: number)
+    }
+
+    /// The same check for any window, such as the sidebar's own.
+    func isOnActiveSpace(windowNumber number: Int) -> Bool {
         let connection = CGSMainConnectionID()
         let allSpaces: Int32 = 0x7 // current, other and user Spaces
         let windowSpaces = CGSCopySpacesForWindows(connection, allSpaces, [number] as CFArray)?
