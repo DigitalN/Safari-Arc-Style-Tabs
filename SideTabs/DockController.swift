@@ -216,7 +216,22 @@ final class DockController {
         if panel.frame != dockedFrame(beside: frame) {
             return "sidebar isn't beside Safari"
         }
+        if let number = tracker.windowNumber(of: window) {
+            let behind = normalWindows(.optionOnScreenBelowWindow, relativeTo: number).first
+            if let behind, behind[kCGWindowNumber as String] as? Int != panel.windowNumber {
+                let inFront = normalWindows(.optionOnScreenAboveWindow, relativeTo: number)
+                    .contains { $0[kCGWindowNumber as String] as? Int == panel.windowNumber }
+                let owner = behind[kCGWindowOwnerName as String] as? String ?? "another window"
+                return inFront ? "sidebar is in front of Safari's window" : "\(owner) is between Safari's window and the sidebar"
+            }
+        }
         return nil
+    }
+
+    /// On-screen windows at the normal level above or below the given one, front to back.
+    private func normalWindows(_ option: CGWindowListOption, relativeTo number: Int) -> [[String: Any]] {
+        let windows = CGWindowListCopyWindowInfo([option], CGWindowID(number)) as? [[String: Any]] ?? []
+        return windows.filter { $0[kCGWindowLayer as String] as? Int == 0 }
     }
 
     /// Keeps the panel directly behind Safari's window: in front of everything Safari is in
@@ -461,6 +476,12 @@ final class DockController {
             tracker.raiseDockedWindowIfNeeded()
         } else {
             tracker.focusSafari()
+        }
+        // The click itself brings the sidebar in front of Safari; once it's handled, put the
+        // sidebar back behind.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.mode == .docked, let window = self.tracker.window else { return }
+            self.orderPanel(below: window)
         }
     }
 }
