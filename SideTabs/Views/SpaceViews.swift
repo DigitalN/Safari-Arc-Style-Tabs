@@ -1,0 +1,152 @@
+import SwiftUI
+
+func spaceColor(_ theme: String) -> Color {
+    switch theme {
+    case "purple": .purple
+    case "pink": .pink
+    case "orange": .orange
+    case "green": .green
+    case "gray": .gray
+    default: .blue
+    }
+}
+
+struct FavoritesSection: View {
+    @Environment(TabStore.self) private var store
+    var body: some View {
+        VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
+            SectionHeader(title: "Favorites") { EmptyView() }
+            ForEach(store.favorites) { bookmark in
+                BookmarkRow(bookmark: bookmark, draggable: false)
+            }
+        }
+    }
+}
+
+struct SpaceHeader: View {
+    @Environment(TabStore.self) private var store
+    @State private var editing: BrowserSpace?
+    @State private var confirmingDelete = false
+
+    var body: some View {
+        HStack {
+            Label(store.selectedSpace.name, systemImage: store.selectedSpace.icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(spaceColor(store.selectedSpace.theme))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Menu {
+                Button("Edit Space…") { editing = store.selectedSpace }
+                Button("Move Space Left") { store.reorderSelectedSpace(direction: -1) }
+                Button("Move Space Right") { store.reorderSelectedSpace(direction: 1) }
+                Divider()
+                Button("Delete Space…") { confirmingDelete = true }
+                    .disabled(store.spaces.count < 2)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 24, height: 24)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Space Options")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .popover(item: $editing) { space in
+            SpaceEditor(space: space) { edited in
+                store.updateSpace(edited)
+                editing = nil
+            } onCancel: { editing = nil }
+        }
+        .confirmationDialog("Delete \(store.selectedSpace.name)?", isPresented: $confirmingDelete) {
+            Button("Move Items to \(store.spaces.first { $0.id != store.selectedSpace.id }?.name ?? "Another Space") and Delete Space") {
+                store.deleteSpace(store.selectedSpace.id)
+            }
+        } message: {
+            Text("Tabs and pinned sites will move to the first remaining space. Safari tabs stay open.")
+        }
+    }
+}
+
+struct SpaceSwitcher: View {
+    @Environment(TabStore.self) private var store
+    @State private var editing: BrowserSpace?
+    var body: some View {
+        VStack(spacing: 6) {
+            Divider()
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 28, maximum: 36))], spacing: 4) {
+                ForEach(store.spaces) { space in
+                    Button { store.selectSpace(space.id) } label: {
+                        Image(systemName: space.icon)
+                            .font(.system(size: 14))
+                            .frame(width: 28, height: 28)
+                            .foregroundStyle(spaceColor(space.theme))
+                            .background(RoundedRectangle(cornerRadius: 7).fill(spaceColor(space.theme).opacity(space.id == store.selectedSpace.id ? 0.22 : 0)))
+                    }
+                    .buttonStyle(.plain)
+                    .help(space.name)
+                    .accessibilityLabel(space.name)
+                    .accessibilityAddTraits(space.id == store.selectedSpace.id ? .isSelected : [])
+                }
+                Button { editing = store.createSpace() } label: {
+                    Image(systemName: "plus").frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("New Space")
+                .accessibilityLabel("New Space")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
+        .popover(item: $editing) { space in
+            SpaceEditor(space: space) { edited in
+                store.updateSpace(edited)
+                editing = nil
+            } onCancel: { editing = nil }
+        }
+    }
+}
+
+private struct SpaceEditor: View {
+    @Environment(TabStore.self) private var store
+    @State var space: BrowserSpace
+    let onSave: (BrowserSpace) -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Edit Space").font(.headline)
+            TextField("Space Name", text: $space.name)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { if !space.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { onSave(space) } }
+            Picker("Icon", selection: $space.icon) {
+                ForEach(BrowserSpace.icons, id: \.self) { icon in
+                    Label(icon.replacingOccurrences(of: ".fill", with: ""), systemImage: icon).tag(icon)
+                }
+            }
+            Picker("Theme", selection: $space.theme) {
+                ForEach(BrowserSpace.themes, id: \.self) { theme in
+                    Text(theme.capitalized).tag(theme)
+                }
+            }
+            HStack {
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Save") { onSave(space) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(space.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(width: 250)
+        .onAppear {
+            store.isEditingSpace = true
+            store.onRenameStateChanged?(true)
+        }
+        .onDisappear {
+            store.isEditingSpace = false
+            store.onRenameStateChanged?(false)
+        }
+    }
+}

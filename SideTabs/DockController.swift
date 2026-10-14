@@ -472,6 +472,8 @@ final class DockController {
 
     /// Clicking the sidebar while another app is in front should bring Safari forward.
     func bringSafariForward() {
+        // A space editor or inline rename needs to keep keyboard focus in Side Tabs.
+        guard !isEditing else { return }
         if tracker.isSafariFrontmost {
             tracker.raiseDockedWindowIfNeeded()
         } else {

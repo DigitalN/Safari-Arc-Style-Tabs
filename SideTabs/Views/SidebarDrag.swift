@@ -18,13 +18,14 @@ final class SidebarDrag {
     enum Item: Equatable {
         case tab(BrowserTab, instance: String)
         case bookmark(Bookmark)
+        case folder(PinnedFolder)
     }
 
     /// Where the item would land: a slot index in one of the lists, or nowhere.
     enum Target: Equatable {
         case none
         case tabs(Int)
-        case bookmarks(Int)
+        case pinned(folderID: UUID?, index: Int?)
     }
 
     private(set) var item: Item?
@@ -34,7 +35,7 @@ final class SidebarDrag {
     @ObservationIgnored private var grabOffset: CGFloat = 0
 
     // Layout reported by the sections, in sidebar coordinates.
-    @ObservationIgnored var bookmarkRowsTop: CGFloat = 0
+    @ObservationIgnored var pinnedFrames: [PinnedItem: CGRect] = [:]
     @ObservationIgnored var bookmarksSectionTop: CGFloat = 0
     @ObservationIgnored var tabRowsTop: CGFloat = 0
     @ObservationIgnored var tabsSectionTop: CGFloat = .greatestFiniteMagnitude
@@ -50,7 +51,7 @@ final class SidebarDrag {
     }
 
     func isSlot(bookmark: Bookmark) -> Bool {
-        if case .bookmark(let dragged)? = item, dragged.id == bookmark.id, case .bookmarks = target {
+        if case .bookmark(let dragged)? = item, dragged.id == bookmark.id, case .pinned = target {
             return true
         }
         return false
@@ -61,8 +62,7 @@ final class SidebarDrag {
         _ item: Item,
         rowTop: CGFloat,
         value: DragGesture.Value,
-        bookmarkCount: Int,
-        tabCount: Int,
+        store: TabStore,
         bookmarksVisible: Bool
     ) {
         if self.item == nil {
@@ -70,19 +70,13 @@ final class SidebarDrag {
             grabOffset = value.startLocation.y - rowTop
         }
         ghostTop = value.location.y - grabOffset
-
         let overBookmarks = bookmarksVisible && value.location.y < tabsSectionTop
         let newTarget: Target
-        switch (item, overBookmarks) {
-        case (.bookmark, true):
-            newTarget = .bookmarks(slot(rowsTop: bookmarkRowsTop, others: bookmarkCount - 1))
-        case (.tab, true):
-            newTarget = .bookmarks(slot(rowsTop: bookmarkRowsTop, others: bookmarkCount))
-        case (.tab, false):
-            newTarget = .tabs(slot(rowsTop: tabRowsTop, others: tabCount - 1))
-        case (.bookmark, false):
-            newTarget = .none
-        }
+        if overBookmarks {
+            newTarget = pinnedTarget(at: value.location.y, item: item, store: store)
+        } else if case .tab = item {
+            newTarget = .tabs(slot(rowsTop: tabRowsTop, others: (store.currentWindow.map { store.tabs(in: $0).count } ?? 0) - 1))
+        } else { newTarget = .none }
         if newTarget != target {
             withAnimation(.snappy(duration: 0.18)) {
                 target = newTarget
@@ -102,12 +96,14 @@ final class SidebarDrag {
         let target = self.target
         withAnimation(.snappy(duration: 0.18)) {
             switch (item, target) {
-            case (.bookmark(let bookmark), .bookmarks(let index)):
-                store.moveBookmark(bookmark.id, to: index)
+            case (.bookmark(let bookmark), .pinned(let folder, let index)):
+                store.movePinnedItem(.bookmark(bookmark.id), to: folder, at: index)
+            case (.folder(let folder), .pinned(let parent, let index)):
+                store.movePinnedItem(.folder(folder.id), to: parent, at: index)
             case (.tab(let tab, let instance), .tabs(let index)):
                 store.moveTab(tab, instance: instance, to: index)
-            case (.tab(let tab, let instance), .bookmarks(let index)):
-                store.addBookmark(from: tab, instance: instance, at: index)
+            case (.tab(let tab, let instance), .pinned(let folder, let index)):
+                store.addBookmark(from: tab, instance: instance, at: index, folderID: folder)
             default:
                 break
             }
@@ -116,12 +112,43 @@ final class SidebarDrag {
         }
     }
 
-    /// Bookmark slot for a link dropped from outside the sidebar at `y` (section coordinates).
-    func bookmarkIndex(forDropAt y: CGFloat, count: Int) -> Int {
-        let rowsOffset = bookmarkRowsTop - bookmarksSectionTop
-        let position = ((y - rowsOffset) / Self.pitch).rounded(.down)
-        return min(max(Int(position), 0), count)
+    func cancel() { item = nil; target = .none }
+
+    func isSlot(folder: PinnedFolder) -> Bool {
+        if case .folder(let dragged)? = item { return dragged.id == folder.id }
+        return false
     }
+
+    private func node(for item: Item) -> PinnedItem? {
+        switch item {
+        case .folder(let folder): .folder(folder.id)
+        case .bookmark(let bookmark): .bookmark(bookmark.id)
+        case .tab: nil
+        }
+    }
+
+    private func pinnedTarget(at y: CGFloat, item: Item, store: TabStore) -> Target {
+        let entries = store.visiblePinnedEntries
+        guard let entry = entries.first(where: { pinnedFrames[$0.item]?.contains(CGPoint(x: pinnedFrames[$0.item]!.midX, y: y)) == true }),
+              let frame = pinnedFrames[entry.item] else { return .pinned(folderID: nil, index: nil) }
+        if case .folder(let id) = entry.item, y > frame.minY + 7, y < frame.maxY - 7 {
+            guard node(for: item).map({ store.canMovePinnedItem($0, into: id) }) ?? true else { return .none }
+            return .pinned(folderID: id, index: nil)
+        }
+        let parent = store.parentFolder(of: entry.item)
+        guard node(for: item).map({ store.canMovePinnedItem($0, into: parent) }) ?? true else { return .none }
+        let peers = store.pinnedChildren(of: parent)
+        let before = Array(peers.prefix(while: { $0 != entry.item })).filter { $0 != node(for: item) }.count
+        let extra = y > frame.midY && entry.item != node(for: item) ? 1 : 0
+        return .pinned(folderID: parent, index: before + extra)
+    }
+
+    func isInsertionBefore(_ node: PinnedItem, store: TabStore) -> Bool {
+        guard case .pinned(let folder, let index?) = target else { return false }
+        let peers = store.pinnedChildren(of: folder).filter { $0 != item.flatMap(self.node) }
+        return peers.indices.contains(index) && peers[index] == node
+    }
+
 }
 
 /// The open slot where a dragged row will land.
@@ -146,6 +173,9 @@ struct DragGhost: View {
                 FaviconView(iconURL: tab.favIconUrl, pageURL: tab.url)
                 Text(store.displayTitle(for: tab, instance: instance))
                     .lineLimit(1)
+            case .folder(let folder):
+                Image(systemName: "folder.fill").frame(width: 16)
+                Text(folder.name).lineLimit(1)
             case .bookmark(let bookmark):
                 FaviconView(iconURL: bookmark.faviconURL, pageURL: bookmark.url)
                 Text(bookmark.title)
@@ -183,8 +213,7 @@ extension View {
                         item,
                         rowTop: rowTop,
                         value: value,
-                        bookmarkCount: store.bookmarks.count,
-                        tabCount: store.currentWindow?.window.tabs.count ?? 0,
+                        store: store,
                         bookmarksVisible: settings.showBookmarks
                     )
                 }

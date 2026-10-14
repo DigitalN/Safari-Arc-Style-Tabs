@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .environment(store)
             .environment(settings)
             .environment(favicons))
+        panel.onSpaceSwipe = { [store] direction in store.switchSpace(direction: direction) }
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
         self.dock = dock
 
@@ -77,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         updater.isBusy = { [weak self] in
             guard let self else { return true }
-            return self.store.renaming != nil || [self.welcomeWindow, self.settingsWindow].contains { $0?.isVisible == true }
+            return self.store.renaming != nil || self.store.isEditingSpace || [self.welcomeWindow, self.settingsWindow].contains { $0?.isVisible == true }
         }
         updater.willRelaunch = { [weak self] in self?.relaunchingForUpdate = true }
         updater.start()
@@ -129,7 +130,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// itself is picked, e.g. in Mission Control. In that case the user wants Safari.
     func applicationDidBecomeActive(_ notification: Notification) {
         let ownWindowShowing = [welcomeWindow, settingsWindow].contains { $0?.isVisible == true }
-        guard !presentingOwnWindow, !ownWindowShowing, NSApp.modalWindow == nil else { return }
+        guard !presentingOwnWindow, !ownWindowShowing, NSApp.modalWindow == nil,
+              store.renaming == nil, !store.isEditingSpace else { return }
         dock?.bringSafariForward()
     }
 

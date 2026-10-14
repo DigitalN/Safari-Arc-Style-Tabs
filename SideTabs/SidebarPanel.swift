@@ -47,8 +47,25 @@ final class SidebarPanel: NSPanel {
     /// Called on left and middle mouse-down anywhere in the panel, before the click is
     /// handled. Right-clicks are left alone so context menus open without switching apps.
     var onMouseDown: (() -> Void)?
+    var onSpaceSwipe: ((Int) -> Void)?
+    private var spaceSwipe = SpaceSwipe()
 
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .scrollWheel, event.hasPreciseScrollingDeltas,
+           !event.phase.isEmpty || !event.momentumPhase.isEmpty {
+            let visibleWidth = frame.width - (style.attached ? Self.cornerFill : 0)
+            let point = event.locationInWindow
+            if point.x >= 0, point.x < visibleWidth, point.y >= 0, point.y < frame.height {
+                // Normalize to finger movement so left means next with either
+                // setting of macOS Natural Scrolling.
+                let dx = event.isDirectionInvertedFromDevice ? event.scrollingDeltaX : -event.scrollingDeltaX
+                let result = spaceSwipe.update(x: dx, y: event.scrollingDeltaY,
+                    began: event.phase.contains(.began), ended: event.phase.contains(.ended),
+                    cancelled: event.phase.contains(.cancelled), momentum: !event.momentumPhase.isEmpty)
+                if let direction = result.direction { onSpaceSwipe?(direction) }
+                if result.consume { return }
+            } else { spaceSwipe.reset() }
+        }
         if event.type == .leftMouseDown || event.type == .otherMouseDown {
             onMouseDown?()
         }

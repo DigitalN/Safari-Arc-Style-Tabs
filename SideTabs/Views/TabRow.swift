@@ -120,8 +120,29 @@ struct TabRow: View {
             Button("Reset Name") { store.resetName(key) }
         }
         Divider()
-        Button("Add to Bookmarks") { store.addBookmark(from: tab, instance: instance) }
+        Button("Pin in This Space") { store.addBookmark(from: tab, instance: instance) }
             .disabled(tab.url == nil)
+        Menu("Pin in Folder") {
+            FolderDestinations(item: nil) { folderID in
+                store.addBookmark(from: tab, instance: instance, folderID: folderID)
+            }
+        }
+        .disabled(tab.url == nil)
+        Menu("Move to Space") {
+            ForEach(store.spaces) { space in
+                Button { store.moveTabToSpace(tab, instance: instance, spaceID: space.id) } label: {
+                    Label(space.name, systemImage: space.icon)
+                }
+                .disabled(space.id == store.selectedSpace.id)
+            }
+        }
+        Button("Add to Favorites") {
+            store.addBookmark(from: tab, instance: instance)
+            if let bookmark = store.pinnedBookmarks.last {
+                store.moveBookmarkToSpace(bookmark, spaceID: nil)
+            }
+        }
+        .disabled(tab.url == nil)
         Button("Copy Link") { store.copyLink(tab.url) }
             .disabled(tab.url == nil)
         Button("Duplicate Tab") { store.duplicate(tab, instance: instance) }

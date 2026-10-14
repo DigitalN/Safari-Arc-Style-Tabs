@@ -21,8 +21,13 @@ struct SidebarView: View {
                             WebsiteAccessBanner()
                                 .padding(.bottom, 8)
                         }
+                        if settings.showBookmarks && !store.favorites.isEmpty {
+                            FavoritesSection()
+                                .padding(.bottom, 8)
+                        }
+                        SpaceHeader()
                         if settings.showBookmarks {
-                            BookmarksSection()
+                            PinnedSection()
                             Divider()
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 7)
@@ -42,89 +47,15 @@ struct SidebarView: View {
                     .padding(.bottom, 10)
                 }
                 .scrollIndicators(.automatic)
+                SpaceSwitcher()
             } else {
                 EmptySidebar()
             }
         }
+        .background(spaceColor(store.selectedSpace.theme).opacity(0.08))
+        .onChange(of: store.selectedSpace.id) { _, _ in drag.cancel() }
         .environment(drag)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-    }
-}
-
-private struct BookmarksSection: View {
-    @Environment(TabStore.self) private var store
-    @Environment(SidebarDrag.self) private var drag
-
-    private enum Slot: Identifiable {
-        case bookmark(Bookmark)
-        case dropSlot
-
-        var id: String {
-            switch self {
-            case .bookmark(let bookmark): bookmark.id.uuidString
-            case .dropSlot: "drop-slot"
-            }
-        }
-    }
-
-    /// Bookmarks in display order. While a bookmark is dragged over the list it moves to the
-    /// target slot (and draws itself as the slot); a dragged tab gets a separate slot.
-    private var slots: [Slot] {
-        var bookmarks = store.bookmarks
-        switch (drag.item, drag.target) {
-        case (.bookmark(let dragged)?, .bookmarks(let index)):
-            if let from = bookmarks.firstIndex(where: { $0.id == dragged.id }) {
-                let moved = bookmarks.remove(at: from)
-                bookmarks.insert(moved, at: min(index, bookmarks.count))
-            }
-            return bookmarks.map(Slot.bookmark)
-        case (.tab?, .bookmarks(let index)):
-            var slots = bookmarks.map(Slot.bookmark)
-            slots.insert(.dropSlot, at: min(index, slots.count))
-            return slots
-        default:
-            return bookmarks.map(Slot.bookmark)
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-            SectionHeader(title: "Bookmarks") {
-                SidebarIconButton(systemImage: "plus", help: "Bookmark Current Tab") {
-                    store.addBookmarkForCurrentTab()
-                }
-            }
-
-            VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-                ForEach(slots) { slot in
-                    switch slot {
-                    case .bookmark(let bookmark):
-                        BookmarkRow(bookmark: bookmark)
-                    case .dropSlot:
-                        DropSlot()
-                    }
-                }
-            }
-            .onSidebarTop { drag.bookmarkRowsTop = $0 }
-
-            if store.bookmarks.isEmpty && drag.target == .none {
-                Text("Drag a tab here, or click + to bookmark the current page.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .contentShape(Rectangle())
-        .onSidebarTop { drag.bookmarksSectionTop = $0 }
-        // Links dragged in from a web page or Safari's address bar.
-        .onDrop(of: [.url], isTargeted: nil) { providers, location in
-            let index = drag.bookmarkIndex(forDropAt: location.y, count: store.bookmarks.count)
-            return loadDroppedURL(from: providers) { url in
-                store.addBookmark(url: url, at: index)
-            }
-        }
     }
 }
 
@@ -135,7 +66,7 @@ private struct TabsSection: View {
 
     /// Tabs in display order; a tab dragged within the list moves to the target slot.
     private var tabs: [BrowserTab] {
-        var tabs = selection.window.tabs
+        var tabs = store.tabs(in: selection)
         if case .tab(let dragged, _)? = drag.item, case .tabs(let index) = drag.target,
            let from = tabs.firstIndex(where: { $0.id == dragged.id }) {
             let moved = tabs.remove(at: from)
@@ -146,7 +77,7 @@ private struct TabsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-            SectionHeader(title: "Tabs", detail: "\(selection.window.tabs.count)") {
+            SectionHeader(title: "Tabs", detail: "\(store.tabs(in: selection).count)") {
                 SidebarIconButton(systemImage: "plus", help: "New Tab") {
                     store.newTab()
                 }

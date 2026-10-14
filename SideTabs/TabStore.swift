@@ -17,6 +17,21 @@ final class TabStore {
     private(set) var customNames: [TabKey: CustomName] = [:]
     private(set) var bookmarkLinks: [UUID: TabKey] = [:]
 
+    private(set) var folderState = FolderState()
+    private(set) var spaceState = SpaceState()
+    var isEditingSpace = false
+    private struct PendingSpaceCreate {
+        var spaceID: UUID
+        let at: Date
+        let privateWindow: Bool
+        let profile: String?
+    }
+    @ObservationIgnored private var pendingSpaceCreates: [String: PendingSpaceCreate] = [:]
+    @ObservationIgnored private var rememberedTabs: [String: [UUID: Int]] = [:]
+    @ObservationIgnored private var expectedSpaceActivation: TabKey?
+    @ObservationIgnored private var lastObservedWindow: String?
+    @ObservationIgnored private var persistenceURL: URL
+
     var renaming: RenameTarget?
 
     /// Hints from SafariTracker, used to pick the window the sidebar is docked to.
@@ -25,6 +40,10 @@ final class TabStore {
         didSet {
             if dockedWindowTitle != oldValue {
                 requestSnapshotIfUnknown(title: dockedWindowTitle)
+                if let selection = currentWindow, let snapshot = snapshots[selection.instance] {
+                    followSafariSelection(snapshot, previous: snapshot)
+                    scheduleSave()
+                }
             }
         }
     }
@@ -44,7 +63,8 @@ final class TabStore {
     @ObservationIgnored private var pendingActivation: (key: TabKey, at: Date)?
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "store")
 
-    init() {
+    init(stateURL: URL? = nil) {
+        persistenceURL = stateURL ?? Self.stateURL
         load()
     }
 
@@ -69,13 +89,31 @@ final class TabStore {
             let instance = object["instance"] as? String ?? ""
             let seq = object["seq"] as? Int ?? 0
             let applied = snapshots[instance]?.seq ?? -1
-            return ["needSnapshot": applied < seq || seq == 0]
+            // Website permission changes do not always produce a tabs API event.
+            return ["needSnapshot": applied < seq || seq == 0 || lacksWebsiteAccess]
 
         case "toggleSidebar":
             onToggleSidebar?()
             return [:]
 
         case "created":
+            if let requestId = object["requestId"] as? String,
+               let instance = object["instance"] as? String,
+               let tabId = object["tabId"] as? Int,
+               let pending = pendingSpaceCreates.removeValue(forKey: requestId) {
+                let key = TabKey(instance: instance, tabId: tabId)
+                // The created reply can arrive before or after the first snapshot.
+                if spaceState.spaceID(for: key) == nil {
+                    spaceState.memberships.append(.init(key: key, spaceID: pending.spaceID,
+                        url: nil, windowIndex: 0, privateWindow: pending.privateWindow, profile: pending.profile))
+                } else {
+                    spaceState.assign(key, to: pending.spaceID)
+                }
+                if pending.spaceID != selectedSpace.id, let selection = currentWindow {
+                    activateSelectedSpace(in: selection, createIfEmpty: false)
+                }
+                scheduleSave()
+            }
             if let requestId = object["requestId"] as? String,
                let instance = object["instance"] as? String,
                let tabId = object["tabId"] as? Int,
@@ -93,13 +131,19 @@ final class TabStore {
         if let existing = snapshots[snapshot.instance], existing.seq > snapshot.seq {
             return
         }
-        let isNewInstance = snapshots[snapshot.instance] == nil
+        pendingSpaceCreates = pendingSpaceCreates.filter { Date().timeIntervalSince($0.value.at) < 60 }
+        let previous = snapshots[snapshot.instance]
+        let isNewInstance = previous == nil
         snapshots[snapshot.instance] = snapshot
         let tabCounts = snapshot.windows.map { String($0.tabs.count) }.joined(separator: "+")
         log.info("snapshot \(snapshot.seq) from \(snapshot.instance.prefix(8), privacy: .public): \(snapshot.windows.count) windows, tabs \(tabCounts, privacy: .public), focused \(snapshot.focusedWindowId ?? -1)")
         if isNewInstance {
             orphanNamesOfDeadInstances()
         }
+        let priorSpaces = spaceState
+        spaceState.reconcile(snapshot, liveInstances: Set(snapshots.keys))
+        followSafariSelection(snapshot, previous: previous)
+        if priorSpaces != spaceState { scheduleSave() }
         reconcileNames(with: snapshot)
         pruneBookmarkLinks()
 
@@ -118,6 +162,11 @@ final class TabStore {
         bookmarkLinks.removeAll()
         pendingBookmarkOpens.removeAll()
         renaming = nil
+        rememberedTabs.removeAll()
+        expectedSpaceActivation = nil
+        lastObservedWindow = nil
+        pendingSpaceCreates.removeAll()
+        scheduleSave()
     }
 
     func requestSnapshot() {
@@ -242,6 +291,10 @@ final class TabStore {
             } else {
                 customNames[key] = CustomName(name: name, url: tab?.url)
             }
+        case .folder(let id):
+            if !name.isEmpty, let index = folderState.folders.firstIndex(where: { $0.id == id }) {
+                folderState.folders[index].name = name
+            }
         case .bookmark(let id):
             if !name.isEmpty, let index = bookmarks.firstIndex(where: { $0.id == id }) {
                 bookmarks[index].title = name
@@ -326,7 +379,13 @@ final class TabStore {
     }
 
     func activate(_ tab: BrowserTab, instance: String) {
-        pendingActivation = (TabKey(instance: instance, tabId: tab.id), Date())
+        let key = TabKey(instance: instance, tabId: tab.id)
+        if let id = spaceState.spaceID(for: key) {
+            spaceState.selectedID = id
+            rememberedTabs[windowKey(instance: instance, windowID: tab.windowId), default: [:]][id] = tab.id
+            scheduleSave()
+        }
+        pendingActivation = (key, Date())
         mutateWindow(instance: instance, windowId: tab.windowId) { window in
             for index in window.tabs.indices {
                 window.tabs[index].active = window.tabs[index].id == tab.id
@@ -338,6 +397,7 @@ final class TabStore {
     func close(_ tabs: [BrowserTab], instance: String) {
         guard let windowId = tabs.first?.windowId else { return }
         let ids = Set(tabs.map(\.id))
+        let closesActive = window(instance: instance, id: windowId)?.tabs.contains { ids.contains($0.id) && $0.active } == true
         mutateWindow(instance: instance, windowId: windowId) { window in
             let closingActive = window.tabs.contains { ids.contains($0.id) && $0.active }
             if closingActive, let activeIndex = window.tabs.firstIndex(where: \.active) {
@@ -350,17 +410,21 @@ final class TabStore {
             window.tabs.removeAll { ids.contains($0.id) }
         }
         send(["action": "close", "tabIds": Array(ids)], to: instance)
+        if closesActive, let remaining = window(instance: instance, id: windowId) {
+            activateSelectedSpace(in: WindowSelection(instance: instance, window: remaining), createIfEmpty: !remaining.tabs.isEmpty)
+        }
     }
 
     func closeOtherTabs(than tab: BrowserTab, instance: String) {
         guard let window = window(instance: instance, id: tab.windowId) else { return }
-        close(window.tabs.filter { $0.id != tab.id && !$0.pinned }, instance: instance)
+        close(tabs(in: WindowSelection(instance: instance, window: window)).filter { $0.id != tab.id && !$0.pinned }, instance: instance)
     }
 
     func closeTabsBelow(_ tab: BrowserTab, instance: String) {
-        guard let window = window(instance: instance, id: tab.windowId),
-              let index = window.tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-        close(Array(window.tabs[(index + 1)...]), instance: instance)
+        guard let window = window(instance: instance, id: tab.windowId) else { return }
+        let visible = tabs(in: WindowSelection(instance: instance, window: window))
+        guard let index = visible.firstIndex(where: { $0.id == tab.id }) else { return }
+        close(Array(visible.dropFirst(index + 1)).filter { !$0.pinned }, instance: instance)
     }
 
     func newTab(url: String? = nil) {
@@ -372,11 +436,12 @@ final class TabStore {
         if let url {
             command["url"] = url
         }
+        command["requestId"] = spaceCreateRequest(for: selectedSpace.id)
         send(command, to: selection.instance)
     }
 
     func duplicate(_ tab: BrowserTab, instance: String) {
-        send(["action": "duplicate", "tabId": tab.id], to: instance)
+        send(["action": "duplicate", "tabId": tab.id, "requestId": spaceCreateRequest(for: spaceState.spaceID(for: TabKey(instance: instance, tabId: tab.id)) ?? selectedSpace.id)], to: instance)
     }
 
     func reload(_ tab: BrowserTab, instance: String) {
@@ -395,11 +460,15 @@ final class TabStore {
 
     /// Moves a tab to `index` (its position once moved) and tells Safari.
     func moveTab(_ tab: BrowserTab, instance: String, to index: Int) {
-        var destination = index
+        guard let fullWindow = window(instance: instance, id: tab.windowId) else { return }
+        let visible = tabs(in: WindowSelection(instance: instance, window: fullWindow))
+        guard !visible.isEmpty else { return }
+        let slot = min(max(index, 0), visible.count - 1)
+        var destination = visible[slot].index
         mutateWindow(instance: instance, windowId: tab.windowId) { window in
             guard let from = window.tabs.firstIndex(where: { $0.id == tab.id }) else { return }
             let moved = window.tabs.remove(at: from)
-            destination = min(max(index, 0), window.tabs.count)
+            destination = min(max(destination, 0), window.tabs.count)
             window.tabs.insert(moved, at: destination)
             for position in window.tabs.indices {
                 window.tabs[position].index = position
@@ -438,11 +507,14 @@ final class TabStore {
     func openTab(for bookmark: Bookmark) -> BrowserTab? {
         guard let selection = currentWindow else { return nil }
         if let key = bookmarkLinks[bookmark.id], key.instance == selection.instance,
-           let tab = selection.window.tabs.first(where: { $0.id == key.tabId }) {
+           let tab = selection.window.tabs.first(where: { $0.id == key.tabId }),
+           bookmark.spaceID == nil || spaceState.spaceID(for: key) == bookmark.spaceID {
             return tab
         }
         let target = bookmark.url.comparableURL
-        return selection.window.tabs.first { $0.url?.comparableURL == target }
+        return selection.window.tabs.first {
+            $0.url?.comparableURL == target && (bookmark.spaceID == nil || spaceState.spaceID(for: TabKey(instance: selection.instance, tabId: $0.id)) == bookmark.spaceID)
+        }
     }
 
     func open(_ bookmark: Bookmark, inNewTab: Bool = false) {
@@ -452,6 +524,9 @@ final class TabStore {
         }
         if !inNewTab, let tab = openTab(for: bookmark) {
             bookmarkLinks[bookmark.id] = TabKey(instance: selection.instance, tabId: tab.id)
+            if bookmark.spaceID == nil {
+                spaceState.assign(TabKey(instance: selection.instance, tabId: tab.id), to: selectedSpace.id)
+            }
             activate(tab, instance: selection.instance)
             return
         }
@@ -460,7 +535,7 @@ final class TabStore {
         if !inNewTab, pendingBookmarkOpens.values.contains(where: { $0.bookmark == bookmark.id }) {
             return
         }
-        let requestId = UUID().uuidString
+        let requestId = spaceCreateRequest(for: bookmark.spaceID ?? selectedSpace.id)
         pendingBookmarkOpens[requestId] = (bookmark.id, Date())
         send([
             "action": "create",
@@ -470,12 +545,14 @@ final class TabStore {
         ], to: selection.instance)
     }
 
-    func addBookmark(from tab: BrowserTab, instance: String, at index: Int? = nil) {
+    func addBookmark(from tab: BrowserTab, instance: String, at index: Int? = nil, folderID: UUID? = nil) {
         guard let url = tab.url, !url.isEmpty else { return }
         let bookmark = Bookmark(
             title: displayTitle(for: tab, instance: instance),
             url: url,
-            faviconURL: tab.favIconUrl
+            faviconURL: tab.favIconUrl,
+            spaceID: selectedSpace.id,
+            folderID: folderID
         )
         insert(bookmark, at: index)
         bookmarkLinks[bookmark.id] = TabKey(instance: instance, tabId: tab.id)
@@ -486,20 +563,23 @@ final class TabStore {
         addBookmark(from: tab, instance: selection.instance)
     }
 
-    func addBookmark(url: URL, at index: Int? = nil) {
+    func addBookmark(url: URL, at index: Int? = nil, folderID: UUID? = nil) {
         guard let scheme = url.scheme, ["http", "https"].contains(scheme.lowercased()) else { return }
-        insert(Bookmark(title: url.host() ?? url.absoluteString, url: url.absoluteString), at: index)
+        insert(Bookmark(title: url.host() ?? url.absoluteString, url: url.absoluteString, spaceID: selectedSpace.id, folderID: folderID), at: index)
     }
 
     private func insert(_ bookmark: Bookmark, at index: Int?) {
-        let position = index.map { min(max($0, 0), bookmarks.count) } ?? bookmarks.count
-        bookmarks.insert(bookmark, at: position)
+        var bookmark = bookmark
+        if let id = bookmark.folderID, folder(id)?.spaceID != bookmark.spaceID { bookmark.folderID = nil }
+        bookmarks.append(bookmark)
+        movePinnedItem(.bookmark(bookmark.id), to: bookmark.folderID, at: index)
         scheduleSave()
     }
 
     func removeBookmark(_ bookmark: Bookmark) {
         bookmarks.removeAll { $0.id == bookmark.id }
         bookmarkLinks[bookmark.id] = nil
+        folderState.order.removeAll { $0 == .bookmark(bookmark.id) }
         scheduleSave()
     }
 
@@ -517,8 +597,15 @@ final class TabStore {
     /// Moves a bookmark to `index` (its position once moved).
     func moveBookmark(_ id: UUID, to index: Int) {
         guard let from = bookmarks.firstIndex(where: { $0.id == id }) else { return }
+        if bookmarks[from].spaceID != nil {
+            movePinnedItem(.bookmark(id), to: bookmarks[from].folderID, at: index)
+            return
+        }
         let bookmark = bookmarks.remove(at: from)
-        bookmarks.insert(bookmark, at: min(max(index, 0), bookmarks.count))
+        let peers = bookmarks.filter { $0.spaceID == bookmark.spaceID }
+        let slot = min(max(index, 0), peers.count)
+        let destination = slot < peers.count ? bookmarks.firstIndex(where: { $0.id == peers[slot].id })! : bookmarks.count
+        bookmarks.insert(bookmark, at: destination)
         scheduleSave()
     }
 
@@ -541,6 +628,8 @@ final class TabStore {
         var bookmarks: [Bookmark]
         var names: [SavedName]
         var orphanNames: [String: String]
+        var spaces: SpaceState?
+        var folders: FolderState?
     }
 
     private static var stateURL: URL {
@@ -549,9 +638,18 @@ final class TabStore {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: Self.stateURL),
+        guard let data = try? Data(contentsOf: persistenceURL),
               let state = try? JSONDecoder().decode(SavedState.self, from: data) else { return }
         bookmarks = state.bookmarks
+        spaceState = state.spaces ?? SpaceState()
+        spaceState.normalize()
+        for index in bookmarks.indices {
+            if let id = bookmarks[index].spaceID, !spaceState.spaces.contains(where: { $0.id == id }) {
+                bookmarks[index].spaceID = spaceState.spaces[0].id
+            }
+        }
+        folderState = state.folders ?? FolderState()
+        folderState.normalize(bookmarks: &bookmarks, spaces: spaces)
         orphanNames = state.orphanNames
         customNames = Dictionary(
             state.names.map { (TabKey(instance: $0.instance, tabId: $0.tabId), $0.name) },
@@ -570,10 +668,12 @@ final class TabStore {
         let state = SavedState(
             bookmarks: bookmarks,
             names: customNames.map { SavedName(instance: $0.key.instance, tabId: $0.key.tabId, name: $0.value) },
-            orphanNames: orphanNames
+            orphanNames: orphanNames,
+            spaces: spaceState.persistentCopy,
+            folders: folderState
         )
         do {
-            let url = Self.stateURL
+            let url = persistenceURL
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -581,5 +681,272 @@ final class TabStore {
         } catch {
             NSLog("Side Tabs: could not save state: \(error)")
         }
+    }
+}
+
+extension TabStore {
+    var spaces: [BrowserSpace] { spaceState.spaces }
+    var selectedSpace: BrowserSpace { spaceState.selected }
+    var favorites: [Bookmark] { bookmarks.filter { $0.spaceID == nil } }
+    var pinnedBookmarks: [Bookmark] { bookmarks.filter { $0.spaceID == selectedSpace.id } }
+
+    func tabs(in selection: WindowSelection) -> [BrowserTab] {
+        selection.window.tabs.filter {
+            spaceState.spaceID(for: TabKey(instance: selection.instance, tabId: $0.id)) == selectedSpace.id
+        }
+    }
+
+    private func windowKey(instance: String, windowID: Int) -> String { "\(instance):\(windowID)" }
+
+    func selectSpace(_ id: UUID) {
+        guard id != selectedSpace.id, spaces.contains(where: { $0.id == id }),
+              renaming == nil, !isEditingSpace else { return }
+        spaceState.selectedID = id
+        scheduleSave()
+        if let selection = currentWindow { activateSelectedSpace(in: selection, createIfEmpty: true) }
+    }
+
+    func switchSpace(direction: Int) {
+        guard let index = spaces.firstIndex(where: { $0.id == selectedSpace.id }) else { return }
+        let next = index + direction
+        guard spaces.indices.contains(next) else { return }
+        selectSpace(spaces[next].id)
+    }
+
+    @discardableResult func createSpace() -> BrowserSpace {
+        var space = BrowserSpace()
+        space.name = "Space \(spaces.count + 1)"
+        space.icon = BrowserSpace.icons[spaces.count % BrowserSpace.icons.count]
+        space.theme = BrowserSpace.themes[spaces.count % BrowserSpace.themes.count]
+        spaceState.spaces.append(space)
+        selectSpace(space.id)
+        scheduleSave()
+        return space
+    }
+
+    func updateSpace(_ space: BrowserSpace) {
+        guard let index = spaceState.spaces.firstIndex(where: { $0.id == space.id }) else { return }
+        var edited = space
+        edited.name = edited.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !edited.name.isEmpty else { return }
+        spaceState.spaces[index] = edited
+        scheduleSave()
+    }
+
+    func deleteSpace(_ id: UUID) {
+        guard let destination = spaceState.remove(id) else { return }
+        for index in folderState.folders.indices where folderState.folders[index].spaceID == id {
+            folderState.folders[index].spaceID = destination
+        }
+        for index in bookmarks.indices where bookmarks[index].spaceID == id {
+            bookmarks[index].spaceID = destination
+        }
+        for request in Array(pendingSpaceCreates.keys) where pendingSpaceCreates[request]?.spaceID == id {
+            pendingSpaceCreates[request]?.spaceID = destination
+        }
+        scheduleSave()
+        if let selection = currentWindow { activateSelectedSpace(in: selection, createIfEmpty: false) }
+    }
+
+    func moveTabToSpace(_ tab: BrowserTab, instance: String, spaceID: UUID) {
+        let key = TabKey(instance: instance, tabId: tab.id)
+        spaceState.assign(key, to: spaceID)
+        if tab.active, let selection = currentWindow {
+            activateSelectedSpace(in: selection, createIfEmpty: true)
+        }
+        scheduleSave()
+    }
+
+    func moveBookmarkToSpace(_ bookmark: Bookmark, spaceID: UUID?) {
+        guard spaceID == nil || spaces.contains(where: { $0.id == spaceID }),
+              let index = bookmarks.firstIndex(where: { $0.id == bookmark.id }) else { return }
+        bookmarks[index].spaceID = spaceID
+        bookmarks[index].folderID = nil
+        bookmarkLinks[bookmark.id] = nil
+        folderState.order.removeAll { $0 == .bookmark(bookmark.id) }
+        scheduleSave()
+    }
+
+    private func spaceCreateRequest(for id: UUID) -> String {
+        pendingSpaceCreates = pendingSpaceCreates.filter { Date().timeIntervalSince($0.value.at) < 60 }
+        let request = UUID().uuidString
+        let selection = currentWindow
+        pendingSpaceCreates[request] = PendingSpaceCreate(spaceID: id, at: Date(),
+            privateWindow: selection?.window.incognito ?? true,
+            profile: selection.flatMap { snapshots[$0.instance]?.profile })
+        return request
+    }
+
+    private func activateSelectedSpace(in selection: WindowSelection, createIfEmpty: Bool) {
+        let candidates = tabs(in: selection)
+        let remembered = rememberedTabs[windowKey(instance: selection.instance, windowID: selection.window.id)]?[selectedSpace.id]
+        if let tab = candidates.first(where: { $0.id == remembered }) ?? candidates.first(where: \.active) ?? candidates.first {
+            let key = TabKey(instance: selection.instance, tabId: tab.id)
+            expectedSpaceActivation = key
+            activate(tab, instance: selection.instance)
+        } else if createIfEmpty {
+            expectedSpaceActivation = nil
+            // Establish a real Safari tab so subsequent links belong to this space.
+            newTab()
+        }
+    }
+
+    private func followSafariSelection(_ snapshot: Snapshot, previous: Snapshot?) {
+        guard let selection = currentWindow, selection.instance == snapshot.instance,
+              let active = selection.window.tabs.first(where: \.active) else { return }
+        let key = TabKey(instance: snapshot.instance, tabId: active.id)
+        if let pending = pendingActivation, Date().timeIntervalSince(pending.at) > 2 {
+            expectedSpaceActivation = nil
+        }
+        if let expected = expectedSpaceActivation {
+            if key == expected { expectedSpaceActivation = nil }
+            else if tab(for: expected) != nil { return }
+            else { expectedSpaceActivation = nil }
+        }
+        let priorActive = previous?.windows.first(where: { $0.id == active.windowId })?.tabs.first(where: \.active)?.id
+        let currentWindowKey = windowKey(instance: snapshot.instance, windowID: active.windowId)
+        let changedWindow = currentWindowKey != lastObservedWindow
+        lastObservedWindow = currentWindowKey
+        guard previous == nil || priorActive != active.id || changedWindow else { return }
+        if let id = spaceState.spaceID(for: key) {
+            // A pending new tab belongs to the space that requested it, even if the
+            // snapshot races its created reply. Do not bounce back to the old space.
+            if pendingSpaceCreates.values.contains(where: { Date().timeIntervalSince($0.at) < 2 }) && id != selectedSpace.id { return }
+            spaceState.selectedID = id
+            rememberedTabs[windowKey(instance: snapshot.instance, windowID: active.windowId), default: [:]][id] = active.id
+        }
+    }
+}
+
+extension TabStore {
+    func reorderSelectedSpace(direction: Int) {
+        guard let index = spaceState.spaces.firstIndex(where: { $0.id == selectedSpace.id }),
+              spaceState.spaces.indices.contains(index + direction) else { return }
+        spaceState.spaces.swapAt(index, index + direction)
+        scheduleSave()
+    }
+}
+
+
+// MARK: - Pinned folders
+extension TabStore {
+    var folders: [PinnedFolder] { folderState.folders }
+    func folder(_ id: UUID) -> PinnedFolder? { folders.first { $0.id == id } }
+    func bookmark(_ id: UUID) -> Bookmark? { bookmarks.first { $0.id == id } }
+    func pinnedChildren(of parentID: UUID? = nil, spaceID: UUID? = nil) -> [PinnedItem] {
+        folderState.children(spaceID: spaceID ?? selectedSpace.id, parentID: parentID, bookmarks: bookmarks)
+    }
+    func parentFolder(of item: PinnedItem) -> UUID? {
+        switch item {
+        case .folder(let id): folder(id)?.parentID
+        case .bookmark(let id): bookmark(id)?.folderID
+        }
+    }
+    var visiblePinnedEntries: [PinnedEntry] { pinnedEntries(includeCollapsed: false) }
+    func pinnedEntries(includeCollapsed: Bool) -> [PinnedEntry] {
+        var entries: [PinnedEntry] = []
+        var visited = Set<UUID>()
+        func appendChildren(_ parent: UUID?, depth: Int) {
+            for item in pinnedChildren(of: parent) {
+                entries.append(PinnedEntry(item: item, depth: depth))
+                if case .folder(let id) = item, let folder = folder(id), visited.insert(id).inserted,
+                   includeCollapsed || folder.isExpanded {
+                    appendChildren(id, depth: depth + 1)
+                }
+            }
+        }
+        appendChildren(nil, depth: 0)
+        return entries
+    }
+    func folderPath(_ id: UUID) -> String {
+        var names: [String] = []
+        var current: UUID? = id
+        var seen = Set<UUID>()
+        while let next = current, let folder = folder(next), seen.insert(next).inserted {
+            names.insert(folder.name, at: 0)
+            current = folder.parentID
+        }
+        return names.joined(separator: " / ")
+    }
+    @discardableResult func createFolder(parentID: UUID? = nil, name: String = "New Folder") -> PinnedFolder {
+        let parent = parentID.flatMap(folder)
+        let folder = PinnedFolder(name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "New Folder" : name,
+                                  spaceID: parent?.spaceID ?? selectedSpace.id, parentID: parent?.id)
+        folderState.folders.append(folder)
+        folderState.order.append(.folder(folder.id))
+        if let parent { expandFolder(parent.id) }
+        scheduleSave()
+        return folder
+    }
+    func toggleFolder(_ id: UUID) {
+        guard let index = folderState.folders.firstIndex(where: { $0.id == id }) else { return }
+        folderState.folders[index].isExpanded.toggle()
+        scheduleSave()
+    }
+    private func expandFolder(_ id: UUID) {
+        if let index = folderState.folders.firstIndex(where: { $0.id == id }) {
+            folderState.folders[index].isExpanded = true
+        }
+    }
+    func canMovePinnedItem(_ item: PinnedItem, into destination: UUID?) -> Bool {
+        guard let destination else { return true }
+        guard folder(destination) != nil else { return false }
+        if case .folder(let id) = item { return !folderState.descendants(of: id).contains(destination) }
+        return true
+    }
+    /// Reparent/reorder a pin or an entire folder subtree. Cycles are rejected.
+    func movePinnedItem(_ item: PinnedItem, to parentID: UUID?, at index: Int? = nil, spaceID: UUID? = nil) {
+        guard canMovePinnedItem(item, into: parentID) else { return }
+        let owner = parentID.flatMap(folder)?.spaceID ?? spaceID ?? selectedSpace.id
+        guard spaces.contains(where: { $0.id == owner }) else { return }
+        switch item {
+        case .folder(let id):
+            guard let i = folderState.folders.firstIndex(where: { $0.id == id }) else { return }
+            let subtree = folderState.descendants(of: id)
+            folderState.folders[i].parentID = parentID
+            for i in folderState.folders.indices where subtree.contains(folderState.folders[i].id) {
+                folderState.folders[i].spaceID = owner
+            }
+            for i in bookmarks.indices where bookmarks[i].folderID.map(subtree.contains) == true {
+                bookmarks[i].spaceID = owner
+                bookmarkLinks[bookmarks[i].id] = nil
+            }
+        case .bookmark(let id):
+            guard let i = bookmarks.firstIndex(where: { $0.id == id }) else { return }
+            bookmarks[i].folderID = parentID
+            bookmarks[i].spaceID = owner
+            bookmarkLinks[id] = nil
+        }
+        let peers = pinnedChildren(of: parentID, spaceID: owner).filter { $0 != item }
+        let slot = min(max(index ?? peers.count, 0), peers.count)
+        folderState.order.removeAll { $0 == item }
+        if slot < peers.count, let anchor = folderState.order.firstIndex(of: peers[slot]) {
+            folderState.order.insert(item, at: anchor)
+        } else if let last = peers.last, let anchor = folderState.order.firstIndex(of: last) {
+            folderState.order.insert(item, at: anchor + 1)
+        } else { folderState.order.append(item) }
+        if let parentID { expandFolder(parentID) }
+        scheduleSave()
+    }
+    func reorderPinnedItem(_ item: PinnedItem, direction: Int) {
+        let parent = parentFolder(of: item)
+        let peers = pinnedChildren(of: parent)
+        guard let index = peers.firstIndex(of: item), peers.indices.contains(index + direction) else { return }
+        movePinnedItem(item, to: parent, at: index + direction)
+    }
+    /// Only removes the container. Immediate children take its place in the parent;
+    /// nested hierarchies, pinned sites, and all live Safari tabs are retained.
+    func removeFolder(_ id: UUID) {
+        guard let folder = folder(id) else { return }
+        let siblings = pinnedChildren(of: folder.parentID, spaceID: folder.spaceID)
+        let position = siblings.firstIndex(of: .folder(id)) ?? siblings.count
+        let children = pinnedChildren(of: id, spaceID: folder.spaceID)
+        for (offset, child) in children.enumerated() {
+            movePinnedItem(child, to: folder.parentID, at: position + offset, spaceID: folder.spaceID)
+        }
+        folderState.folders.removeAll { $0.id == id }
+        folderState.order.removeAll { $0 == .folder(id) }
+        if renaming == .folder(id) { cancelRename() }
+        scheduleSave()
     }
 }

@@ -88,11 +88,11 @@ release is published.
 
 ### After publishing
 
-- [ ] `https://github.com/DigitalN/Safari-Arc-Style-Tabs/releases/latest` goes to the new
+- [ ] `https://github.com/TaylorBoan/safari-arc-style-tabs/releases/latest` goes to the new
   tag.
 - [ ] GitHub's API, which the updater reads, shows the new tag with only the `.dmg`:
   ```bash
-  curl -s https://api.github.com/repos/DigitalN/Safari-Arc-Style-Tabs/releases/latest | grep -E '"tag_name"|"name": "Side-Tabs'
+  curl -s https://api.github.com/repos/TaylorBoan/safari-arc-style-tabs/releases/latest | grep -E '"tag_name"|"name": "Side-Tabs'
   ```
 - [ ] The DMG downloaded from the page is identical to the one in `dist/`
   (`shasum -a 256`).
@@ -206,3 +206,78 @@ The updater mounts the disk image in `/Volumes`, like any other disk image, but 
 from Finder. Mounted anywhere else, macOS's file access protection stops Side Tabs from
 reading it. `hdiutil attach` is deprecated in macOS 27 in favor of `diskutil image attach`;
 it still works.
+
+
+## Spaces
+
+`SpaceState` persists space names, icons, themes, the selected space, and tab membership
+in `state.json`. Existing bookmarks become shared Favorites; existing tabs start in
+Personal. Pinned sites have a `spaceID`; Favorites have none. Deleting a space moves its
+items to the first remaining space without closing Safari tabs. The last space cannot
+be deleted.
+
+Spaces organize the Side Tabs sidebar within the current Safari window. Safari's native
+tab bar continues to contain all of that window's tabs. Spaces do not isolate cookies,
+logins, or Safari profiles, and they do not control Safari's native Tab Groups.
+When Safari selects an existing tab, the sidebar follows its space. Opening a shared
+Favorite keeps the selected space and associates that open tab with it.
+
+Switching spaces activates the last visited tab in that window and space during the
+current app session, or its first tab. An empty space opens a new Safari tab. New tabs
+and duplicates include a request ID so delayed replies retain the space that requested
+them, even if the user switches meanwhile. Closing or reordering tabs operates only on
+the current space; Safari indices are mapped from the filtered list.
+
+Safari tab IDs change after relaunch. Restoration matches URLs and window order, consuming
+duplicate URLs individually. If the same URL is restored in a different window order or
+profile, its original membership may not be recoverable. Private browsing memberships
+are kept in memory and excluded from the saved space state.
+
+`SidebarPanel.sendEvent` handles precise scroll events over the visible sidebar, excluding
+the area underneath Safari. `SpaceSwipe` locks the gesture axis, uses a 45-point horizontal
+threshold, switches at most once per gesture, and ignores momentum. Left finger movement
+means next and right means previous regardless of Natural Scrolling. Vertical scrolling
+and mouse wheels continue to reach the normal sidebar controls. Switching pauses while
+renaming a row or editing a space.
+
+Run the isolated checks with Apple's Swift command-line tools and Node.js:
+
+```bash
+scripts/test-spaces.sh
+```
+
+Before releasing, also build with Xcode and check the signed extension in Safari: create
+and edit spaces, move active and inactive tabs, pin a site, share a Favorite, swipe over
+rows and blank sidebar areas with Natural Scrolling on and off, scroll vertically, drag
+rows, switch Safari windows, and restart Safari and Side Tabs. Test narrow and wide sidebar
+widths and the full-screen overlay. Swiping over a web page must not change spaces.
+The fork's updater reads TaylorBoan/safari-arc-style-tabs releases.
+
+
+## Pinned folders
+
+Each space has its own collapsible folder tree in Pinned. A folder may contain pins and
+other folders at any depth. `FolderState` stores parent IDs, expansion state, and mixed
+folder/pin sibling order; `Bookmark.folderID` associates saved sites with a folder.
+Older state files load with their existing pins at the top level and shared Favorites
+unchanged. On load, missing parents and cycles are repaired to keep all items reachable.
+
+The folder + button creates a root folder. Folder context menus create subfolders,
+rename, move to another folder or space, and reorder siblings. A tab's Pin in Folder
+menu saves it into the chosen folder; dragging an open tab into a folder does the same.
+This saves a persistent pin and keeps the live Safari tab open. A root-level pin can be
+moved into a folder using its context menu or by dragging. Folder menus list complete
+paths, including collapsed descendants, and disallow moving a folder into itself or
+one of its descendants. Moving a folder across spaces moves its subtree and contained
+pins. Removing a folder promotes its immediate contents, without closing Safari tabs.
+
+`PinnedSection` flattens only expanded rows and caps visual indentation at five levels
+so deeply nested items still have usable text at narrow sidebar widths. The model has
+no corresponding nesting limit. Drag insertion maps visible row geometry to the correct
+parent and sibling position; dropping on the middle of a folder nests the dragged item.
+Space swipes and the ordinary Tabs section retain their existing behavior.
+
+Regression checks in `scripts/test-spaces.sh` include nesting, collapse, mixed reordering,
+cycle rejection, reparenting, cross-space moves, non-destructive removal, state repair,
+and persistence. Before releasing, also verify folder creation, inline rename, nested
+dragging, external URL drops, and collapse/expand against the installed Safari sidebar.

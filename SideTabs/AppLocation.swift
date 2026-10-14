@@ -6,7 +6,7 @@ import AppKit
 /// doesn't stick. On launch from anywhere else, offer to move it.
 enum AppLocation {
     /// The GitHub repository that releases (and updates) come from.
-    static let repository = "DigitalN/Safari-Arc-Style-Tabs"
+    static let repository = "TaylorBoan/safari-arc-style-tabs"
     static let releasesURL = URL(string: "https://github.com/\(repository)/releases")!
 
     static var isInApplicationsFolder: Bool {

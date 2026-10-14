@@ -2,6 +2,7 @@ import SwiftUI
 
 struct BookmarkRow: View {
     let bookmark: Bookmark
+    var draggable = true
 
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
@@ -58,7 +59,7 @@ struct BookmarkRow: View {
             store: store,
             settings: settings,
             rowTop: rowTop,
-            enabled: !isRenaming
+            enabled: draggable && !isRenaming
         )
         .onSidebarTop { rowTop = $0 }
         .contextMenu {
@@ -67,6 +68,17 @@ struct BookmarkRow: View {
             Divider()
             Button("Rename…") { store.beginRename(.bookmark(bookmark.id)) }
             Button("Replace with Current Page") { store.replaceBookmarkWithCurrentPage(bookmark) }
+            if bookmark.spaceID != nil {
+                Menu("Move to Folder") { FolderDestinations(item: .bookmark(bookmark.id)) }
+                Button("Move Up") { store.reorderPinnedItem(.bookmark(bookmark.id), direction: -1) }
+                Button("Move Down") { store.reorderPinnedItem(.bookmark(bookmark.id), direction: 1) }
+            }
+            Menu("Move To") {
+                Button("Favorites (All Spaces)") { store.moveBookmarkToSpace(bookmark, spaceID: nil) }
+                ForEach(store.spaces) { space in
+                    Button(space.name) { store.moveBookmarkToSpace(bookmark, spaceID: space.id) }
+                }
+            }
             Button("Copy Link") { store.copyLink(bookmark.url) }
             Divider()
             Button("Remove Bookmark") { store.removeBookmark(bookmark) }

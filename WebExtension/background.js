@@ -174,9 +174,13 @@ async function runCommand(command) {
             await browser.tabs.move(command.tabId, { index: command.index });
             break;
 
-        case "duplicate":
-            await duplicateTab(command.tabId);
+        case "duplicate": {
+            const duplicate = await duplicateTab(command.tabId);
+            if (duplicate && command.requestId) {
+                await postToApp({ type: "created", instance, requestId: command.requestId, tabId: duplicate.id });
+            }
             break;
+        }
 
         case "reload":
             await browser.tabs.reload(command.tabId);
@@ -200,14 +204,13 @@ async function runCommand(command) {
 async function duplicateTab(tabId) {
     if (browser.tabs.duplicate) {
         try {
-            await browser.tabs.duplicate(tabId);
-            return;
+            return await browser.tabs.duplicate(tabId);
         } catch (error) {
             // Fall through to the manual version.
         }
     }
     const tab = await browser.tabs.get(tabId);
-    if (tab.url) await browser.tabs.create({ windowId: tab.windowId, index: tab.index + 1, url: tab.url });
+    if (tab.url) return await browser.tabs.create({ windowId: tab.windowId, index: tab.index + 1, url: tab.url });
 }
 
 let port = null;

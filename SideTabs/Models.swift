@@ -48,6 +48,9 @@ struct Bookmark: Codable, Identifiable, Hashable {
     var title: String
     var url: String
     var faviconURL: String?
+    /// nil means a favorite shared across all spaces.
+    var spaceID: UUID? = nil
+    var folderID: UUID? = nil
 }
 
 /// A tab name the user picked, plus the URL it had so it can be matched up again
@@ -60,6 +63,7 @@ struct CustomName: Codable, Hashable {
 enum RenameTarget: Hashable {
     case tab(TabKey)
     case bookmark(UUID)
+    case folder(UUID)
 }
 
 extension String {
