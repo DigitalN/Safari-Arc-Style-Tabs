@@ -35,6 +35,7 @@ struct Snapshot: Codable {
     let focusChangedAt: Double
     var windows: [BrowserWindow]
     var profile: String?
+    var capabilities: [String]? = nil
 }
 
 /// Tab ids are only unique within one background page instance.
@@ -51,6 +52,8 @@ struct Bookmark: Codable, Identifiable, Hashable {
     /// nil means a favorite shared across all spaces.
     var spaceID: UUID? = nil
     var folderID: UUID? = nil
+    /// Imported Arc Favorites are shared only by spaces from their source profile.
+    var arcProfileID: String? = nil
 }
 
 /// A tab name the user picked, plus the URL it had so it can be matched up again

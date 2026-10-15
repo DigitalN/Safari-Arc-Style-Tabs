@@ -49,13 +49,18 @@ final class SidebarPanel: NSPanel {
     var onMouseDown: (() -> Void)?
     var onSpaceSwipe: ((Int) -> Void)?
     private var spaceSwipe = SpaceSwipe()
+    private var swipeRoute = SidebarSwipeRoute()
+    var spaceSwitcherFrame = CGRect.zero
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .scrollWheel, event.hasPreciseScrollingDeltas,
            !event.phase.isEmpty || !event.momentumPhase.isEmpty {
             let visibleWidth = frame.width - (style.attached ? Self.cornerFill : 0)
             let point = event.locationInWindow
-            if point.x >= 0, point.x < visibleWidth, point.y >= 0, point.y < frame.height {
+            let inside = point.x >= 0 && point.x < visibleWidth && point.y >= 0 && point.y < frame.height
+            let region: SidebarSwipeRoute.Region = !inside ? .outside : (spaceSwitcherFrame.contains(point) ? .icons : .tabs)
+            let route = swipeRoute.route(at: region, began: event.phase.contains(.began), cancelled: event.phase.contains(.cancelled))
+            if inside, route == .tabs {
                 // Normalize to finger movement so left means next with either
                 // setting of macOS Natural Scrolling.
                 let dx = event.isDirectionInvertedFromDevice ? event.scrollingDeltaX : -event.scrollingDeltaX
@@ -137,5 +142,24 @@ private struct AttachedPanelShape: Shape {
                             startAngle: .degrees(180), delta: .degrees(-90))
         path.closeSubpath()
         return path
+    }
+}
+
+/// Reports the real SwiftUI footer bounds in window coordinates. No fixed sidebar
+/// height assumptions: this also works in the full-screen overlay and at any width.
+struct SpaceSwitcherScrollRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> RegionView { RegionView() }
+    func updateNSView(_ view: RegionView, context: Context) { view.reportFrame() }
+    final class RegionView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if newWindow !== window { (window as? SidebarPanel)?.spaceSwitcherFrame = .zero }
+            super.viewWillMove(toWindow: newWindow)
+        }
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); reportFrame() }
+        override func layout() { super.layout(); reportFrame() }
+        override func setFrameSize(_ newSize: NSSize) { super.setFrameSize(newSize); reportFrame() }
+        override func setFrameOrigin(_ newOrigin: NSPoint) { super.setFrameOrigin(newOrigin); reportFrame() }
+        func reportFrame() { (window as? SidebarPanel)?.spaceSwitcherFrame = convert(bounds, to: nil) }
     }
 }

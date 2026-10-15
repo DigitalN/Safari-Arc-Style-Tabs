@@ -11,14 +11,29 @@ final class TabStore {
         let window: BrowserWindow
     }
 
-    private(set) var snapshots: [String: Snapshot] = [:]
+    private(set) var snapshots: [String: Snapshot] = [:] {
+        didSet { currentWindowCache = nil; bookmarkMatchCache = nil }
+    }
     private(set) var lastMessageAt: Date?
-    private(set) var bookmarks: [Bookmark] = []
+    private(set) var bookmarks: [Bookmark] = [] {
+        didSet { libraryCache = nil; bookmarkMatchCache = nil }
+    }
     private(set) var customNames: [TabKey: CustomName] = [:]
-    private(set) var bookmarkLinks: [UUID: TabKey] = [:]
+    private(set) var bookmarkLinks: [UUID: TabKey] = [:] {
+        didSet { bookmarkMatchCache = nil }
+    }
 
-    private(set) var folderState = FolderState()
-    private(set) var spaceState = SpaceState()
+    private(set) var folderState = FolderState() {
+        didSet { libraryCache = nil }
+    }
+    private(set) var spaceState = SpaceState() {
+        didSet { bookmarkMatchCache = nil }
+    }
+    private(set) var arcMigration = ArcMigrationState()
+    private(set) var arcRestoreRunning = false
+    private(set) var arcRestoreMessage: String?
+    @ObservationIgnored private var arcRestoreDestinations: [String: ArcImportDestination] = [:]
+    @ObservationIgnored private var arcRestoreTimeout: DispatchWorkItem?
     var isEditingSpace = false
     private struct PendingSpaceCreate {
         var spaceID: UUID
@@ -29,8 +44,35 @@ final class TabStore {
     @ObservationIgnored private var pendingSpaceCreates: [String: PendingSpaceCreate] = [:]
     @ObservationIgnored private var rememberedTabs: [String: [UUID: Int]] = [:]
     @ObservationIgnored private var expectedSpaceActivation: TabKey?
+    /// Empty spaces keep Safari's current page without adopting its space on each
+    /// snapshot. A different active tab or window resumes normal Safari following.
+    private struct RetainedBackgroundTab {
+        var spaceID: UUID
+        var windowKey: String
+        var tab: TabKey
+    }
+    @ObservationIgnored private var retainedBackgroundTab: RetainedBackgroundTab?
     @ObservationIgnored private var lastObservedWindow: String?
     @ObservationIgnored private var persistenceURL: URL
+
+    private struct WindowCache { var selection: WindowSelection? }
+    private struct BookmarkMatchCache {
+        var selection: WindowSelection
+        var matches: [UUID: BrowserTab]
+    }
+    @ObservationIgnored private var currentWindowCache: WindowCache?
+    @ObservationIgnored private var libraryCache: PinnedLibraryIndex?
+    @ObservationIgnored private var bookmarkMatchCache: BookmarkMatchCache?
+
+    private var library: PinnedLibraryIndex {
+        // Keep dependencies registered even on cache hits, so SwiftUI still observes
+        // changes. Cache storage itself must not publish mutations during rendering.
+        _ = bookmarks; _ = folderState
+        if let libraryCache { return libraryCache }
+        let index = PinnedLibraryIndex(bookmarks: bookmarks, state: folderState)
+        libraryCache = index
+        return index
+    }
 
     var renaming: RenameTarget?
 
@@ -39,6 +81,7 @@ final class TabStore {
     var dockedWindowTitle: String? {
         didSet {
             if dockedWindowTitle != oldValue {
+                currentWindowCache = nil
                 requestSnapshotIfUnknown(title: dockedWindowTitle)
                 if let selection = currentWindow, let snapshot = snapshots[selection.instance] {
                     followSafariSelection(snapshot, previous: snapshot)
@@ -50,6 +93,7 @@ final class TabStore {
     @ObservationIgnored private var lastSnapshotRequest = Date.distantPast
 
     @ObservationIgnored var sendCommand: (([String: Any]) -> Void)?
+    @ObservationIgnored var onOpenArcImport: (() -> Void)?
     @ObservationIgnored var onToggleSidebar: (() -> Void)?
     @ObservationIgnored var onRenameStateChanged: ((Bool) -> Void)?
     @ObservationIgnored var onOpenAddressBar: (() -> Void)?
@@ -96,6 +140,10 @@ final class TabStore {
             onToggleSidebar?()
             return [:]
 
+        case "migrationCreated", "migrationAttention":
+            handleArcRestoreReply(type: type, object: object)
+            return [:]
+
         case "created":
             if let requestId = object["requestId"] as? String,
                let instance = object["instance"] as? String,
@@ -110,7 +158,7 @@ final class TabStore {
                     spaceState.assign(key, to: pending.spaceID)
                 }
                 if pending.spaceID != selectedSpace.id, let selection = currentWindow {
-                    activateSelectedSpace(in: selection, createIfEmpty: false)
+                    activateSelectedSpace(in: selection)
                 }
                 scheduleSave()
             }
@@ -164,6 +212,7 @@ final class TabStore {
         renaming = nil
         rememberedTabs.removeAll()
         expectedSpaceActivation = nil
+        retainedBackgroundTab = nil
         lastObservedWindow = nil
         pendingSpaceCreates.removeAll()
         scheduleSave()
@@ -214,6 +263,14 @@ final class TabStore {
     /// The Safari window the sidebar shows: the one most recently focused, cross-checked
     /// against the title of the window the panel is docked to.
     var currentWindow: WindowSelection? {
+        _ = snapshots; _ = dockedWindowTitle
+        if let currentWindowCache { return currentWindowCache.selection }
+        let selection = findCurrentWindow()
+        currentWindowCache = WindowCache(selection: selection)
+        return selection
+    }
+
+    private func findCurrentWindow() -> WindowSelection? {
         let ordered = snapshots.values.sorted { $0.focusChangedAt > $1.focusChangedAt }
         var best: WindowSelection?
         for snapshot in ordered {
@@ -391,6 +448,7 @@ final class TabStore {
                 window.tabs[index].active = window.tabs[index].id == tab.id
             }
         }
+        if let selection = currentWindow { revealPinnedTab(tab.id, in: selection) }
         send(["action": "activate", "tabId": tab.id], to: instance)
     }
 
@@ -411,18 +469,19 @@ final class TabStore {
         }
         send(["action": "close", "tabIds": Array(ids)], to: instance)
         if closesActive, let remaining = window(instance: instance, id: windowId) {
-            activateSelectedSpace(in: WindowSelection(instance: instance, window: remaining), createIfEmpty: !remaining.tabs.isEmpty)
+            activateSelectedSpace(in: WindowSelection(instance: instance, window: remaining))
         }
     }
 
     func closeOtherTabs(than tab: BrowserTab, instance: String) {
         guard let window = window(instance: instance, id: tab.windowId) else { return }
-        close(tabs(in: WindowSelection(instance: instance, window: window)).filter { $0.id != tab.id && !$0.pinned }, instance: instance)
+        let selection = WindowSelection(instance: instance, window: window)
+        close(displayedTabs(in: selection).filter { $0.id != tab.id && !$0.pinned }, instance: instance)
     }
 
     func closeTabsBelow(_ tab: BrowserTab, instance: String) {
         guard let window = window(instance: instance, id: tab.windowId) else { return }
-        let visible = tabs(in: WindowSelection(instance: instance, window: window))
+        let visible = displayedTabs(in: WindowSelection(instance: instance, window: window))
         guard let index = visible.firstIndex(where: { $0.id == tab.id }) else { return }
         close(Array(visible.dropFirst(index + 1)).filter { !$0.pinned }, instance: instance)
     }
@@ -459,10 +518,10 @@ final class TabStore {
     }
 
     /// Moves a tab to `index` (its position once moved) and tells Safari.
-    func moveTab(_ tab: BrowserTab, instance: String, to index: Int) {
+    func moveTab(_ tab: BrowserTab, instance: String, to index: Int, showBookmarks: Bool = true) {
         guard let fullWindow = window(instance: instance, id: tab.windowId) else { return }
-        let visible = tabs(in: WindowSelection(instance: instance, window: fullWindow))
-        guard !visible.isEmpty else { return }
+        let visible = displayedTabs(in: WindowSelection(instance: instance, window: fullWindow), showBookmarks: showBookmarks)
+        guard visible.contains(where: { $0.id == tab.id }) else { return }
         let slot = min(max(index, 0), visible.count - 1)
         var destination = visible[slot].index
         mutateWindow(instance: instance, windowId: tab.windowId) { window in
@@ -503,18 +562,87 @@ final class TabStore {
 
     // MARK: - Bookmarks
 
-    /// The open tab in the current window that belongs to this bookmark, if any.
+    /// A physical tab has one sidebar row. Explicit links survive navigation; URL
+    /// fallback consumes one tab per bookmark so extra copies stay ordinary tabs.
+    private func bookmarkTabs(in selection: WindowSelection) -> [UUID: BrowserTab] {
+        _ = bookmarks; _ = bookmarkLinks; _ = spaceState
+        if let cache = bookmarkMatchCache, cache.selection == selection { return cache.matches }
+        let visible = bookmarks.filter { bookmark in
+            bookmark.spaceID == selectedSpace.id || (bookmark.spaceID == nil &&
+                (bookmark.arcProfileID == nil || bookmark.arcProfileID == selectedSpace.arcProfileID))
+        }
+        var result: [UUID: BrowserTab] = [:]
+        var claimed = Set<Int>()
+        let ownership = Dictionary(spaceState.memberships.map { ($0.key, $0.spaceID) }, uniquingKeysWith: { first, _ in first })
+        let tabsByID = Dictionary(selection.window.tabs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func belongs(_ tab: BrowserTab, to bookmark: Bookmark) -> Bool {
+            bookmark.spaceID == nil || ownership[TabKey(instance: selection.instance, tabId: tab.id)] == bookmark.spaceID
+        }
+        for bookmark in visible {
+            if let key = bookmarkLinks[bookmark.id], key.instance == selection.instance,
+               let tab = tabsByID[key.tabId],
+               belongs(tab, to: bookmark), claimed.insert(tab.id).inserted {
+                result[bookmark.id] = tab
+            }
+        }
+        // Normalize each URL once. Active-first queues retain the prior matching
+        // order, while consuming duplicates once instead of rescanning all tabs.
+        var all: [String: [BrowserTab]] = [:], scoped: [String: [BrowserTab]] = [:]
+        let ordered = selection.window.tabs.filter(\.active) + selection.window.tabs.filter { !$0.active }
+        for tab in ordered where !claimed.contains(tab.id) {
+            guard let url = tab.url?.comparableURL else { continue }
+            all[url, default: []].append(tab)
+            if ownership[TabKey(instance: selection.instance, tabId: tab.id)] == selectedSpace.id {
+                scoped[url, default: []].append(tab)
+            }
+        }
+        var allOffsets: [String: Int] = [:], scopedOffsets: [String: Int] = [:]
+        func take(_ queue: [BrowserTab], offset: inout Int) -> BrowserTab? {
+            while offset < queue.count {
+                let tab = queue[offset]; offset += 1
+                if !claimed.contains(tab.id) { return tab }
+            }
+            return nil
+        }
+        let urls = library.comparableURLs
+        for bookmark in visible where result[bookmark.id] == nil {
+            let target = urls[bookmark.id] ?? bookmark.url.comparableURL
+            let tab = bookmark.spaceID == nil
+                ? take(all[target] ?? [], offset: &allOffsets[target, default: 0])
+                : take(scoped[target] ?? [], offset: &scopedOffsets[target, default: 0])
+            if let tab {
+                result[bookmark.id] = tab
+                claimed.insert(tab.id)
+            }
+        }
+        bookmarkMatchCache = BookmarkMatchCache(selection: selection, matches: result)
+        return result
+    }
+
+    /// All tabs assigned to this space remain available to switching and persistence.
+    /// Only the lower, ordinary-tab list excludes tabs already represented above it.
+    func displayedTabs(in selection: WindowSelection, showBookmarks: Bool = true) -> [BrowserTab] {
+        let all = tabs(in: selection)
+        guard showBookmarks else { return all }
+        let represented = Set(bookmarkTabs(in: selection).values.map(\.id))
+        return all.filter { !represented.contains($0.id) }
+    }
+
     func openTab(for bookmark: Bookmark) -> BrowserTab? {
-        guard let selection = currentWindow else { return nil }
-        if let key = bookmarkLinks[bookmark.id], key.instance == selection.instance,
-           let tab = selection.window.tabs.first(where: { $0.id == key.tabId }),
-           bookmark.spaceID == nil || spaceState.spaceID(for: key) == bookmark.spaceID {
-            return tab
+        currentWindow.flatMap { bookmarkTabs(in: $0)[bookmark.id] }
+    }
+
+    private func revealPinnedTab(_ tabID: Int, in selection: WindowSelection) {
+        guard let id = bookmarkTabs(in: selection).first(where: { $0.value.id == tabID })?.key,
+              let bookmark = bookmark(id), bookmark.spaceID == selectedSpace.id else { return }
+        var parent = bookmark.folderID
+        var visited = Set<UUID>()
+        var changed = false
+        while let id = parent, visited.insert(id).inserted, let index = folderState.folders.firstIndex(where: { $0.id == id }) {
+            if !folderState.folders[index].isExpanded { folderState.folders[index].isExpanded = true; changed = true }
+            parent = folderState.folders[index].parentID
         }
-        let target = bookmark.url.comparableURL
-        return selection.window.tabs.first {
-            $0.url?.comparableURL == target && (bookmark.spaceID == nil || spaceState.spaceID(for: TabKey(instance: selection.instance, tabId: $0.id)) == bookmark.spaceID)
-        }
+        if changed { scheduleSave() }
     }
 
     func open(_ bookmark: Bookmark, inNewTab: Bool = false) {
@@ -630,6 +758,7 @@ final class TabStore {
         var orphanNames: [String: String]
         var spaces: SpaceState?
         var folders: FolderState?
+        var arcMigration: ArcMigrationState?
     }
 
     private static var stateURL: URL {
@@ -640,6 +769,7 @@ final class TabStore {
     private func load() {
         guard let data = try? Data(contentsOf: persistenceURL),
               let state = try? JSONDecoder().decode(SavedState.self, from: data) else { return }
+        arcMigration = state.arcMigration ?? ArcMigrationState()
         bookmarks = state.bookmarks
         spaceState = state.spaces ?? SpaceState()
         spaceState.normalize()
@@ -664,20 +794,29 @@ final class TabStore {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
-    func save() {
+    private func encodedState() throws -> Data {
         let state = SavedState(
             bookmarks: bookmarks,
             names: customNames.map { SavedName(instance: $0.key.instance, tabId: $0.key.tabId, name: $0.value) },
             orphanNames: orphanNames,
             spaces: spaceState.persistentCopy,
-            folders: folderState
+            folders: folderState,
+            arcMigration: arcMigration
         )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(state)
+    }
+
+    private func persistState() throws {
+        let url = persistenceURL
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try encodedState().write(to: url, options: .atomic)
+    }
+
+    func save() {
         do {
-            let url = persistenceURL
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(state).write(to: url, options: .atomic)
+            try persistState()
         } catch {
             NSLog("Side Tabs: could not save state: \(error)")
         }
@@ -687,13 +826,16 @@ final class TabStore {
 extension TabStore {
     var spaces: [BrowserSpace] { spaceState.spaces }
     var selectedSpace: BrowserSpace { spaceState.selected }
-    var favorites: [Bookmark] { bookmarks.filter { $0.spaceID == nil } }
+    var favorites: [Bookmark] { bookmarks.filter { $0.spaceID == nil && ($0.arcProfileID == nil || $0.arcProfileID == selectedSpace.arcProfileID) } }
     var pinnedBookmarks: [Bookmark] { bookmarks.filter { $0.spaceID == selectedSpace.id } }
 
     func tabs(in selection: WindowSelection) -> [BrowserTab] {
-        selection.window.tabs.filter {
-            spaceState.spaceID(for: TabKey(instance: selection.instance, tabId: $0.id)) == selectedSpace.id
+        let spaceID = selectedSpace.id
+        var seen = Set<TabKey>(), keys = Set<TabKey>()
+        for member in spaceState.memberships where seen.insert(member.key).inserted && member.spaceID == spaceID {
+            keys.insert(member.key)
         }
+        return selection.window.tabs.filter { keys.contains(TabKey(instance: selection.instance, tabId: $0.id)) }
     }
 
     private func windowKey(instance: String, windowID: Int) -> String { "\(instance):\(windowID)" }
@@ -703,7 +845,7 @@ extension TabStore {
               renaming == nil, !isEditingSpace else { return }
         spaceState.selectedID = id
         scheduleSave()
-        if let selection = currentWindow { activateSelectedSpace(in: selection, createIfEmpty: true) }
+        if let selection = currentWindow { activateSelectedSpace(in: selection) }
     }
 
     func switchSpace(direction: Int) {
@@ -729,6 +871,10 @@ extension TabStore {
         var edited = space
         edited.name = edited.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !edited.name.isEmpty else { return }
+        if let raw = edited.emoji {
+            guard let emoji = BrowserSpace.normalizedEmoji(raw) else { return }
+            edited.emoji = emoji
+        }
         spaceState.spaces[index] = edited
         scheduleSave()
     }
@@ -745,14 +891,14 @@ extension TabStore {
             pendingSpaceCreates[request]?.spaceID = destination
         }
         scheduleSave()
-        if let selection = currentWindow { activateSelectedSpace(in: selection, createIfEmpty: false) }
+        if let selection = currentWindow { activateSelectedSpace(in: selection) }
     }
 
     func moveTabToSpace(_ tab: BrowserTab, instance: String, spaceID: UUID) {
         let key = TabKey(instance: instance, tabId: tab.id)
         spaceState.assign(key, to: spaceID)
         if tab.active, let selection = currentWindow {
-            activateSelectedSpace(in: selection, createIfEmpty: true)
+            activateSelectedSpace(in: selection)
         }
         scheduleSave()
     }
@@ -762,7 +908,9 @@ extension TabStore {
               let index = bookmarks.firstIndex(where: { $0.id == bookmark.id }) else { return }
         bookmarks[index].spaceID = spaceID
         bookmarks[index].folderID = nil
-        bookmarkLinks[bookmark.id] = nil
+        if let spaceID, let key = bookmarkLinks[bookmark.id], spaceState.spaceID(for: key) != spaceID {
+            bookmarkLinks[bookmark.id] = nil
+        }
         folderState.order.removeAll { $0 == .bookmark(bookmark.id) }
         scheduleSave()
     }
@@ -777,17 +925,22 @@ extension TabStore {
         return request
     }
 
-    private func activateSelectedSpace(in selection: WindowSelection, createIfEmpty: Bool) {
+    private func activateSelectedSpace(in selection: WindowSelection) {
         let candidates = tabs(in: selection)
         let remembered = rememberedTabs[windowKey(instance: selection.instance, windowID: selection.window.id)]?[selectedSpace.id]
         if let tab = candidates.first(where: { $0.id == remembered }) ?? candidates.first(where: \.active) ?? candidates.first {
+            retainedBackgroundTab = nil
             let key = TabKey(instance: selection.instance, tabId: tab.id)
             expectedSpaceActivation = key
             activate(tab, instance: selection.instance)
-        } else if createIfEmpty {
-            expectedSpaceActivation = nil
-            // Establish a real Safari tab so subsequent links belong to this space.
-            newTab()
+        } else {
+            // Switching is organizational. Only explicit New Tab / Open actions
+            // create Safari tabs, even when this space is empty in this window.
+            retainedBackgroundTab = selection.window.tabs.first(where: \.active).map {
+                RetainedBackgroundTab(spaceID: selectedSpace.id,
+                    windowKey: windowKey(instance: selection.instance, windowID: selection.window.id),
+                    tab: TabKey(instance: selection.instance, tabId: $0.id))
+            }
         }
     }
 
@@ -807,6 +960,11 @@ extension TabStore {
         let currentWindowKey = windowKey(instance: snapshot.instance, windowID: active.windowId)
         let changedWindow = currentWindowKey != lastObservedWindow
         lastObservedWindow = currentWindowKey
+        if let retained = retainedBackgroundTab, retained.spaceID == selectedSpace.id,
+           retained.windowKey == currentWindowKey, retained.tab == key {
+            return
+        }
+        retainedBackgroundTab = nil
         guard previous == nil || priorActive != active.id || changedWindow else { return }
         if let id = spaceState.spaceID(for: key) {
             // A pending new tab belongs to the space that requested it, even if the
@@ -814,6 +972,7 @@ extension TabStore {
             if pendingSpaceCreates.values.contains(where: { Date().timeIntervalSince($0.at) < 2 }) && id != selectedSpace.id { return }
             spaceState.selectedID = id
             rememberedTabs[windowKey(instance: snapshot.instance, windowID: active.windowId), default: [:]][id] = active.id
+            revealPinnedTab(active.id, in: selection)
         }
     }
 }
@@ -831,10 +990,10 @@ extension TabStore {
 // MARK: - Pinned folders
 extension TabStore {
     var folders: [PinnedFolder] { folderState.folders }
-    func folder(_ id: UUID) -> PinnedFolder? { folders.first { $0.id == id } }
-    func bookmark(_ id: UUID) -> Bookmark? { bookmarks.first { $0.id == id } }
+    func folder(_ id: UUID) -> PinnedFolder? { library.folders[id] }
+    func bookmark(_ id: UUID) -> Bookmark? { library.bookmarks[id] }
     func pinnedChildren(of parentID: UUID? = nil, spaceID: UUID? = nil) -> [PinnedItem] {
-        folderState.children(spaceID: spaceID ?? selectedSpace.id, parentID: parentID, bookmarks: bookmarks)
+        library.children[.init(spaceID: spaceID ?? selectedSpace.id, folderID: parentID)] ?? []
     }
     func parentFolder(of item: PinnedItem) -> UUID? {
         switch item {
@@ -844,19 +1003,8 @@ extension TabStore {
     }
     var visiblePinnedEntries: [PinnedEntry] { pinnedEntries(includeCollapsed: false) }
     func pinnedEntries(includeCollapsed: Bool) -> [PinnedEntry] {
-        var entries: [PinnedEntry] = []
-        var visited = Set<UUID>()
-        func appendChildren(_ parent: UUID?, depth: Int) {
-            for item in pinnedChildren(of: parent) {
-                entries.append(PinnedEntry(item: item, depth: depth))
-                if case .folder(let id) = item, let folder = folder(id), visited.insert(id).inserted,
-                   includeCollapsed || folder.isExpanded {
-                    appendChildren(id, depth: depth + 1)
-                }
-            }
-        }
-        appendChildren(nil, depth: 0)
-        return entries
+        let index = library
+        return (includeCollapsed ? index.allEntries : index.visibleEntries)[selectedSpace.id] ?? []
     }
     func folderPath(_ id: UUID) -> String {
         var names: [String] = []
@@ -909,13 +1057,15 @@ extension TabStore {
             }
             for i in bookmarks.indices where bookmarks[i].folderID.map(subtree.contains) == true {
                 bookmarks[i].spaceID = owner
-                bookmarkLinks[bookmarks[i].id] = nil
+                if let key = bookmarkLinks[bookmarks[i].id], spaceState.spaceID(for: key) != owner {
+                    bookmarkLinks[bookmarks[i].id] = nil
+                }
             }
         case .bookmark(let id):
             guard let i = bookmarks.firstIndex(where: { $0.id == id }) else { return }
             bookmarks[i].folderID = parentID
             bookmarks[i].spaceID = owner
-            bookmarkLinks[id] = nil
+            if let key = bookmarkLinks[id], spaceState.spaceID(for: key) != owner { bookmarkLinks[id] = nil }
         }
         let peers = pinnedChildren(of: parentID, spaceID: owner).filter { $0 != item }
         let slot = min(max(index ?? peers.count, 0), peers.count)
@@ -948,5 +1098,271 @@ extension TabStore {
         folderState.order.removeAll { $0 == .folder(id) }
         if renaming == .folder(id) { cancelRename() }
         scheduleSave()
+    }
+}
+
+// MARK: - Arc migration (preview never mutates sidebar state)
+extension TabStore {
+    private func arcTargetSignature(_ record: ArcImportRecord) -> String? {
+        switch record.kind {
+        case .space:
+            return spaces.first(where: { $0.id == record.targetID }).map { ArcImportReader.signature($0) }
+        case .folder:
+            return folder(record.targetID).map { value in
+                ArcImportReader.signature(value) + ":" + String(pinnedChildren(of: value.parentID, spaceID: value.spaceID).firstIndex(of: .folder(value.id)) ?? -1)
+            }
+        case .bookmark:
+            return bookmark(record.targetID).map { value in
+                let index = value.spaceID.map { pinnedChildren(of: value.folderID, spaceID: $0).firstIndex(of: .bookmark(value.id)) ?? -1 }
+                    ?? bookmarks.filter { $0.spaceID == nil && $0.arcProfileID == value.arcProfileID }.firstIndex(where: { $0.id == value.id }) ?? -1
+                return ArcImportReader.signature(value) + ":" + String(index)
+            }
+        case .tab:
+            return arcMigration.tabs.first(where: { $0.id == record.sourceID }).map { ArcImportReader.hash(Data("\($0.title)\n\($0.url)\n\($0.spaceID)\n\($0.profileID)".utf8)) }
+        }
+    }
+
+    func arcDisposition(id: String, signature: String, issue: String? = nil) -> ArcImportDisposition {
+        if issue != nil { return .attention }
+        guard let record = arcMigration.records[id] else { return .add }
+        guard record.sourceSignature == signature, arcTargetSignature(record) == record.targetSignature else { return .conflict }
+        return .retained
+    }
+    func arcDisposition(_ entry: ArcImportEntry) -> ArcImportDisposition {
+        arcDisposition(id: entry.id, signature: entry.signature, issue: entry.issue ?? (entry.kind == .folder && entry.spaceID == nil ? "Favorites folders need manual handling." : nil))
+    }
+    func arcDisposition(_ space: ArcImportSpace) -> ArcImportDisposition {
+        arcDisposition(id: space.id, signature: ArcImportReader.signature(space))
+    }
+    var arcPendingTabs: [ArcTabRestore] { arcMigration.tabs.filter { $0.status == .pending || $0.status == .sending } }
+
+    /// State and the import ledger commit in the same atomic file. Never overwrite a live
+    /// state file from an external script. Failed writes restore the in-memory transaction.
+    private func arcTransaction(_ change: () throws -> Void) throws {
+        let oldBookmarks = bookmarks, oldSpaces = spaceState, oldFolders = folderState, oldMigration = arcMigration
+        let oldNames = customNames, oldLinks = bookmarkLinks
+        do {
+            try change()
+            try persistState()
+        } catch {
+            bookmarks = oldBookmarks; spaceState = oldSpaces; folderState = oldFolders; arcMigration = oldMigration
+            customNames = oldNames; bookmarkLinks = oldLinks
+            throw error
+        }
+    }
+
+    @discardableResult
+    func importArc(_ snapshot: ArcImportSnapshot, selectedSpaces: Set<String>, includeFavorites: Bool) throws -> ArcImportReceipt {
+        guard !arcRestoreRunning else { throw ArcImportFailure(message: "Pause tab restoration before starting another import.") }
+        guard !selectedSpaces.isEmpty else { throw ArcImportFailure(message: "Select at least one Arc space.") }
+        guard Set(snapshot.spaces.map(\.id)).isSuperset(of: selectedSpaces) else { throw ArcImportFailure(message: "The space selection is invalid. Refresh the preview.") }
+        let fresh = try ArcImportReader.read(snapshot.sourceURL)
+        guard fresh.hash == snapshot.hash else { throw ArcImportFailure(message: "Arc changed since this preview. Refresh it before importing.") }
+        let selected = snapshot.spaces.filter { selectedSpaces.contains($0.id) }
+        let profiles = Set(selected.map(\.profileID))
+        let eligible = snapshot.entries.filter { entry in
+            entry.spaceID.map(selectedSpaces.contains) ?? (includeFavorites && profiles.contains(entry.profileID))
+        }
+        let entryDispositions = Dictionary(uniqueKeysWithValues: eligible.map { ($0.id, arcDisposition($0)) })
+        let spaceDispositions = Dictionary(uniqueKeysWithValues: selected.map { ($0.id, arcDisposition($0)) })
+        let batch = UUID()
+        let backup = persistenceURL.deletingLastPathComponent().appendingPathComponent("Arc Imports/\(batch.uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try encodedState().write(to: backup.appendingPathComponent("before.json"), options: .atomic)
+        try snapshot.data.write(to: backup.appendingPathComponent("Arc-sidebar.json"), options: .atomic)
+        for name in ["before.json", "Arc-sidebar.json"] { try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.appendingPathComponent(name).path) }
+        var receipt = ArcImportReceipt(id: batch, snapshotHash: snapshot.hash, added: 0, retained: 0,
+                                       conflicts: [], attention: [], backupPath: backup.path)
+        try arcTransaction {
+            var newKeys: [String] = []
+            for source in selected {
+                switch spaceDispositions[source.id]! {
+                case .add:
+                    let target = BrowserSpace(name: source.name, icon: source.icon, theme: source.theme,
+                        arcProfileID: source.profileID, emoji: source.originalIcon.flatMap(BrowserSpace.normalizedEmoji))
+                    spaceState.spaces.append(target)
+                    arcMigration.records[source.id] = ArcImportRecord(sourceID: source.id, targetID: target.id, kind: .space,
+                        sourceSignature: ArcImportReader.signature(source), targetSignature: "", batchID: batch)
+                    newKeys.append(source.id); receipt.added += 1
+                case .retained: receipt.retained += 1
+                default: receipt.conflicts.append("Space ‘\(source.name)’ changed or was removed. Kept the Safari version.")
+                }
+            }
+            for source in eligible {
+                let disposition = entryDispositions[source.id]!
+                if disposition == .attention { receipt.attention.append(source); continue }
+                if disposition == .retained { receipt.retained += 1; continue }
+                if disposition == .conflict {
+                    receipt.conflicts.append("‘\(source.title)’ changed or was removed. Kept the Safari version."); continue
+                }
+                let spaceID = source.spaceID.flatMap { arcMigration.records[$0]?.targetID }
+                if source.spaceID != nil && !spaces.contains(where: { $0.id == spaceID }) {
+                    receipt.conflicts.append("‘\(source.title)’ was skipped because its destination space was removed."); continue
+                }
+                let parentID = source.parentID.flatMap { arcMigration.records[$0]?.targetID }
+                if source.parentID != nil && folder(parentID ?? UUID()) == nil {
+                    receipt.conflicts.append("‘\(source.title)’ was skipped because its destination folder needs review."); continue
+                }
+                let targetID: UUID
+                let targetKind: ArcImportRecord.Kind
+                switch source.kind {
+                case .folder:
+                    guard let spaceID else { receipt.attention.append(source); continue }
+                    let target = PinnedFolder(name: source.title, spaceID: spaceID, parentID: parentID, isExpanded: false)
+                    folderState.folders.append(target); folderState.order.append(.folder(target.id))
+                    targetID = target.id; targetKind = .folder
+                case .pin, .favorite:
+                    guard let url = source.url else { receipt.attention.append(source); continue }
+                    let target = Bookmark(title: source.title, url: url, spaceID: spaceID, folderID: parentID,
+                                          arcProfileID: source.kind == .favorite ? source.profileID : nil)
+                    bookmarks.append(target)
+                    if spaceID != nil { folderState.order.append(.bookmark(target.id)) }
+                    targetID = target.id; targetKind = .bookmark
+                case .tab:
+                    guard let url = source.url, let spaceID else { receipt.attention.append(source); continue }
+                    arcMigration.tabs.append(.init(id: source.id, title: source.title, url: url,
+                                                  spaceID: spaceID, profileID: source.profileID, batchID: batch))
+                    targetID = UUID(); targetKind = .tab
+                case .unsupported: receipt.attention.append(source); continue
+                }
+                arcMigration.records[source.id] = .init(sourceID: source.id, targetID: targetID, kind: targetKind,
+                    sourceSignature: source.signature, targetSignature: "", batchID: batch)
+                newKeys.append(source.id); receipt.added += 1
+            }
+            for key in newKeys {
+                if let record = arcMigration.records[key] {
+                    let signature = arcTargetSignature(record) ?? ""
+                    arcMigration.records[key]?.targetSignature = signature
+                }
+            }
+            arcMigration.receipts.append(receipt)
+        }
+        // The authoritative receipt is in state.json; the bundle copy is for inspection.
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try? encoder.encode(receipt).write(to: backup.appendingPathComponent("receipt.json"), options: .atomic)
+        return receipt
+    }
+
+    /// Explicitly resume only queued work, in regular Safari windows chosen by the user.
+    /// Sending requests keep their original token/destination, even across an app restart.
+    func restoreArcTabs(destinations: [String: ArcImportDestination]) {
+        guard !arcRestoreRunning else { return }
+        arcRestoreDestinations = destinations
+        arcRestoreRunning = true; arcRestoreMessage = nil
+        sendNextArcTab()
+    }
+    func markArcTabHandled(_ id: String) throws {
+        guard !arcRestoreRunning, let index = arcMigration.tabs.firstIndex(where: { $0.id == id }),
+              arcMigration.tabs[index].status != .restored else { return }
+        try arcTransaction {
+            arcMigration.tabs[index].status = .cancelled
+            arcMigration.tabs[index].message = "Handled manually. This source item will not be reopened by repeat imports."
+        }
+    }
+
+    func pauseArcRestore() {
+        arcRestoreRunning = false
+        arcRestoreTimeout?.cancel(); arcRestoreTimeout = nil
+        arcRestoreMessage = "Paused. Completed tabs will stay closed if you close them. Resume to continue queued tabs."
+    }
+    private func sendNextArcTab() {
+        guard arcRestoreRunning else { return }
+        guard let index = arcMigration.tabs.firstIndex(where: { $0.status == .sending })
+                ?? arcMigration.tabs.firstIndex(where: { $0.status == .pending && arcRestoreDestinations[$0.profileID] != nil }) else {
+            arcRestoreRunning = false
+            arcRestoreMessage = arcPendingTabs.isEmpty ? "Tab restoration finished." : "Remaining tabs are saved for later. Choose destination windows to restore them."
+            return
+        }
+        let job = arcMigration.tabs[index]
+        guard spaces.contains(where: { $0.id == job.spaceID }) else {
+            arcRestoreRunning = false; arcRestoreMessage = "A queued tab's space was removed. Review the import before continuing."
+            return
+        }
+        let destination = job.status == .sending ? job.destination : arcRestoreDestinations[job.profileID]
+        guard let destination, snapshots[destination.instance]?.capabilities?.contains("arcMigrationV1") == true,
+              let window = snapshots[destination.instance]?.windows.first(where: { $0.id == destination.windowID }),
+              !window.incognito, sendCommand != nil else {
+            arcRestoreRunning = false
+            arcRestoreMessage = job.status == .sending ? "The original Safari window is unavailable. This tab's result is uncertain; it will not be opened again automatically." : "Choose a regular Safari window for ‘\(job.profileID)’ and resume."
+            return
+        }
+        do {
+            try arcTransaction {
+                arcMigration.tabs[index].status = .sending
+                arcMigration.tabs[index].destination = destination
+            }
+        } catch { arcRestoreRunning = false; arcRestoreMessage = error.localizedDescription; return }
+        send(["action": "migrationCreate", "requestId": job.requestID, "url": job.url, "windowId": destination.windowID, "active": false], to: destination.instance)
+        arcRestoreTimeout?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.arcRestoreRunning,
+                  self.arcMigration.tabs.contains(where: { $0.requestID == job.requestID && $0.status == .sending }) else { return }
+            self.arcRestoreRunning = false
+            self.arcRestoreMessage = "Waiting for Safari's acknowledgement. Resume to check the same request safely."
+        }
+        arcRestoreTimeout = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
+    }
+    private func handleArcRestoreReply(type: String, object: [String: Any]) {
+        guard let request = object["requestId"] as? String,
+              let index = arcMigration.tabs.firstIndex(where: { $0.requestID == request && $0.status == .sending }),
+              let instance = object["instance"] as? String,
+              arcMigration.tabs[index].destination?.instance == instance else { return }
+        do {
+            try arcTransaction {
+                if type == "migrationCreated", let id = object["tabId"] as? Int {
+                    let key = TabKey(instance: instance, tabId: id), job = arcMigration.tabs[index]
+                    let owner = spaces.contains(where: { $0.id == job.spaceID }) ? job.spaceID : selectedSpace.id
+                    arcMigration.tabs[index].status = .restored; arcMigration.tabs[index].key = key
+                    if spaceState.spaceID(for: key) == nil {
+                        let windowIndex = snapshots[instance]?.windows.firstIndex(where: { $0.id == job.destination?.windowID }) ?? 0
+                        spaceState.memberships.append(.init(key: key, spaceID: owner, url: job.url, windowIndex: windowIndex,
+                            privateWindow: false, profile: snapshots[instance]?.profile))
+                    } else { spaceState.assign(key, to: owner) }
+                    customNames[key] = CustomName(name: job.title, url: job.url)
+                } else {
+                    arcMigration.tabs[index].status = .attention
+                    arcMigration.tabs[index].message = object["message"] as? String ?? "Safari could not confirm this tab. Review it manually before opening a replacement."
+                }
+            }
+            arcRestoreTimeout?.cancel(); arcRestoreTimeout = nil
+            if arcRestoreRunning { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.sendNextArcTab() } }
+        } catch { arcRestoreRunning = false; arcRestoreMessage = "Could not save Safari's acknowledgement: \(error.localizedDescription). Resume to check safely." }
+    }
+
+    /// Undo only owned, unchanged objects. Live Safari tabs are deliberately retained.
+    /// Edited folders/spaces and containers with later user content are never removed.
+    func undoArcImport(_ batchID: UUID) throws {
+        pauseArcRestore()
+        try arcTransaction {
+            let records = arcMigration.records.values.filter { $0.batchID == batchID }
+            let unchanged = Set(records.filter { arcTargetSignature($0) == $0.targetSignature }.map(\.sourceID))
+            for record in records where record.kind == .bookmark && unchanged.contains(record.sourceID) {
+                bookmarks.removeAll { $0.id == record.targetID }
+                folderState.order.removeAll { $0 == .bookmark(record.targetID) }
+                bookmarkLinks[record.targetID] = nil
+                arcMigration.records[record.sourceID] = nil
+            }
+            var pending = records.filter { $0.kind == .folder && unchanged.contains($0.sourceID) }
+            while let index = pending.firstIndex(where: { record in
+                folder(record.targetID).map { pinnedChildren(of: $0.id, spaceID: $0.spaceID).isEmpty } == true
+            }) {
+                let record = pending.remove(at: index)
+                folderState.folders.removeAll { $0.id == record.targetID }
+                folderState.order.removeAll { $0 == .folder(record.targetID) }
+                arcMigration.records[record.sourceID] = nil
+            }
+            for index in arcMigration.tabs.indices where arcMigration.tabs[index].batchID == batchID {
+                if arcMigration.tabs[index].status != .restored { arcMigration.tabs[index].status = .cancelled }
+            }
+            for record in records where record.kind == .space && unchanged.contains(record.sourceID) {
+                guard !spaceState.memberships.contains(where: { $0.spaceID == record.targetID }),
+                      !bookmarks.contains(where: { $0.spaceID == record.targetID }),
+                      !folders.contains(where: { $0.spaceID == record.targetID }), spaces.count > 1 else { continue }
+                _ = spaceState.remove(record.targetID)
+                arcMigration.records[record.sourceID] = nil
+            }
+            if let index = arcMigration.receipts.firstIndex(where: { $0.id == batchID }) { arcMigration.receipts[index].undone = true }
+        }
     }
 }

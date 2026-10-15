@@ -5,6 +5,19 @@ struct BrowserSpace: Codable, Identifiable, Hashable {
     var name = "Personal"
     var icon = "circle.fill"
     var theme = "blue"
+    var arcProfileID: String? = nil
+    /// nil retains the existing SF Symbol; optional for older saved spaces.
+    var emoji: String? = nil
+
+    static func normalizedEmoji(_ input: String) -> String? {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scalars = value.unicodeScalars
+        let keycap = scalars.contains(where: { $0.value == 0x20E3 }) &&
+            scalars.first.map { "#*0123456789".unicodeScalars.contains($0) } == true
+        guard value.count == 1,
+              keycap || scalars.contains(where: { $0.properties.isEmoji && $0.value > 0x7F }) else { return nil }
+        return value
+    }
 
     static let icons = ["circle.fill", "house.fill", "briefcase.fill", "star.fill", "book.fill", "heart.fill", "leaf.fill", "globe"]
     static let themes = ["blue", "purple", "pink", "orange", "green", "gray"]

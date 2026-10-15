@@ -36,3 +36,16 @@ struct SpaceSwipe {
         return (consume, direction)
     }
 }
+
+/// A gesture belongs to the surface where it began, including its momentum.
+/// Horizontal scrolling of the icon strip must never become a space switch.
+struct SidebarSwipeRoute {
+    enum Region { case tabs, icons, outside }
+    private var owner: Region?
+    mutating func route(at region: Region, began: Bool, cancelled: Bool) -> Region {
+        if began || owner == nil { owner = region }
+        let result = owner ?? region
+        if cancelled { owner = nil }
+        return result
+    }
+}

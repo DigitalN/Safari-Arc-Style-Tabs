@@ -78,3 +78,69 @@ struct FolderState: Codable {
         order += all.filter { included.insert($0).inserted }
     }
 }
+
+/// Read-only indexes shared by every row. Rebuilt only when the library changes,
+/// rather than scanning the entire imported library for each folder and bookmark.
+struct PinnedLibraryIndex {
+    struct Parent: Hashable {
+        var spaceID: UUID
+        var folderID: UUID?
+    }
+    var bookmarks: [UUID: Bookmark] = [:]
+    var folders: [UUID: PinnedFolder] = [:]
+    var comparableURLs: [UUID: String] = [:]
+    var children: [Parent: [PinnedItem]] = [:]
+    var visibleEntries: [UUID: [PinnedEntry]] = [:]
+    var allEntries: [UUID: [PinnedEntry]] = [:]
+
+    init(bookmarks: [Bookmark], state: FolderState) {
+        var eligible: [Parent: [PinnedItem]] = [:]
+        var parents: [PinnedItem: Parent] = [:]
+        for folder in state.folders {
+            folders[folder.id] = folder
+            let parent = Parent(spaceID: folder.spaceID, folderID: folder.parentID)
+            let item = PinnedItem.folder(folder.id)
+            eligible[parent, default: []].append(item)
+            parents[item] = parent
+        }
+        for bookmark in bookmarks {
+            self.bookmarks[bookmark.id] = bookmark
+            comparableURLs[bookmark.id] = bookmark.url.comparableURL
+            if let spaceID = bookmark.spaceID {
+                let parent = Parent(spaceID: spaceID, folderID: bookmark.folderID)
+                let item = PinnedItem.bookmark(bookmark.id)
+                eligible[parent, default: []].append(item)
+                parents[item] = parent
+            }
+        }
+        var included = Set<PinnedItem>()
+        for item in state.order {
+            if let parent = parents[item], included.insert(item).inserted {
+                children[parent, default: []].append(item)
+            }
+        }
+        for (parent, items) in eligible {
+            for item in items where included.insert(item).inserted {
+                children[parent, default: []].append(item)
+            }
+        }
+        let spaceIDs = Set(parents.values.map(\.spaceID))
+        for spaceID in spaceIDs {
+            var all: [PinnedEntry] = [], visible: [PinnedEntry] = []
+            var visited = Set<UUID>()
+            func append(_ parentID: UUID?, depth: Int, showing: Bool) {
+                for item in children[Parent(spaceID: spaceID, folderID: parentID)] ?? [] {
+                    let entry = PinnedEntry(item: item, depth: depth)
+                    all.append(entry)
+                    if showing { visible.append(entry) }
+                    if case .folder(let id) = item, let folder = folders[id], visited.insert(id).inserted {
+                        append(id, depth: depth + 1, showing: showing && folder.isExpanded)
+                    }
+                }
+            }
+            append(nil, depth: 0, showing: true)
+            allEntries[spaceID] = all
+            visibleEntries[spaceID] = visible
+        }
+    }
+}

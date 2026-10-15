@@ -11,6 +11,23 @@ func spaceColor(_ theme: String) -> Color {
     }
 }
 
+struct SpaceIcon: View {
+    let space: BrowserSpace
+    var size: CGFloat = 14
+    var body: some View {
+        Group {
+            if let emoji = space.emoji.flatMap(BrowserSpace.normalizedEmoji) {
+                Text(emoji).font(.system(size: size + 2))
+            } else {
+                Image(systemName: space.icon)
+                    .font(.system(size: size))
+                    .foregroundStyle(spaceColor(space.theme))
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
 struct FavoritesSection: View {
     @Environment(TabStore.self) private var store
     var body: some View {
@@ -30,7 +47,7 @@ struct SpaceHeader: View {
 
     var body: some View {
         HStack {
-            Label(store.selectedSpace.name, systemImage: store.selectedSpace.icon)
+            Label { Text(store.selectedSpace.name) } icon: { SpaceIcon(space: store.selectedSpace, size: 13) }
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(spaceColor(store.selectedSpace.theme))
                 .lineLimit(1)
@@ -75,19 +92,37 @@ struct SpaceSwitcher: View {
     var body: some View {
         VStack(spacing: 6) {
             Divider()
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 28, maximum: 36))], spacing: 4) {
-                ForEach(store.spaces) { space in
-                    Button { store.selectSpace(space.id) } label: {
-                        Image(systemName: space.icon)
-                            .font(.system(size: 14))
-                            .frame(width: 28, height: 28)
-                            .foregroundStyle(spaceColor(space.theme))
-                            .background(RoundedRectangle(cornerRadius: 7).fill(spaceColor(space.theme).opacity(space.id == store.selectedSpace.id ? 0.22 : 0)))
+            HStack(spacing: 4) {
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 4) {
+                            ForEach(store.spaces) { space in
+                                Button { store.selectSpace(space.id) } label: {
+                                    SpaceIcon(space: space)
+                                        .frame(width: 28, height: 28)
+                                        .foregroundStyle(spaceColor(space.theme))
+                                        .background(RoundedRectangle(cornerRadius: 7).fill(spaceColor(space.theme).opacity(space.id == store.selectedSpace.id ? 0.22 : 0)))
+                                }
+                                .buttonStyle(.plain)
+                                .help(space.name)
+                                .accessibilityLabel(space.name)
+                                .accessibilityAddTraits(space.id == store.selectedSpace.id ? .isSelected : [])
+                                .contextMenu {
+                                    Button("Edit Space…") { editing = space }
+                                }
+                                .id(space.id)
+                            }
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .help(space.name)
-                    .accessibilityLabel(space.name)
-                    .accessibilityAddTraits(space.id == store.selectedSpace.id ? .isSelected : [])
+                    // Keep the strip implicit even when macOS is set to always show scrollbars.
+                    .scrollIndicators(.never)
+                    .frame(height: 30)
+                    .onAppear {
+                        DispatchQueue.main.async { proxy.scrollTo(store.selectedSpace.id, anchor: .center) }
+                    }
+                    .onChange(of: store.selectedSpace.id) { _, id in
+                        withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id, anchor: .center) }
+                    }
                 }
                 Button { editing = store.createSpace() } label: {
                     Image(systemName: "plus").frame(width: 28, height: 28)
@@ -96,6 +131,7 @@ struct SpaceSwitcher: View {
                 .help("New Space")
                 .accessibilityLabel("New Space")
             }
+            .background(SpaceSwitcherScrollRegion())
         }
         .padding(.horizontal, 10)
         .padding(.bottom, 10)
@@ -111,18 +147,51 @@ struct SpaceSwitcher: View {
 private struct SpaceEditor: View {
     @Environment(TabStore.self) private var store
     @State var space: BrowserSpace
+    @FocusState private var emojiFocused: Bool
     let onSave: (BrowserSpace) -> Void
     let onCancel: () -> Void
+
+    private var canSave: Bool {
+        !space.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        (space.emoji == nil || space.emoji.flatMap(BrowserSpace.normalizedEmoji) != nil)
+    }
+    private func save() {
+        guard canSave else { return }
+        var edited = space
+        edited.emoji = edited.emoji.flatMap(BrowserSpace.normalizedEmoji)
+        onSave(edited)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Edit Space").font(.headline)
             TextField("Space Name", text: $space.name)
                 .textFieldStyle(.roundedBorder)
-                .onSubmit { if !space.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { onSave(space) } }
-            Picker("Icon", selection: $space.icon) {
-                ForEach(BrowserSpace.icons, id: \.self) { icon in
-                    Label(icon.replacingOccurrences(of: ".fill", with: ""), systemImage: icon).tag(icon)
+                .onSubmit(save)
+            Picker("Icon style", selection: Binding(get: { space.emoji != nil }, set: { space.emoji = $0 ? "🌐" : nil })) {
+                Text("Symbol").tag(false)
+                Text("Emoji").tag(true)
+            }
+            .pickerStyle(.segmented)
+            if space.emoji != nil {
+                HStack {
+                    TextField("Emoji", text: Binding(get: { space.emoji ?? "" }, set: { space.emoji = $0 }))
+                        .textFieldStyle(.roundedBorder)
+                        .focused($emojiFocused)
+                        .onSubmit(save)
+                        .accessibilityLabel("Space emoji")
+                    Button("Choose Emoji…") {
+                        emojiFocused = true
+                        DispatchQueue.main.async { NSApp.orderFrontCharacterPalette(nil) }
+                    }
+                }
+                Text(space.emoji.flatMap(BrowserSpace.normalizedEmoji) != nil ? "Type or paste any single emoji." : "Choose one emoji to save.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Picker("Icon", selection: $space.icon) {
+                    ForEach(BrowserSpace.icons, id: \.self) { icon in
+                        Label(icon.replacingOccurrences(of: ".fill", with: ""), systemImage: icon).tag(icon)
+                    }
                 }
             }
             Picker("Theme", selection: $space.theme) {
@@ -133,9 +202,9 @@ private struct SpaceEditor: View {
             HStack {
                 Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Save") { onSave(space) }
+                Button("Save", action: save)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(space.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!canSave)
             }
         }
         .padding(16)

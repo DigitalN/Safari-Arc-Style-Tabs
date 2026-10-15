@@ -75,7 +75,7 @@ final class SidebarDrag {
         if overBookmarks {
             newTarget = pinnedTarget(at: value.location.y, item: item, store: store)
         } else if case .tab = item {
-            newTarget = .tabs(slot(rowsTop: tabRowsTop, others: (store.currentWindow.map { store.tabs(in: $0).count } ?? 0) - 1))
+            newTarget = .tabs(slot(rowsTop: tabRowsTop, others: (store.currentWindow.map { store.displayedTabs(in: $0, showBookmarks: bookmarksVisible).count } ?? 0) - 1))
         } else { newTarget = .none }
         if newTarget != target {
             withAnimation(.snappy(duration: 0.18)) {
@@ -91,7 +91,7 @@ final class SidebarDrag {
     }
 
     /// Ends the drag and applies it.
-    func finish(store: TabStore) {
+    func finish(store: TabStore, showBookmarks: Bool = true) {
         guard let item else { return }
         let target = self.target
         withAnimation(.snappy(duration: 0.18)) {
@@ -101,7 +101,7 @@ final class SidebarDrag {
             case (.folder(let folder), .pinned(let parent, let index)):
                 store.movePinnedItem(.folder(folder.id), to: parent, at: index)
             case (.tab(let tab, let instance), .tabs(let index)):
-                store.moveTab(tab, instance: instance, to: index)
+                store.moveTab(tab, instance: instance, to: index, showBookmarks: showBookmarks)
             case (.tab(let tab, let instance), .pinned(let folder, let index)):
                 store.addBookmark(from: tab, instance: instance, at: index, folderID: folder)
             default:
@@ -218,7 +218,7 @@ extension View {
                     )
                 }
                 .onEnded { _ in
-                    drag.finish(store: store)
+                    drag.finish(store: store, showBookmarks: settings.showBookmarks)
                 }
         )
     }

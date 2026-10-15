@@ -223,7 +223,8 @@ When Safari selects an existing tab, the sidebar follows its space. Opening a sh
 Favorite keeps the selected space and associates that open tab with it.
 
 Switching spaces activates the last visited tab in that window and space during the
-current app session, or its first tab. An empty space opens a new Safari tab. New tabs
+current app session, or its first tab. An empty space retains Safari's current page
+without opening a placeholder tab. New tabs
 and duplicates include a request ID so delayed replies retain the space that requested
 them, even if the user switches meanwhile. Closing or reordering tabs operates only on
 the current space; Safari indices are mapped from the filtered list.
@@ -281,3 +282,174 @@ Regression checks in `scripts/test-spaces.sh` include nesting, collapse, mixed r
 cycle rejection, reparenting, cross-space moves, non-destructive removal, state repair,
 and persistence. Before releasing, also verify folder creation, inline rename, nested
 dragging, external URL drops, and collapse/expand against the installed Safari sidebar.
+
+## Arc migration
+
+The menu bar's **Import from Arc…** opens a read-only preview of
+`~/Library/Application Support/Arc/StorableSidebar.json`; Choose File accepts saved
+copies. `--preview-arc` opens this window on launch. Nothing is imported or opened
+until the user reviews the selection and presses **Import Selected Spaces**.
+
+`ArcMigration.swift` reads stable consecutive snapshots and traverses only the
+active local sidebar. Alternating-key dictionaries, per-profile Favorites, folder
+hierarchies, sibling order, duplicate URLs, and split-view provenance are retained.
+Unknown content and non-web URLs appear as manual-handling entries. Split views
+become adjacent individual links; original appearance and all source records stay
+in the local snapshot. This does not transfer cookies, passwords, archives, or
+private windows. The saved-source timestamp is shown; unsaved Arc state is outside
+this snapshot. No source data is uploaded, and previews fetch no website icons.
+
+The migration ledger and normal sidebar state share one atomic `state.json` write.
+Arc IDs identify records, not URLs. Repeat imports add new IDs; changed sources,
+locally edited/missing targets, and conflicting order changes are kept for review.
+They are never silently overwritten or resurrected. Imported spaces are appended
+after existing spaces without selecting them or creating empty Safari tabs.
+Imported Favorites are visible in spaces with the same source `arcProfileID`;
+existing global Favorites continue to appear everywhere. Source profiles are labels,
+not Safari identity isolation. The user chooses regular Safari destination windows.
+
+Before an import, a private `Arc Imports/<batch UUID>/` directory beside the state
+holds `before.json`, `Arc-sidebar.json`, and a receipt. The receipt inside state is
+authoritative; the bundle copy is an inspection copy. Keep personal snapshots and
+receipts out of Git. Undo removes only unchanged owned objects, retains containers
+with later user content, cancels queued work, and leaves live Safari tabs open.
+
+Open tabs are a durable queue. Restoration is explicit, serial, and pausable. The
+native app persists a request token and destination before sending `migrationCreate`.
+The extension stores a durable intent in `storage.local` before creating a tab and
+records its result before acknowledging. Concurrent/repeated tokens create once;
+closed tabs stay closed. An interrupted intent or previous Safari session is
+ambiguous and requires manual review rather than blindly retrying. The history UI
+provides links and Mark Handled for these cases. Extension removal clears extension
+storage, so never retarget an unresolved sending request as a fresh operation.
+
+Validation:
+
+```sh
+scripts/test-spaces.sh
+scripts/test-arc-import.sh
+scripts/test-arc-import.sh --inspect-arc  # read-only local source inventory
+```
+
+Tests use synthetic fixtures and temporary state: duplicate URLs, profile Favorites,
+active roots vs sync caches, nested order, repeat imports, stale previews, edited or
+deleted destinations, transactional rollback, restart/resume, snapshot/ack races,
+private destinations, unsupported URLs, cycles, and undo preservation. Extension
+checks cover concurrent tokens, closed tabs, uncertain intents, old sessions, private
+windows, and persistence failure. Actual Arc tabs must not be imported merely to
+validate a build; leave the user's preview open for review.
+
+## Pinned tab presentation and space strip
+
+`tabs(in:)` remains the full space membership for activation and persistence.
+`displayedTabs(in:showBookmarks:)` is the lower ordinary-tab list: one-to-one
+bookmark/tab matching removes only tabs already represented by a visible pin or
+Favorite. Explicit runtime links take priority over URL matching and survive
+navigation and moves within a space. Additional tabs with the same URL remain
+visible. With bookmarks hidden, all tabs appear below. Counts and drag indices use
+the same displayed list; close-other/below actions protect sidebar pins. Open pins
+retain highlight, close/middle-click, mute, and reload controls. A newly selected
+nested pin reveals its folder ancestors; routine snapshots preserve manual collapse.
+
+The space switcher is a fixed-height horizontal scroll view with a separate, always
+visible New Space button. Selection scrolls its icon into view. A native background
+view reports the actual strip bounds to SidebarPanel, so precise gestures beginning
+on the strip scroll icons, including momentum; gestures in the tab area retain
+space switching. No fixed footer-height assumption is used for normal/fullscreen
+layouts. Regression cases are in `Tests/SpaceTests.swift`.
+
+## Auto-hide in regular Safari windows
+
+**Automatically hide sidebar** is a persisted option in Settings and the menu bar.
+The default remains docked; `--auto-hide-sidebar` explicitly enables the same saved
+preference on launch. Enabled mode restores the space Side Tabs reserved beside
+Safari, then overlays the page instead of resizing Safari on every reveal/hide.
+The toolbar button and shortcut open/close the overlay while leaving auto-hide on.
+
+`SidebarAutoHide.swift` contains pure hover-state and geometry rules. The regular
+window trigger follows Safari's visible left content edge, excluding browser chrome;
+the drawer is inset inside its content area and clamped to its display. Fullscreen
+keeps screen-edge activation. A short hide grace period and pointer tolerance avoid
+flicker. Renaming, space-editor popovers, drags, and menus keep the drawer open. An
+explicitly opened drawer waits for the pointer to visit before auto-hiding. Switching
+apps, windows, macOS Spaces, or overlay contexts clears the old reveal state. Layout
+repairs also check moved/resized windows and toolbar bounds.
+
+`DockController` shares this behavior between windowed/fullscreen overlays and keeps
+normal docked mode unchanged when the option is off. Tests never move a real Safari
+window:
+
+```sh
+scripts/test-auto-hide.sh
+scripts/test-spaces.sh
+scripts/test-arc-import.sh
+```
+
+For live testing, verify regular Safari at the display edge and inset, entering and
+leaving the sidebar, menus/rename/drag retention, toolbar toggle, changing Safari
+windows, other apps/Spaces, and returning to docked mode. Existing state and imported
+content must remain intact. Rebuilt ad hoc apps can require refreshing their existing
+Accessibility entry in macOS Privacy & Security.
+
+## Space-switching performance
+
+`PinnedLibraryIndex` builds ID, sibling-order, flattened-tree, and normalized-URL
+lookups once per library change. Folder rows, destinations, and drag targets reuse
+these indexes across space switches. `TabStore` shares one-to-one pin/tab matches
+between rows and the ordinary tab list; active-first URL queues avoid rescanning
+every live tab for every pin. Explicit tab links retain priority. Current-window
+selection is also shared rather than recalculated per row.
+
+The caches are transient. Bookmarks/folders, membership, explicit links, snapshots,
+and docked-window title changes invalidate the affected results. Cache hits still
+read the observable source properties, so SwiftUI observes edits and Safari updates.
+State schema, persistence, Safari commands, and drag geometry remain unchanged.
+
+`scripts/test-spaces.sh` exercises warm-cache invalidation, observation, duplicate
+URLs, scoped/profile Favorites, folder edits, window changes, and Safari termination.
+`scripts/test-space-performance.sh` uses an isolated synthetic library with 1,200
+pins, 400 folders, 400 live tabs, and 20 spaces. The initial Release-mode measurement
+of selection plus row-data preparation fell from 853 ms median to below 1 ms with
+the same semantic checksum. This measures model work, not complete SwiftUI rendering
+or Safari's page activation latency. Tests do not send commands to Safari or use
+the user's state.
+
+## Emoji icons and empty spaces
+
+Edit Space offers Symbol and Emoji styles. Emoji input accepts a single Unicode
+grapheme (including ZWJ sequences, flags, skin tones, and keycaps) and rejects plain
+text or several emoji. The Choose Emoji button focuses the field and opens the macOS
+character picker. `BrowserSpace.emoji` is optional, so saved symbol icons and their
+existing import signatures remain compatible. Header and switcher share `SpaceIcon`;
+new Arc imports retain valid source emoji. Existing spaces change only when edited.
+
+Space activation never creates Safari tabs. Creating spaces, switching via icons or
+swipes, moving the last tab, and closing the last tab use only existing candidates.
+When none exists in this window, a transient background-tab marker keeps routine
+snapshots and delayed activations from selecting the old page's space. Choosing a
+different native tab or window resumes Safari selection following. Explicit New Tab,
+pin opens, and Safari-created tabs retain membership handling and request IDs.
+No existing tabs are closed or rewritten as part of this change.
+
+## Command delivery when Safari push fails
+
+Safari can accept snapshots from the extension while `dispatchMessage` fails with
+`SFErrorNoExtensionFound`, notably with local unsigned builds. `ExtensionBridge`
+therefore uses push only to request a poll. Commands travel in replies on the working
+extension-to-app connection. A single outstanding JavaScript poll runs at 250 ms
+while Safari is frontmost, backing off to five seconds otherwise or if the app is
+unavailable. Focus changes and successful push wakeups request an immediate poll.
+
+`ExtensionCommandQueue` keeps commands for 15 seconds, bounded at 256, scoped to the
+requesting Safari instance. Stable command IDs are acknowledged and claimed in
+JavaScript before browser API calls, so lost replies/acks and concurrent polls cannot
+open a saved pin twice. Explicit request IDs still handle membership and migration
+receipts. Old browser sessions cannot receive a previous instance's clicks; app
+restart discards this transient queue. Arc restore's durable intent checks remain
+separate. Broadcast snapshot requests are acknowledged per instance. Older scripts
+without the negotiated deduplication protocol receive no retryable commands.
+
+Reload the extension once after installing this native/background protocol change;
+Safari itself need not quit. `scripts/test-command-delivery.sh` covers failed push,
+lost replies, concurrent delivery, acknowledgements, expiry, profile isolation,
+bounded queues, pin request IDs, and migration safety without accessing Safari.

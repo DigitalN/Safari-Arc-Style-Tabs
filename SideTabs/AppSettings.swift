@@ -15,6 +15,10 @@ final class AppSettings {
         didSet { defaults.set(sidebarVisible, forKey: "sidebarVisible") }
     }
 
+    var autoHideSidebar: Bool {
+        didSet { defaults.set(autoHideSidebar, forKey: "autoHideSidebar") }
+    }
+
     var width: Double {
         didSet { defaults.set(width, forKey: "sidebarWidth") }
     }
@@ -71,13 +75,19 @@ final class AppSettings {
     init() {
         defaults.register(defaults: [
             "sidebarVisible": true,
+            "autoHideSidebar": false,
             "sidebarWidth": 260.0,
             "closeButtonMode": CloseButtonMode.hover.rawValue,
             "showBookmarks": true,
             "hasCompletedSetup": false,
             "updatesAutomatically": true,
         ])
+        // Explicit launch option for enabling the same persisted Settings preference.
+        if CommandLine.arguments.contains("--auto-hide-sidebar") {
+            defaults.set(true, forKey: "autoHideSidebar")
+        }
         sidebarVisible = defaults.bool(forKey: "sidebarVisible")
+        autoHideSidebar = defaults.bool(forKey: "autoHideSidebar")
         width = defaults.double(forKey: "sidebarWidth").clamped(to: Self.widthRange)
         closeButtonMode = CloseButtonMode(rawValue: defaults.string(forKey: "closeButtonMode") ?? "") ?? .hover
         showBookmarks = defaults.bool(forKey: "showBookmarks")

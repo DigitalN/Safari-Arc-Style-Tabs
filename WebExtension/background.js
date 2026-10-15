@@ -12,6 +12,7 @@
 const NATIVE_APP_ID = "com.digitaln.sidetabs";
 const WINDOW_ID_NONE = browser.windows.WINDOW_ID_NONE ?? -1;
 const HEARTBEAT_MS = 5000;
+const COMMAND_TRANSPORT = "queue-v1";
 
 // Each background page instance (one per Safari profile) gets its own id so the
 // app can keep profiles apart and notice when Safari restarts.
@@ -65,6 +66,7 @@ async function buildSnapshot() {
 
     return {
         type: "snapshot",
+        capabilities: ["arcMigrationV1"],
         instance,
         seq: ++seq,
         focusedWindowId,
@@ -122,7 +124,7 @@ async function flushSnapshot() {
 
 async function postToApp(message) {
     try {
-        const reply = await browser.runtime.sendNativeMessage(NATIVE_APP_ID, message);
+        const reply = await browser.runtime.sendNativeMessage(NATIVE_APP_ID, { ...message, commandTransport: COMMAND_TRANSPORT });
         handleReply(reply);
         return reply;
     } catch (error) {
@@ -140,9 +142,48 @@ function handleReply(reply) {
 // ---------------------------------------------------------------------------
 // Commands from the app
 
+let commandPollTimer = null;
+let commandPolling = false;
+let commandPollAgain = false;
+
+function scheduleCommandPoll(delay = 0) {
+    if (commandPollTimer != null) clearTimeout(commandPollTimer);
+    commandPollTimer = setTimeout(pollCommands, delay);
+}
+
+async function pollCommands() {
+    commandPollTimer = null;
+    if (commandPolling) { commandPollAgain = true; return; }
+    commandPolling = true;
+    let delay = 5000;
+    try {
+        const reply = await postToApp({ type: "commandPoll", instance });
+        if (reply?.appRunning) delay = Math.max(100, Math.min(5000, reply.commandPollIntervalMs ?? 250));
+    } finally {
+        commandPolling = false;
+        scheduleCommandPoll(commandPollAgain ? 0 : delay);
+        commandPollAgain = false;
+    }
+}
+
+// The native queue expires after 15 seconds. Keep IDs much longer than that, so
+// concurrent replies, lost acknowledgements, and push wakeups cannot create twice.
+const receivedCommands = new Map();
 async function runCommand(command) {
     if (!command || typeof command !== "object") return;
     if (command.instance && command.instance !== instance) return;
+    if (command.action === "pollCommands") { scheduleCommandPoll(); return; }
+    if (typeof command.commandID === "string") {
+        const id = command.commandID;
+        const duplicate = receivedCommands.has(id);
+        receivedCommands.set(id, Date.now());
+        // Claim synchronously before any await or acknowledgement can deliver it again.
+        for (const [key, at] of receivedCommands) {
+            if (Date.now() - at > 120000) receivedCommands.delete(key);
+        }
+        postToApp({ type: "commandAck", instance, commandAcks: [id] });
+        if (duplicate) return;
+    }
 
     try {
         switch (command.action) {
@@ -156,6 +197,10 @@ async function runCommand(command) {
 
         case "close":
             await browser.tabs.remove(command.tabIds ?? [command.tabId]);
+            break;
+
+        case "migrationCreate":
+            await migrationCreate(command);
             break;
 
         case "create": {
@@ -199,6 +244,48 @@ async function runCommand(command) {
         // Whatever the app assumed is now wrong; send it the truth.
         scheduleSnapshot(0);
     }
+}
+
+// A durable intent is stored BEFORE creation. An interrupted intent is uncertain,
+// never permission to blindly create another tab. Completed/closed requests stay done.
+const migrationRequests = new Map();
+async function migrationCreate(command) {
+    const token = command.requestId;
+    if (typeof token !== "string" || !token || !/^https?:|^about:blank$/.test(command.url ?? "")) return;
+    if (migrationRequests.has(token)) return migrationRequests.get(token);
+    const work = (async () => {
+        const key = `arc-import:${token}`;
+        const attention = (message) => postToApp({ type: "migrationAttention", instance, requestId: token, message });
+        if (!browser.storage?.local) return attention("Persistent extension storage is unavailable. No tab was opened.");
+        try {
+            const previous = (await browser.storage.local.get(key))[key];
+            if (previous) {
+                if (previous.state === "done" && previous.instance === instance) {
+                    // A completed request must never reopen a tab the user closed.
+                    let existing;
+                    try { existing = await browser.tabs.get(previous.tabId); }
+                    catch { return attention("This tab was created previously and has since been closed. It was not reopened."); }
+                    if (existing.windowId !== previous.windowId || existing.url !== previous.url) {
+                        return attention("This tab moved or navigated after creation. Review it manually; no duplicate was opened.");
+                    }
+                    return postToApp({ type: "migrationCreated", instance, requestId: token, tabId: previous.tabId });
+                }
+                return attention("An earlier attempt may have opened this tab, possibly in a previous Safari session. Check Safari manually; no duplicate was opened.");
+            }
+            // Do not accept private destinations even if the native app has stale state.
+            const window = await browser.windows.get(command.windowId);
+            if (window.incognito) return attention("Private windows cannot receive imported tabs.");
+            await browser.storage.local.set({ [key]: { state: "creating", instance, url: command.url } });
+            const tab = await browser.tabs.create({ windowId: command.windowId, url: command.url, active: false });
+            await browser.storage.local.set({ [key]: { state: "done", instance, tabId: tab.id, windowId: tab.windowId ?? command.windowId, url: tab.url ?? command.url } });
+            return postToApp({ type: "migrationCreated", instance, requestId: token, tabId: tab.id });
+        } catch {
+            return attention("Safari could not confirm creation. The request is retained for manual review; it will not be repeated automatically.");
+        }
+    })();
+    migrationRequests.set(token, work);
+    try { return await work; }
+    finally { migrationRequests.delete(token); }
 }
 
 async function duplicateTab(tabId) {
@@ -281,6 +368,7 @@ browser.windows.onFocusChanged.addListener((windowId) => {
     if (windowId !== WINDOW_ID_NONE) lastFocusedWindowId = windowId;
     focusChangedAt = Date.now();
     scheduleSnapshot(0);
+    scheduleCommandPoll();
 });
 
 browser.runtime.onMessage.addListener((message, sender) => {
@@ -320,6 +408,7 @@ async function collectExistingFavicons() {
 
     connectPort();
     await postToApp({ type: "hello", instance, launchApp: true });
+    scheduleCommandPoll();
     scheduleSnapshot(0);
     // Safari restores windows and tabs for a while after launch, not always with events.
     for (const delay of [1000, 3000, 6000]) setTimeout(() => scheduleSnapshot(0), delay);

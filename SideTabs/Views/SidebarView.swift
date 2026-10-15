@@ -33,6 +33,10 @@ struct SidebarView: View {
                                 .padding(.vertical, 7)
                         }
                         TabsSection(selection: selection)
+                        if store.arcPendingTabs.contains(where: { $0.spaceID == store.selectedSpace.id }) {
+                            Button("Restore queued Arc tabs…") { store.onOpenArcImport?() }
+                                .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary).padding(8)
+                        }
                     }
                     .coordinateSpace(.named(SidebarDrag.coordinateSpace))
                     .overlay(alignment: .topLeading) {
@@ -62,11 +66,12 @@ struct SidebarView: View {
 private struct TabsSection: View {
     let selection: TabStore.WindowSelection
     @Environment(TabStore.self) private var store
+    @Environment(AppSettings.self) private var settings
     @Environment(SidebarDrag.self) private var drag
 
     /// Tabs in display order; a tab dragged within the list moves to the target slot.
     private var tabs: [BrowserTab] {
-        var tabs = store.tabs(in: selection)
+        var tabs = store.displayedTabs(in: selection, showBookmarks: settings.showBookmarks)
         if case .tab(let dragged, _)? = drag.item, case .tabs(let index) = drag.target,
            let from = tabs.firstIndex(where: { $0.id == dragged.id }) {
             let moved = tabs.remove(at: from)
@@ -77,7 +82,7 @@ private struct TabsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-            SectionHeader(title: "Tabs", detail: "\(store.tabs(in: selection).count)") {
+            SectionHeader(title: "Tabs", detail: "\(store.displayedTabs(in: selection, showBookmarks: settings.showBookmarks).count)") {
                 SidebarIconButton(systemImage: "plus", help: "New Tab") {
                     store.newTab()
                 }
