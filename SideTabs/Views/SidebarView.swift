@@ -15,6 +15,14 @@ struct SidebarView: View {
                     .padding(.horizontal, 8)
                     .padding(.top, 12)
                     .padding(.bottom, 4)
+                if !store.validSidebarSelection.isEmpty {
+                    HStack {
+                        Text("\(store.validSidebarSelection.count) selected").font(.caption)
+                        Spacer()
+                        Menu("Actions") { BulkSelectionActions() }
+                        SidebarIconButton(systemImage: "xmark", help: "Clear Selection") { store.clearSidebarSelection() }
+                    }.padding(.horizontal, 12).padding(.vertical, 4)
+                }
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 0) {
                         if store.lacksWebsiteAccess {
@@ -41,7 +49,7 @@ struct SidebarView: View {
                     .coordinateSpace(.named(SidebarDrag.coordinateSpace))
                     .overlay(alignment: .topLeading) {
                         if let item = drag.item {
-                            DragGhost(item: item)
+                            DragGhost(item: drag.items.first ?? item, count: drag.items.count)
                                 .offset(y: drag.ghostTop)
                                 .allowsHitTesting(false)
                         }
@@ -58,8 +66,56 @@ struct SidebarView: View {
         }
         .background(spaceColor(store.selectedSpace.theme).opacity(0.08))
         .onChange(of: store.selectedSpace.id) { _, _ in drag.cancel() }
+        .onChange(of: store.sidebarSelectionContext) { _, _ in drag.cancel(); store.clearSidebarSelection() }
+        .onAppear { store.selectionShowsBookmarks = settings.showBookmarks }
+        .onChange(of: settings.showBookmarks) { _, show in
+            drag.cancel(); store.clearSidebarSelection(); store.selectionShowsBookmarks = show
+        }
+        // A sheet on the stable sidebar root survives row updates and holds focus
+        // while the pointer leaves an auto-hiding sidebar to choose an action.
+        .alert(store.pendingSidebarDeletion?.title ?? "Delete?", isPresented: Binding(
+            get: { store.isConfirmingSidebarDeletion }, set: { store.isConfirmingSidebarDeletion = $0 }),
+               presenting: store.pendingSidebarDeletion) { deletion in
+            switch deletion {
+            case .folder(let folder):
+                Button("Remove Folder, Keep Contents") { store.removeFolder(folder.id) }
+                Button("Delete Folder and All Its Tabs", role: .destructive) { store.removeFolder(folder.id, deleteContents: true) }
+            case .space(let space):
+                Button("Move Items to \(store.spaces.first { $0.id != space.id }?.name ?? "Another Space") and Delete Space") {
+                    store.deleteSpace(space.id)
+                }
+                Button("Delete Space and All Its Tabs", role: .destructive) { store.deleteSpace(space.id, deleteContents: true) }
+            case .selection(let items, let context):
+                Button("Delete Selected Tabs", role: .destructive) { store.deleteSidebarSelection(items, context: context) }
+            }
+            Button("Cancel", role: .cancel) { store.pendingSidebarDeletion = nil }
+        } message: { deletion in
+            switch deletion {
+            case .folder:
+                Text("Keep the contents in the parent folder, or delete all saved tabs and nested folders and close their open Safari tabs. Other copies of the same page are kept.")
+            case .space:
+                Text("Move the contents to another space, or delete its saved tabs and folders and close its open Safari tabs in all windows. Shared Favorites are kept.")
+            case .selection:
+                Text("Selected saved tabs will be removed and their open tabs closed. Other copies of the same page and folders are kept.")
+            }
+        }
         .environment(drag)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+struct BulkSelectionActions: View {
+    @Environment(TabStore.self) private var store
+    var body: some View {
+        Button("Delete \(store.validSidebarSelection.count) Selected Tabs…", role: .destructive) { store.requestDeleteSidebarSelection() }
+        Menu("Move Selected Tabs to Space") {
+            ForEach(store.spaces) { space in
+                Button { store.moveSidebarSelection(to: space.id) } label: {
+                    Label { Text(space.name) } icon: { SpaceIcon(space: space) }
+                }.disabled(space.id == store.selectedSpace.id)
+            }
+        }
+        Button("Clear Selection") { store.clearSidebarSelection() }
     }
 }
 
@@ -69,15 +125,9 @@ private struct TabsSection: View {
     @Environment(AppSettings.self) private var settings
     @Environment(SidebarDrag.self) private var drag
 
-    /// Tabs in display order; a tab dragged within the list moves to the target slot.
+    /// Preview the selected group together at its destination slot.
     private var tabs: [BrowserTab] {
-        var tabs = store.displayedTabs(in: selection, showBookmarks: settings.showBookmarks)
-        if case .tab(let dragged, _)? = drag.item, case .tabs(let index) = drag.target,
-           let from = tabs.firstIndex(where: { $0.id == dragged.id }) {
-            let moved = tabs.remove(at: from)
-            tabs.insert(moved, at: min(index, tabs.count))
-        }
-        return tabs
+        drag.previewTabs(store.displayedTabs(in: selection, showBookmarks: settings.showBookmarks))
     }
 
     var body: some View {

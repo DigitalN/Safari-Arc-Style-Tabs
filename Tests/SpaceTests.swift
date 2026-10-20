@@ -21,6 +21,443 @@ import Observation
         _ = store.handleMessage(type: "snapshot", payload: payload, object: [:])
     }
 
+    static func checkTabCleanup(in dir: URL) throws {
+        let suite = "sidetabs-cleanup-tests-\(UUID())"
+        let defaults = UserDefaults(suiteName:suite)!
+        defer { defaults.removePersistentDomain(forName:suite) }
+        let settings = AppSettings(defaults:defaults)
+        expect(settings.tabCleanupInterval == .off, "cleanup defaults Off for existing installations")
+        for interval in TabCleanupInterval.allCases {
+            settings.tabCleanupInterval = interval
+            expect(AppSettings(defaults:defaults).tabCleanupInterval == interval, "cleanup setting persists \(interval.rawValue)")
+        }
+        expect(TabCleanupInterval.twelveHours.seconds == 43200 && TabCleanupInterval.twentyFourHours.seconds == 86400 && TabCleanupInterval.weekly.seconds == 604800, "cleanup intervals match the offered durations")
+        defaults.set("unknown",forKey:"tabCleanupInterval")
+        expect(AppSettings(defaults:defaults).tabCleanupInterval == .off, "unknown cleanup preferences fall back to Off")
+
+        let stateURL = dir.appendingPathComponent("cleanup.json")
+        let store = TabStore(stateURL:stateURL)
+        var now = Date(timeIntervalSince1970:2_000_000)
+        store.activityClock = { now }
+        var policy = TabCleanupInterval.off
+        store.cleanupInterval = { policy }
+        var commands: [[String:Any]] = []
+        store.sendCommand = { commands.append($0) }
+        var live = (1...12).map { tab($0,active:$0 == 1) }
+        live[2].pinned = true; live[3].audible = true; live[4].loading = true
+        live[5].url = nil; live[8].url = live[7].url
+        var sequence = 0
+        func applyLive() throws {
+            sequence += 1
+            var value = snapshot(live,seq:sequence)
+            value.capabilities = ["tabCleanupV1"]
+            value.windows.append(.init(id:20,focused:false,incognito:true,tabs:[tab(21,windowID:20)]))
+            try apply(value,to:store)
+        }
+        try applyLive()
+        let source = store.selectedSpace.id
+        store.addBookmark(from:live[6],instance:"one")
+        store.moveBookmarkToSpace(store.pinnedBookmarks[0],spaceID:nil)
+        let other = store.createSpace()
+        store.moveTabToSpace(live[7],instance:"one",spaceID:other.id)
+        store.moveTabToSpace(live[9],instance:"one",spaceID:other.id)
+        let folder = store.createFolder()
+        store.addBookmark(from:live[7],instance:"one",folderID:folder.id)
+        store.toggleFolder(folder.id)
+        store.selectSpace(source)
+        commands.removeAll()
+        now += 43200 - 1
+        try applyLive()
+        expect(!commands.contains { $0["action"] as? String == "cleanupClose" }, "Off never closes old tabs")
+        policy = .twelveHours
+        try applyLive()
+        expect(!commands.contains { $0["action"] as? String == "cleanupClose" }, "tabs are retained before the inactivity threshold")
+        store.activate(live[10],instance:"one"); store.activate(live[0],instance:"one")
+        live[11].url = "https://example.com/new-navigation"
+        now += 1
+        commands.removeAll()
+        try applyLive()
+        let cleanup = commands.first { $0["action"] as? String == "cleanupClose" }!
+        let candidates = cleanup["tabs"] as! [[String:Any]]
+        expect(Set(candidates.compactMap { $0["id"] as? Int }) == [2,9,10], "cleanup spans spaces but protects current, pinned, saved, private, audio, loading, recent, and navigated tabs")
+        expect(store.currentWindow!.window.tabs.count == live.count, "native cleanup waits for confirmed Safari snapshots before removing rows")
+        func authorized(_ list: [[String:Any]] = candidates, instance: String = "one") -> Set<Int> {
+            Set(store.handleMessage(type:"cleanupAuthorize",payload:Data(),object:["instance":instance,"tabs":list])["cleanupTabIds"] as? [Int] ?? [])
+        }
+        expect(authorized() == [2,9,10], "execution authorization confirms eligible candidates")
+        store.addBookmark(from:live[1],instance:"one")
+        expect(authorized() == [9,10], "pinning after enqueue protects the newly saved tab")
+        policy = .off
+        expect(authorized().isEmpty, "switching Off cancels queued cleanup authorization")
+        policy = .twentyFourHours
+        expect(authorized().isEmpty, "increasing the interval rechecks queued candidates")
+        policy = .twelveHours
+        expect(authorized(instance:"another").isEmpty, "cleanup authorization is scoped to Safari instance")
+        expect(authorized([["id":10,"windowId":10,"url":"https://wrong.example"]]).isEmpty, "changed URL cannot authorize an old cleanup request")
+        store.selectSidebarItem(.tab(.init(instance:"one",tabId:9)),extending:true)
+        expect(authorized().isEmpty, "bulk-selection interaction suspends cleanup")
+        store.clearSidebarSelection()
+        store.save()
+        let beforeRestart = store.spaceState.memberships.first { $0.key.tabId == 10 }!.lastUsedAt
+        let restored = TabStore(stateURL:stateURL)
+        expect(restored.spaceState.memberships.first { $0.key.tabId == 10 }?.lastUsedAt == beforeRestart, "tab inactivity timestamps persist across app restart")
+        let privateKey = TabKey(instance:"one",tabId:21)
+        expect(!restored.spaceState.memberships.contains { $0.key == privateKey }, "private-tab activity is never persisted")
+        commands.removeAll(); try applyLive()
+        expect(!commands.contains { $0["action"] as? String == "cleanupClose" }, "pending candidates are not repeatedly enqueued on routine snapshots")
+        live[0].active = false; live[8].active = true
+        commands.removeAll(); try applyLive()
+        expect(!authorized().contains(9), "a tab selected in Safari after enqueue is protected")
+        expect(store.spaceState.memberships.first { $0.key.tabId == 1 }?.lastUsedAt == now, "leaving a long-open active tab starts a fresh inactivity period")
+        now += 61; commands.removeAll(); try applyLive()
+        expect(commands.filter { $0["action"] as? String == "cleanupClose" }.count == 1, "unconfirmed cleanup can retry on a later fresh snapshot")
+
+        var state = SpaceState()
+        let baseline = Date(timeIntervalSince1970:1000)
+        state.reconcile(snapshot([tab(1,active:true),tab(2)]),liveInstances:["one"],now:baseline)
+        state.reconcile(snapshot([tab(31,active:true),tab(32,url:"https://example.com/2")],instance:"restored"),liveInstances:["restored"],now:baseline+90000)
+        expect(state.memberships.first { $0.key.tabId == 32 }?.lastUsedAt == baseline, "URL restoration preserves inactivity when Safari changes tab IDs")
+        let oldData = try JSONEncoder().encode(state)
+        var oldJSON = try JSONSerialization.jsonObject(with:oldData) as! [String:Any]
+        oldJSON["memberships"] = (oldJSON["memberships"] as! [[String:Any]]).map { row in var row=row; row["lastUsedAt"]=nil; return row }
+        var legacy = try JSONDecoder().decode(SpaceState.self,from:JSONSerialization.data(withJSONObject:oldJSON))
+        legacy.reconcile(snapshot([tab(31,active:true),tab(32,url:"https://example.com/2")],instance:"restored",seq:2),liveInstances:["restored"],now:baseline+90000)
+        expect(legacy.memberships.first { $0.key.tabId == 32 }?.lastUsedAt == baseline+90000, "legacy tabs get a full interval instead of immediate cleanup")
+    }
+
+    static func checkSpaceIconReordering(in dir: URL) throws {
+        let ids = (0..<4).map { _ in UUID() }
+        var drag = SpaceIconDrag(id: ids[1], order: ids, start: CGPoint(x: 40, y: 14), contentX: 0)!
+        drag.update(at: CGPoint(x: 104, y: 14), contentX: 0)
+        expect(drag.order == [ids[0],ids[2],ids[3],ids[1]], "drag right previews final insertion, rather than swapping intervening spaces")
+        drag.update(at: CGPoint(x: 8, y: 14), contentX: 0)
+        expect(drag.order == [ids[1],ids[0],ids[2],ids[3]], "reversing drag can move the space to the first slot")
+        drag.update(at: CGPoint(x: 8, y: 14), contentX: -64)
+        expect(drag.order == [ids[0],ids[2],ids[1],ids[3]], "drag target tracks content scroll without pointer movement")
+        expect(drag.scrollTarget(width: 64, contentX: -64)?.towardEnd == false, "left edge reveals earlier hidden icons")
+        drag.update(at: CGPoint(x: 62, y: 14), contentX: 0)
+        expect(drag.scrollTarget(width: 64, contentX: 0)?.towardEnd == true, "right edge reveals later hidden icons")
+        expect(drag.scrollTarget(width: 160, contentX: 0) == nil, "fully visible strip does not autoscroll")
+        drag.update(at: CGPoint(x: 62, y: 80), contentX: 0)
+        expect(!drag.canDrop(in:64) && drag.scrollTarget(width:64,contentX:0) == nil, "release outside strip cancels and does not autoscroll")
+        drag.update(at: CGPoint(x: -500, y: 14), contentX: 0)
+        expect(drag.order.first == ids[1], "far left preview clamps to first slot")
+        drag.update(at: CGPoint(x: 500, y: 14), contentX: 0)
+        expect(drag.order.last == ids[1], "far right preview clamps to last slot")
+        expect(SpaceIconDrag(id:UUID(),order:ids,start:.zero,contentX:0) == nil, "unknown drag source is rejected")
+
+        let url = dir.appendingPathComponent("reordered-spaces.json")
+        let store = TabStore(stateURL: url)
+        try apply(snapshot([tab(1,active:true),tab(2)]),to:store)
+        _ = store.createSpace(); _ = store.createSpace(); _ = store.createSpace()
+        let original = store.spaces.map(\.id)
+        store.selectSpace(original[1])
+        let selected = store.selectedSpace.id, membership = store.spaceState.memberships
+        let folder = store.createFolder(name:"Keep Folder")
+        store.addBookmark(url: URL(string:"https://example.com/pin")!,folderID:folder.id)
+        let bookmarks = store.bookmarks, folders = store.folderState
+        var commands: [[String:Any]] = []
+        store.sendCommand = { commands.append($0) }
+        store.moveSpace(original[0],to:3)
+        let expected = Array(original.dropFirst()) + [original[0]]
+        expect(store.spaces.map(\.id) == expected, "store commits the dragged space at its final index")
+        expect(store.selectedSpace.id == selected && store.spaceState.memberships == membership, "reordering preserves selection and tab memberships")
+        expect(store.bookmarks == bookmarks && store.folderState.folders == folders.folders && store.folderState.order == folders.order && commands.isEmpty, "reordering keeps saved contents and sends no Safari commands")
+        store.moveSpace(UUID(),to:0); store.moveSpace(original[0],to:-1); store.moveSpace(original[0],to:99)
+        expect(store.spaces.map(\.id) == expected, "invalid sources and destinations leave space order intact")
+        store.save()
+        let restored = TabStore(stateURL:url)
+        expect(restored.spaces.map(\.id) == expected && restored.selectedSpace.id == selected, "reordered spaces and selection persist across app restart")
+        expect(restored.bookmarks == bookmarks && restored.folderState.folders == folders.folders && restored.folderState.order == folders.order, "restart retains folder and pin ownership after reorder")
+        store.switchSpace(direction:1)
+        expect(store.selectedSpace.id == original[2], "space swipes follow the reordered list")
+    }
+
+    static func checkRangeSelection(in dir: URL) throws {
+        let store = TabStore(stateURL: dir.appendingPathComponent("range.json"))
+        var commands: [[String: Any]] = []
+        store.sendCommand = { commands.append($0) }
+        let live = [tab(1),tab(2, active:true),tab(3),tab(4),tab(5)]
+        try apply(snapshot(live), to: store)
+        let home = store.selectedSpace.id
+        let target = store.createSpace()
+        store.selectSpace(home)
+        try apply(snapshot(live,seq:2),to:store)
+        func item(_ id: Int) -> SidebarSelectionItem { .tab(TabKey(instance:"one",tabId:id)) }
+        commands.removeAll()
+        store.selectSidebarItem(item(5),extending:true)
+        expect(store.validSidebarSelection == Set([item(2),item(3),item(4),item(5)]), "first Shift-click anchors at current active tab")
+        expect(commands.isEmpty, "range selection never activates or creates tabs")
+        store.selectSidebarItem(item(1),extending:true)
+        expect(store.validSidebarSelection == Set([item(1),item(2)]), "reverse Shift-click retains original anchor and replaces range")
+        store.selectSidebarItem(item(4),extending:true)
+        expect(store.validSidebarSelection == Set([item(2),item(3),item(4)]), "repeated Shift-click extends from stable anchor")
+        store.moveSidebarSelection(to: target.id)
+        expect([2,3,4].allSatisfy { store.spaceState.spaceID(for:.init(instance:"one",tabId:$0)) == target.id }, "bulk move assigns every selected tab")
+        expect(store.spaceState.spaceID(for:.init(instance:"one",tabId:1)) == home && store.spaceState.spaceID(for:.init(instance:"one",tabId:5)) == home, "bulk move preserves unselected tabs")
+        expect(store.selectedSidebarItems.isEmpty && !commands.contains { $0["action"] as? String == "create" }, "bulk move clears selection without placeholders")
+        store.selectSpace(target.id)
+        store.selectSidebarItem(item(2),extending:false)
+        store.activate(tab(2),instance:"one")
+        store.selectSidebarItem(item(4),extending:true)
+        store.requestDeleteSidebarSelection()
+        store.isConfirmingSidebarDeletion = false // SwiftUI dismisses the dialog.
+        commands.removeAll()
+        store.confirmDeleteSidebarSelection()
+        expect(Set(commands.filter { $0["action"] as? String == "close" }.flatMap { $0["tabIds"] as? [Int] ?? [] }) == [2,3,4], "bulk confirmation closes exactly the selected range")
+
+        let pins = TabStore(stateURL:dir.appendingPathComponent("pin-range.json"))
+        pins.sendCommand = { commands.append($0) }
+        try apply(snapshot([tab(10,active:true),tab(11,url:"https://example.com/10"),tab(12)]),to:pins)
+        let destination = pins.createSpace(); let source = pins.spaces.first!.id
+        pins.selectSpace(source)
+        let folder = pins.createFolder()
+        pins.addBookmark(from:tab(10),instance:"one",folderID:folder.id)
+        let pin = pins.pinnedBookmarks[0]
+        pins.addBookmark(url:URL(string:"https://example.com/unopened")!,folderID:folder.id)
+        let unopened = pins.pinnedBookmarks.last!
+        pins.activate(tab(10),instance:"one")
+        commands.removeAll()
+        pins.selectSidebarItem(.bookmark(unopened.id),extending:true)
+        expect(pins.validSidebarSelection == [.bookmark(pin.id),.bookmark(unopened.id)], "saved range anchors at represented active pin and skips folder header")
+        expect(commands.isEmpty, "selecting unopened saved tabs does not open them")
+        pins.toggleFolder(folder.id)
+        expect(pins.selectedSidebarItems.isEmpty, "collapsing a folder deselects hidden saved tabs")
+        pins.toggleFolder(folder.id)
+        pins.selectSidebarItem(.bookmark(unopened.id),extending:true)
+        expect(pins.validSidebarSelection.count == 2, "range selection works after folder expands")
+        pins.moveSidebarSelection(to:destination.id)
+        expect(pins.bookmark(pin.id)?.spaceID == destination.id && pins.bookmark(unopened.id)?.folderID == nil, "bulk move carries saved pins to destination root")
+        expect(pins.spaceState.spaceID(for:.init(instance:"one",tabId:10)) == destination.id && pins.spaceState.spaceID(for:.init(instance:"one",tabId:11)) == source, "pin move carries its linked tab, preserving duplicate page")
+        pins.selectSpace(destination.id)
+        pins.selectSidebarItem(.bookmark(pin.id),extending:false)
+        pins.activate(tab(10),instance:"one")
+        pins.selectSidebarItem(.bookmark(unopened.id),extending:true)
+        pins.requestDeleteSidebarSelection()
+        commands.removeAll()
+        pins.confirmDeleteSidebarSelection()
+        expect(pins.bookmark(pin.id) == nil && pins.bookmark(unopened.id) == nil && pins.folder(folder.id) != nil, "bulk delete removes selected saved pins but keeps folders")
+        expect(commands.filter { $0["action"] as? String == "close" }.flatMap { $0["tabIds"] as? [Int] ?? [] } == [10], "bulk saved delete preserves unrelated duplicate tab")
+        pins.selectSpace(source)
+        pins.selectionShowsBookmarks = false
+        pins.selectSidebarItem(.tab(.init(instance:"one",tabId:12)),extending:true)
+        pins.requestDeleteSidebarSelection()
+        pins.selectSpace(destination.id)
+        commands.removeAll()
+        pins.confirmDeleteSidebarSelection()
+        expect(commands.isEmpty, "confirmation from a different space cannot delete tabs")
+    }
+
+    static func checkGroupDragging(in dir: URL) throws {
+        func item(_ id: Int) -> SidebarSelectionItem { .tab(.init(instance: "one", tabId: id)) }
+        // Exercise the actual drag session, preview, drop, and Safari command replay.
+        for start in 1...5 {
+            for end in start...5 {
+                for slot in 0...(5 - (end - start + 1)) {
+                    let store = TabStore(stateURL: dir.appendingPathComponent("drag-\(start)-\(end)-\(slot).json"))
+                    let live = (1...5).map { tab($0, active: $0 == start) }
+                    try apply(snapshot(live), to: store)
+                    store.selectSidebarItem(item(end), extending: true)
+                    let drag = SidebarDrag()
+                    drag.begin(.tab(live[end - 1], instance: "one"), store: store)
+                    expect(drag.items.count == end - start + 1, "dragging any selected row captures the whole range")
+                    var safari = live.map(\.id)
+                    var commands: [[String: Any]] = []
+                    store.sendCommand = { commands.append($0) }
+                    drag.updateTarget(ghostTop: CGFloat(slot) * SidebarDrag.pitch, pointerY: 1000, store: store, bookmarksVisible: false)
+                    let expected = drag.previewTabs(live).map(\.id)
+                    expect(live.filter { drag.isSlot(tab: $0) }.count == drag.items.count, "every moving row gets a preview slot")
+                    drag.finish(store: store, showBookmarks: false)
+                    for command in commands {
+                        let moves = command["moves"] as? [[String: Int]] ?? [["tabId": command["tabId"] as! Int, "index": command["index"] as! Int]]
+                        for move in moves {
+                            let id = move["tabId"]!
+                            safari.remove(at: safari.firstIndex(of: id)!)
+                            safari.insert(id, at: move["index"]!)
+                        }
+                    }
+                    expect(safari == expected && store.currentWindow!.window.tabs.map(\.id) == expected, "Safari replay and optimistic state match group preview in both directions")
+                    expect(!drag.isActive && drag.items.isEmpty, "drop resets the drag session")
+                }
+            }
+        }
+        let store = TabStore(stateURL: dir.appendingPathComponent("drag-pins.json"))
+        let live = (1...7).map { tab($0, active: $0 == 2) }
+        try apply(snapshot(live), to: store)
+        let home = store.selectedSpace.id
+        let other = store.createSpace()
+        store.moveTabToSpace(live[2], instance: "one", spaceID: other.id)
+        store.selectSpace(home)
+        try apply(snapshot(live, seq: 2), to: store)
+        store.addBookmark(from: live[4], instance: "one")
+        let represented = store.pinnedBookmarks[0]
+        store.selectSidebarItem(item(4), extending: true)
+        let drag = SidebarDrag()
+        drag.begin(.tab(live[3], instance: "one"), store: store)
+        expect(drag.items.count == 2, "group excludes another space and represented saved tabs")
+        drag.tabsSectionTop = 0
+        drag.updateTarget(ghostTop: 3 * SidebarDrag.pitch, pointerY: 1000, store: store, bookmarksVisible: true)
+        drag.finish(store: store)
+        expect(store.displayedTabs(in: store.currentWindow!).map(\.id) == [1,6,7,2,4], "group reorder uses ordinary-tab slots past hidden rows")
+        expect(store.currentWindow!.window.tabs.filter { [3,5].contains($0.id) }.map(\.id) == [3,5], "hidden rows retain their order")
+        // An unselected source must still drag alone.
+        drag.begin(.tab(live[0], instance: "one"), store: store)
+        expect(drag.items.count == 1 && store.validSidebarSelection.isEmpty, "unselected drag clears the old range")
+        drag.cancel()
+        let folder = store.createFolder(name: "Destination")
+        store.activate(live[1], instance: "one")
+        store.selectSidebarItem(item(4), extending: true)
+        drag.begin(.tab(live[3], instance: "one"), store: store)
+        drag.tabsSectionTop = 100
+        drag.pinnedFrames[.folder(folder.id)] = CGRect(x: 0, y: 0, width: 200, height: 30)
+        drag.updateTarget(ghostTop: 0, pointerY: 15, store: store, bookmarksVisible: true)
+        drag.finish(store: store)
+        let saved = store.pinnedChildren(of: folder.id).compactMap { if case .bookmark(let id) = $0 { return store.bookmark(id) }; return nil }
+        expect(saved.map(\.url) == [live[1].url!, live[3].url!], "dropping selected live tabs into a folder pins the whole ordered group")
+        expect(store.validSidebarSelection == Set(saved.map { .bookmark($0.id) }), "pinning carries selection to its saved rows")
+        store.addBookmark(url: URL(string: "https://example.com/extra")!)
+        let extra = store.pinnedBookmarks.last!
+        store.activate(live[1], instance: "one")
+        store.selectSidebarItem(.bookmark(saved[0].id), extending: false)
+        store.selectSidebarItem(.bookmark(extra.id), extending: true)
+        drag.begin(.bookmark(saved[1]), store: store)
+        let selectedPins = drag.items.compactMap { if case .bookmark(let pin) = $0 { return pin.id }; return nil }
+        drag.pinnedFrames[.bookmark(represented.id)] = CGRect(x: 0, y: 40, width: 200, height: 30)
+        drag.updateTarget(ghostTop: 40, pointerY: 41, store: store, bookmarksVisible: true)
+        drag.finish(store: store)
+        expect(Array(store.pinnedChildren().prefix(selectedPins.count)) == selectedPins.map { .bookmark($0) }, "saved group moves out of a folder in sidebar order")
+        expect(saved.allSatisfy { store.bookmark($0.id)?.folderID == nil }, "all selected saved rows leave the source folder")
+        store.save()
+        let restored = TabStore(stateURL: dir.appendingPathComponent("drag-pins.json"))
+        expect(restored.pinnedChildren() == store.pinnedChildren(), "saved group order persists")
+
+        let siblings = TabStore(stateURL: dir.appendingPathComponent("drag-siblings.json"))
+        let siblingTabs = (1...6).map { tab($0, active: $0 == 1) }
+        try apply(snapshot(siblingTabs), to: siblings)
+        for tab in siblingTabs.prefix(4) { siblings.addBookmark(from: tab, instance: "one") }
+        let pins = siblings.pinnedBookmarks
+        siblings.selectSidebarItem(.bookmark(pins[2].id), extending: true)
+        let siblingDrag = SidebarDrag()
+        siblingDrag.tabsSectionTop = 500
+        siblingDrag.pinnedFrames[.bookmark(pins[3].id)] = CGRect(x: 0, y: 93, width: 200, height: 30)
+        siblingDrag.begin(.bookmark(pins[1]), store: siblings)
+        siblingDrag.updateTarget(ghostTop: 93, pointerY: 122, store: siblings, bookmarksVisible: true)
+        siblingDrag.finish(store: siblings)
+        expect(siblings.pinnedChildren() == [pins[3], pins[0], pins[1], pins[2]].map { .bookmark($0.id) }, "moving a saved group down excludes every selected sibling from the slot")
+        siblingDrag.pinnedFrames[.bookmark(pins[3].id)] = CGRect(x: 0, y: 0, width: 200, height: 30)
+        siblingDrag.begin(.bookmark(pins[2]), store: siblings)
+        siblingDrag.updateTarget(ghostTop: 0, pointerY: 1, store: siblings, bookmarksVisible: true)
+        siblingDrag.finish(store: siblings)
+        expect(siblings.pinnedChildren() == pins.map { .bookmark($0.id) }, "moving the saved group back up preserves its internal order")
+        siblings.activate(siblingTabs[2], instance: "one")
+        siblings.clearSidebarSelection()
+        siblings.selectSidebarItem(item(6), extending: true)
+        siblingDrag.begin(.tab(siblingTabs[5], instance: "one"), store: siblings)
+        expect(siblingDrag.items.count == 4, "a range spanning Pinned and Tabs captures saved and live rows together")
+        let mixedFolder = siblings.createFolder()
+        siblingDrag.pinnedFrames[.folder(mixedFolder.id)] = CGRect(x: 0, y: 150, width: 200, height: 30)
+        siblingDrag.updateTarget(ghostTop: 150, pointerY: 165, store: siblings, bookmarksVisible: true)
+        siblingDrag.finish(store: siblings)
+        let mixedURLs = siblings.pinnedChildren(of: mixedFolder.id).compactMap { if case .bookmark(let id) = $0 { return siblings.bookmark(id)?.url }; return nil }
+        expect(mixedURLs == siblingTabs.suffix(4).map { $0.url! }, "mixed saved and live selection moves into a folder in display order")
+    }
+
+    static func checkDeletionConfirmationFocus(in dir: URL) throws {
+        let store = TabStore(stateURL: dir.appendingPathComponent("delete-confirmation.json"))
+        try apply(snapshot([tab(1, active: true)]), to: store)
+        let home = store.selectedSpace.id
+        let other = store.createSpace()
+        store.selectSpace(home)
+        let folder = store.createFolder(name: "Target")
+        var focus: [Bool] = []
+        store.onSidebarFocusChanged = { focus.append($0) }
+        store.renaming = nil
+        store.isEditingSpace = false
+        store.isConfirmingSidebarDeletion = false
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        expect(focus.isEmpty, "unchanged interaction state never steals focus from another app")
+        store.requestDeleteFolder(folder.id)
+        expect(store.needsSidebarFocus && focus.last == true, "folder confirmation holds sidebar focus before presentation")
+        store.selectSpace(other.id)
+        store.clearSidebarSelection()
+        expect(store.isConfirmingSidebarDeletion, "selection reconciliation cannot dismiss a folder confirmation")
+        guard case .folder(let target) = store.pendingSidebarDeletion else { fatalError("Missing folder target") }
+        expect(target.id == folder.id && target.spaceID == home, "confirmation retains its original folder across a space change")
+        // SwiftUI resets the presentation binding before invoking the button.
+        store.isConfirmingSidebarDeletion = false
+        expect(focus.last == true, "dismissing the sheet does not activate Safari before the button action")
+        store.removeFolder(target.id)
+        expect(store.folder(folder.id) == nil, "captured folder remains deletable after the presentation binding resets")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        expect(focus.last == false, "focus returns to Safari after the button action")
+
+        store.requestDeleteSpace(other.id)
+        guard case .space(let space) = store.pendingSidebarDeletion else { fatalError("Missing space target") }
+        expect(space.id == other.id && store.needsSidebarFocus, "space deletion uses the same focus protection")
+        store.isEditingSpace = true
+        store.isConfirmingSidebarDeletion = false
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        expect(store.needsSidebarFocus && focus.last == true, "dismissing confirmation retains focus needed by another editor")
+        store.isEditingSpace = false
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        expect(focus.last == false, "the final interaction releases sidebar focus")
+        expect(store.spaces.count == 2, "cancelled confirmation leaves spaces intact")
+    }
+
+    static func checkContentDeletion(in dir: URL) throws {
+        let url = dir.appendingPathComponent("delete-contents.json")
+        let store = TabStore(stateURL: url)
+        var commands: [[String: Any]] = []
+        store.sendCommand = { commands.append($0) }
+        try apply(snapshot([tab(1, active: true), tab(2, url: "https://example.com/1"), tab(3)]), to: store)
+        let home = store.selectedSpace.id
+        let other = store.createSpace()
+        store.selectSpace(home)
+        let root = store.createFolder(name: "Root")
+        let child = store.createFolder(parentID: root.id, name: "Nested")
+        store.addBookmark(from: tab(1), instance: "one", folderID: child.id)
+        let removedPin = store.pinnedBookmarks[0]
+        store.addBookmark(from: tab(3), instance: "one")
+        let keptPin = store.pinnedBookmarks.last!
+        store.moveBookmarkToSpace(keptPin, spaceID: nil)
+        store.toggleFolder(root.id)
+        commands.removeAll()
+        store.removeFolder(root.id, deleteContents: true)
+        let closed = commands.filter { $0["action"] as? String == "close" }.flatMap { $0["tabIds"] as? [Int] ?? [] }
+        expect(closed == [1], "folder deletion closes its linked tab, preserving duplicate URL copies")
+        expect(store.folder(root.id) == nil && store.folder(child.id) == nil && store.bookmark(removedPin.id) == nil, "collapsed nested folder contents deleted")
+        expect(store.bookmark(keptPin.id) != nil && store.currentWindow!.window.tabs.map(\.id) == [2,3], "Favorites and unrelated live tabs retained")
+        store.selectSpace(other.id)
+        store.addBookmark(url: URL(string: "https://example.com/late")!)
+        let pendingPin = store.pinnedBookmarks.last!
+        let pendingFolder = store.createFolder()
+        store.movePinnedItem(.bookmark(pendingPin.id), to: pendingFolder.id)
+        store.open(pendingPin)
+        let request = commands.last!["requestId"] as! String
+        store.removeFolder(pendingFolder.id, deleteContents: true)
+        commands.removeAll()
+        _ = store.handleMessage(type: "created", payload: Data(), object: ["instance":"one", "requestId":request, "tabId":44])
+        expect(commands.last?["tabIds"] as? [Int] == [44], "late folder pin creation closes instead of resurrecting deleted contents")
+        store.moveTabToSpace(tab(2), instance: "one", spaceID: other.id)
+        store.addBookmark(url: URL(string:"https://example.com/remove")!)
+        let doomed = store.pinnedBookmarks.last!
+        store.newTab()
+        let late = commands.last!["requestId"] as! String
+        commands.removeAll()
+        store.deleteSpace(other.id, deleteContents: true)
+        expect(store.spaces.count == 1 && store.selectedSpace.id == home, "destructive space deletion selects a surviving space")
+        expect(store.bookmark(doomed.id) == nil && store.bookmark(keptPin.id) != nil, "space deletion removes pins but retains shared Favorites")
+        expect(commands.filter { $0["action"] as? String == "close" }.flatMap { $0["tabIds"] as? [Int] ?? [] } == [2], "space deletion closes all assigned tabs without relocating")
+        _ = store.handleMessage(type: "created", payload: Data(), object: ["instance":"one", "requestId":late, "tabId":45])
+        expect(commands.last?["tabIds"] as? [Int] == [45], "late New Tab reply cannot restore a deleted space's tab")
+        store.save()
+        let loaded = TabStore(stateURL: url)
+        expect(loaded.bookmarks == store.bookmarks && loaded.folders.isEmpty, "content deletion persists across relaunch")
+        commands.removeAll()
+        store.deleteSpace(home, deleteContents: true)
+        expect(store.spaces.count == 1 && commands.isEmpty, "last space remains protected for destructive deletion")
+    }
+
     static func checkEmojiAndEmptySpaces(in directory: URL) throws {
         for emoji in ["🚀", "🫶🏽", "👩🏽‍💻", "👨‍👩‍👧‍👦", "🇺🇸", "🏳️‍🌈", "1️⃣", "#️⃣", "☀", "❤️", "🪿"] {
             expect(BrowserSpace.normalizedEmoji(" \(emoji)\n") == emoji, "single emoji supported: \(emoji)")
@@ -192,6 +629,12 @@ import Observation
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("sidetabs-tests-\(UUID())")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
+        try checkTabCleanup(in: dir)
+        try checkSpaceIconReordering(in: dir)
+        try checkRangeSelection(in: dir)
+        try checkGroupDragging(in: dir)
+        try checkDeletionConfirmationFocus(in: dir)
+        try checkContentDeletion(in: dir)
         try checkEmojiAndEmptySpaces(in: dir)
         try checkPresentationCaches(in: dir)
         let store = TabStore(stateURL: dir.appendingPathComponent("state.json"))

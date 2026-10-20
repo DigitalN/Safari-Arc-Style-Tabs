@@ -6,7 +6,7 @@ it, see the [README](README.md).
 ## Build from source
 
 You need macOS 26 or later, Xcode 26 or later, and an **Apple Development** signing
-certificate. A free Apple ID works: Xcode → Settings → Apple Accounts → sign in → select
+certificate. For local development, start with your free Personal Team in Xcode: Xcode → Settings → Apple Accounts → sign in → select
 your **Personal Team** → Manage Certificates… → **+** → **Apple Development**. Without a
 certificate, Safari switches the extension off every time it restarts.
 
@@ -453,3 +453,87 @@ Reload the extension once after installing this native/background protocol chang
 Safari itself need not quit. `scripts/test-command-delivery.sh` covers failed push,
 lost replies, concurrent delivery, acknowledgements, expiry, profile isolation,
 bounded queues, pin request IDs, and migration safety without accessing Safari.
+
+## Deleting spaces and folders
+
+Delete Space and Delete Folder each offer keeping/moving contents or deleting them.
+Destructive space deletion removes its pins, nested folders, and queued Arc tabs,
+and closes owned live tabs across Safari windows/instances. Shared Favorites remain.
+Folder deletion removes its entire subtree and closes only tabs represented by its
+pins, using the same one-to-one matching as the sidebar; extra URL copies remain.
+The last space is protected. The space dialog captures its target before confirmation.
+Pending pin/New Tab replies are closed on arrival after deletion. Sending Arc jobs
+are paused and carry a persisted delete-on-arrival marker; they are not relocated.
+Tests use temporary fixtures only; never delete real user contents to validate a build.
+
+## Range selection and bulk actions
+
+Shift-click selects the inclusive visible range from the active tab, including saved
+pins and Favorites, without opening or activating the endpoint. Repeated Shift-clicks
+keep the original anchor; a regular click clears the range. Folder headers and collapsed
+contents are skipped. Collapsing a folder deselects its hidden rows. Selection is transient,
+scoped to the current Safari window and space, and cleared when that context changes.
+
+The selection bar and selected rows' context menus offer bulk Delete and Move to Space.
+Delete confirms before removing selected saved sites and closing their one-to-one matched
+live tabs in this window. Other same-URL copies and folder containers remain. Move assigns
+selected live tabs and moves selected saved sites to the destination root, retaining runtime
+links and retargeting pending pin opens. Both actions preserve unselected contents and
+activate any remaining source-space candidate once, without creating placeholder tabs.
+Confirmation captures the selection/context; stale confirmations cannot delete another space.
+`Tests/SpaceTests.swift` uses temporary state and synthetic command capture for these cases.
+
+## Preserve permissions during local iteration
+
+Use `scripts/build.sh` (without `--adhoc`) with the existing Apple Development identity
+for the configured Personal Team. Keep both target bundle IDs, the signing team, and
+`/Applications/Side Tabs.app` consistent. Ad hoc signatures use build-specific code
+hashes, so switching back to `--adhoc` can invalidate Accessibility authorization.
+If the development identity becomes unavailable, repair signing before installing;
+do not silently fall back to ad hoc signing during normal iteration.
+
+The first transition from ad hoc to development signing can require one final
+Accessibility approval. Later builds must satisfy the installed app's designated
+requirement. Check with `codesign --display -r -` and verify compatibility before
+installation. Safari extension enablement/website access must be checked separately;
+retain the existing grants and test the native/extension connection after replacement.
+Free development signing is for local testing and does not provide Developer ID
+notarization or App Store distribution.
+
+## Dragging the space icons
+
+Drag an icon horizontally in the bottom strip to preview a new position, then release
+inside the strip to save it. Holding near either edge scrolls through clipped icons.
+A short click still selects a space; right-click still offers Edit Space, with Move
+Left/Right also available as context-menu and accessibility actions. Two-finger icon
+scrolling remains implicit with no scrollbar. Drops outside the strip and cancelled
+gestures discard the preview. Changes to the space list or selected space cancel a drag.
+
+`SpaceIconDrag` keeps preview order and viewport-relative geometry outside saved state.
+`TabStore.moveSpace` commits only the space-array order, preserving the active space,
+per-space content, and memberships without issuing Safari commands. The saved order
+also controls sidebar swipes. Tests cover both directions, scrolled coordinates, edge
+scrolling, out-of-strip cancellation, invalid targets, ownership, and restart persistence.
+
+## Inactive unpinned-tab cleanup
+
+Settings → Tab Cleanup offers Off (default), 12 hours, 24 hours, and Once a week.
+The duration is inactivity, not a fixed calendar purge. `Membership.lastUsedAt` is
+optional for older state; previously untracked tabs start with a full interval.
+Activation, leaving an active tab, navigation, loading, audio, and native pin activity
+refresh timestamps. Restoration consumes duplicate URLs individually and carries their
+activity times across Safari tab-ID changes. Private activity is excluded from saved state.
+
+A one-minute timer requests fresh snapshots only while cleanup is enabled. Cleanup
+covers live normal windows/spaces and protects current tabs, Safari pins, one-to-one
+saved pins/Favorites (including collapsed folders and other spaces), audio/loading,
+private browsing, and tabs without a known URL. Selection/editing/import interactions
+suspend cleanup. No saved bookmarks, folders, or queued Arc records are deleted.
+
+`cleanupClose` requires `tabCleanupV1` from the extension. It reauthorizes with the
+native policy at execution, then checks each Safari tab's current window, URL, active,
+pinned, audio, loading, and private flags before closing. Native rows wait for Safari's
+confirmed snapshot; unconfirmed commands retry no more than once per minute. Turning
+Off or saving a pin before authorization prevents queued cleanup. Test fixtures use
+isolated preferences/state, controlled time, and mocked browser APIs; never enable
+cleanup against real tabs merely to validate a build.

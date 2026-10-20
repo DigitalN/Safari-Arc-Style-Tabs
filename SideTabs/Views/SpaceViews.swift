@@ -43,7 +43,6 @@ struct FavoritesSection: View {
 struct SpaceHeader: View {
     @Environment(TabStore.self) private var store
     @State private var editing: BrowserSpace?
-    @State private var confirmingDelete = false
 
     var body: some View {
         HStack {
@@ -57,7 +56,7 @@ struct SpaceHeader: View {
                 Button("Move Space Left") { store.reorderSelectedSpace(direction: -1) }
                 Button("Move Space Right") { store.reorderSelectedSpace(direction: 1) }
                 Divider()
-                Button("Delete Space…") { confirmingDelete = true }
+                Button("Delete Space…") { store.requestDeleteSpace(store.selectedSpace.id) }
                     .disabled(store.spaces.count < 2)
             } label: {
                 Image(systemName: "ellipsis")
@@ -76,51 +75,114 @@ struct SpaceHeader: View {
                 editing = nil
             } onCancel: { editing = nil }
         }
-        .confirmationDialog("Delete \(store.selectedSpace.name)?", isPresented: $confirmingDelete) {
-            Button("Move Items to \(store.spaces.first { $0.id != store.selectedSpace.id }?.name ?? "Another Space") and Delete Space") {
-                store.deleteSpace(store.selectedSpace.id)
-            }
-        } message: {
-            Text("Tabs and pinned sites will move to the first remaining space. Safari tabs stay open.")
-        }
     }
 }
 
 struct SpaceSwitcher: View {
     @Environment(TabStore.self) private var store
     @State private var editing: BrowserSpace?
+    @State private var drag: SpaceIconDrag?
+    @GestureState private var gestureActive = false
+    @State private var dragCancelled = false
+    @State private var contentX: CGFloat = 0
+    @State private var viewportWidth: CGFloat = 0
+    private static let stripCoordinates = "spaceIconStrip"
+
+    private var orderedSpaces: [BrowserSpace] {
+        guard let drag else { return store.spaces }
+        let byID = Dictionary(uniqueKeysWithValues: store.spaces.map { ($0.id, $0) })
+        return drag.order.compactMap { byID[$0] }
+    }
+
     var body: some View {
         VStack(spacing: 6) {
             Divider()
             HStack(spacing: 4) {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal) {
-                        HStack(spacing: 4) {
-                            ForEach(store.spaces) { space in
+                        HStack(spacing: SpaceIconDrag.spacing) {
+                            ForEach(orderedSpaces) { space in
                                 Button { store.selectSpace(space.id) } label: {
-                                    SpaceIcon(space: space)
-                                        .frame(width: 28, height: 28)
-                                        .foregroundStyle(spaceColor(space.theme))
-                                        .background(RoundedRectangle(cornerRadius: 7).fill(spaceColor(space.theme).opacity(space.id == store.selectedSpace.id ? 0.22 : 0)))
+                                    icon(space)
+                                        .opacity(drag?.id == space.id ? 0 : 1)
+                                        .overlay {
+                                            if drag?.id == space.id {
+                                                RoundedRectangle(cornerRadius: 7)
+                                                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                                            }
+                                        }
                                 }
                                 .buttonStyle(.plain)
-                                .help(space.name)
+                                .highPriorityGesture(
+                                    DragGesture(minimumDistance: 5, coordinateSpace: .named(Self.stripCoordinates))
+                                        .updating($gestureActive) { _, active, _ in active = true }
+                                        .onChanged { value in
+                                            guard !dragCancelled, store.renaming == nil, !store.isEditingSpace else { return }
+                                            if drag == nil {
+                                                drag = SpaceIconDrag(id: space.id, order: store.spaces.map(\.id), start: value.startLocation, contentX: contentX)
+                                            }
+                                            updateDrag(at: value.location)
+                                        }
+                                        .onEnded { value in
+                                            defer { drag = nil; dragCancelled = false }
+                                            guard !dragCancelled else { return }
+                                            updateDrag(at: value.location)
+                                            if let drag, drag.canDrop(in: viewportWidth),
+                                               let index = drag.order.firstIndex(of: drag.id) {
+                                                store.moveSpace(drag.id, to: index)
+                                            }
+                                        }
+                                )
+                                .help("\(space.name) — drag to reorder")
                                 .accessibilityLabel(space.name)
                                 .accessibilityAddTraits(space.id == store.selectedSpace.id ? .isSelected : [])
+                                .accessibilityAction(named: "Move Space Left") { move(space, direction: -1) }
+                                .accessibilityAction(named: "Move Space Right") { move(space, direction: 1) }
                                 .contextMenu {
                                     Button("Edit Space…") { editing = space }
+                                    Button("Move Space Left") { move(space, direction: -1) }
+                                        .disabled(store.spaces.first?.id == space.id)
+                                    Button("Move Space Right") { move(space, direction: 1) }
+                                        .disabled(store.spaces.last?.id == space.id)
                                 }
                                 .id(space.id)
                             }
                         }
+                        .onGeometryChange(for: CGFloat.self) { geometry in
+                            geometry.frame(in: .named(Self.stripCoordinates)).minX
+                        } action: { x in
+                            contentX = x
+                            if let point = drag?.location { updateDrag(at: point) }
+                        }
+                        .animation(.snappy(duration: 0.16), value: drag?.order)
                     }
-                    // Keep the strip implicit even when macOS is set to always show scrollbars.
+                    // Keep the strip implicit even when macOS always shows scrollbars.
                     .scrollIndicators(.never)
                     .frame(height: 30)
+                    .coordinateSpace(name: Self.stripCoordinates)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewportWidth = $0 }
+                    .overlay(alignment: .topLeading) {
+                        if let drag, let space = store.spaces.first(where: { $0.id == drag.id }) {
+                            icon(space)
+                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+                                .shadow(radius: 3, y: 1)
+                                .offset(x: min(max(drag.ghostX, 0), max(viewportWidth - SpaceIconDrag.size, 0)))
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .task(id: drag?.id) {
+                        while !Task.isCancelled, let current = drag {
+                            if let target = current.scrollTarget(width: viewportWidth, contentX: contentX) {
+                                proxy.scrollTo(target.id, anchor: target.towardEnd ? .trailing : .leading)
+                            }
+                            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                        }
+                    }
                     .onAppear {
                         DispatchQueue.main.async { proxy.scrollTo(store.selectedSpace.id, anchor: .center) }
                     }
                     .onChange(of: store.selectedSpace.id) { _, id in
+                        cancelDrag()
                         withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id, anchor: .center) }
                     }
                 }
@@ -135,12 +197,38 @@ struct SpaceSwitcher: View {
         }
         .padding(.horizontal, 10)
         .padding(.bottom, 10)
+        .onChange(of: gestureActive) { _, active in
+            if !active { drag = nil; dragCancelled = false }
+        }
+        .onChange(of: store.spaces.map(\.id)) { _, _ in cancelDrag() }
+        .onDisappear { cancelDrag() }
+        .onExitCommand { cancelDrag() }
         .popover(item: $editing) { space in
             SpaceEditor(space: space) { edited in
                 store.updateSpace(edited)
                 editing = nil
             } onCancel: { editing = nil }
         }
+    }
+
+    private func icon(_ space: BrowserSpace) -> some View {
+        SpaceIcon(space: space)
+            .frame(width: SpaceIconDrag.size, height: SpaceIconDrag.size)
+            .background(RoundedRectangle(cornerRadius: 7).fill(spaceColor(space.theme).opacity(space.id == store.selectedSpace.id ? 0.22 : 0)))
+    }
+
+    private func cancelDrag() {
+        drag = nil
+        dragCancelled = gestureActive
+    }
+
+    private func updateDrag(at point: CGPoint) {
+        drag?.update(at: point, contentX: contentX)
+    }
+
+    private func move(_ space: BrowserSpace, direction: Int) {
+        guard let index = store.spaces.firstIndex(where: { $0.id == space.id }) else { return }
+        store.moveSpace(space.id, to: index + direction)
     }
 }
 
@@ -211,11 +299,9 @@ private struct SpaceEditor: View {
         .frame(width: 250)
         .onAppear {
             store.isEditingSpace = true
-            store.onRenameStateChanged?(true)
         }
         .onDisappear {
             store.isEditingSpace = false
-            store.onRenameStateChanged?(false)
         }
     }
 }

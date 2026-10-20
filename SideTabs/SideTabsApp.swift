@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let bridge = ExtensionBridge()
     private let tracker = SafariTracker()
     private let accessibilityWatcher = AccessibilityWatcher()
+    private var cleanupTimer: Timer?
     private var dock: DockController?
     private var welcomeWindow: NSWindow?
     private var settingsWindow: NSWindow?
@@ -54,6 +55,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
         self.dock = dock
 
+        store.cleanupInterval = { [settings] in settings.tabCleanupInterval }
+        observeCleanupSettings()
+        cleanupTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.settings.tabCleanupInterval != .off else { return }
+                self.store.requestSnapshot()
+            }
+        }
+
         bridge.onMessage = { [store] type, payload, object in
             store.handleMessage(type: type, payload: payload, object: object)
         }
@@ -65,7 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         store.onOpenArcImport = { [weak self] in self?.showArcImport() }
         store.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
-        store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
+        store.onSidebarFocusChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
         store.onOpenAddressBar = { [weak self] in self?.dock?.openSafariAddressBar() }
 
         dock.start()
@@ -84,10 +94,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         updater.isBusy = { [weak self] in
             guard let self else { return true }
-            return self.store.renaming != nil || self.store.isEditingSpace || self.store.arcRestoreRunning || [self.welcomeWindow, self.settingsWindow, self.arcImportWindow].contains { $0?.isVisible == true }
+            return self.store.needsSidebarFocus || self.store.arcRestoreRunning || [self.welcomeWindow, self.settingsWindow, self.arcImportWindow].contains { $0?.isVisible == true }
         }
         updater.willRelaunch = { [weak self] in self?.relaunchingForUpdate = true }
         updater.start()
+    }
+
+    private func observeCleanupSettings() {
+        withObservationTracking { _ = settings.tabCleanupInterval } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.settings.tabCleanupInterval != .off { self.store.requestSnapshot() }
+                self.observeCleanupSettings()
+            }
+        }
     }
 
     /// Setup shows until Accessibility and the Safari extension are both on, and again right
@@ -124,6 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        cleanupTimer?.invalidate()
         // After an update, the new copy docks right where this one is, so leave Safari's
         // window alone rather than widening it only to narrow it again a second later.
         if !relaunchingForUpdate {
@@ -137,7 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidBecomeActive(_ notification: Notification) {
         let ownWindowShowing = [welcomeWindow, settingsWindow, arcImportWindow].contains { $0?.isVisible == true }
         guard !presentingOwnWindow, !ownWindowShowing, NSApp.modalWindow == nil,
-              store.renaming == nil, !store.isEditingSpace else { return }
+              !store.needsSidebarFocus else { return }
         dock?.bringSafariForward()
     }
 

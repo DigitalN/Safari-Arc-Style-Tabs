@@ -67,10 +67,11 @@ struct MouseTracking: NSViewRepresentable {
 struct RowBackground: View {
     var isActive: Bool
     var isHovering: Bool
+    var isSelected = false
 
     var body: some View {
         RoundedRectangle(cornerRadius: 7, style: .continuous)
-            .fill(Color.primary.opacity(isActive ? 0.12 : isHovering ? 0.055 : 0))
+            .fill(isSelected ? Color.accentColor.opacity(0.24) : Color.primary.opacity(isActive ? 0.12 : isHovering ? 0.055 : 0))
     }
 }
 

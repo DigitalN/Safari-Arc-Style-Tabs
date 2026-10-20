@@ -19,6 +19,14 @@ final class SidebarDrag {
         case tab(BrowserTab, instance: String)
         case bookmark(Bookmark)
         case folder(PinnedFolder)
+
+        var selectionItem: SidebarSelectionItem? {
+            switch self {
+            case .tab(let tab, let instance): .tab(TabKey(instance: instance, tabId: tab.id))
+            case .bookmark(let bookmark): .bookmark(bookmark.id)
+            case .folder: nil
+            }
+        }
     }
 
     /// Where the item would land: a slot index in one of the lists, or nowhere.
@@ -28,6 +36,7 @@ final class SidebarDrag {
         case pinned(folderID: UUID?, index: Int?)
     }
 
+    private(set) var items: [Item] = []
     private(set) var item: Item?
     private(set) var target: Target = .none
     /// Top edge of the floating copy, in sidebar coordinates.
@@ -42,16 +51,16 @@ final class SidebarDrag {
 
     var isActive: Bool { item != nil }
 
-    /// The row being dragged is drawn as the open slot while it's over its own list.
+    /// Every moving row becomes an open slot while the group is over its own list.
     func isSlot(tab: BrowserTab) -> Bool {
-        if case .tab(let dragged, _)? = item, dragged.id == tab.id, case .tabs = target {
+        if items.contains(where: { if case .tab(let dragged, _) = $0 { return dragged.id == tab.id }; return false }), case .tabs = target {
             return true
         }
         return false
     }
 
     func isSlot(bookmark: Bookmark) -> Bool {
-        if case .bookmark(let dragged)? = item, dragged.id == bookmark.id, case .pinned = target {
+        if items.contains(where: { if case .bookmark(let dragged) = $0 { return dragged.id == bookmark.id }; return false }), case .pinned = target {
             return true
         }
         return false
@@ -66,22 +75,58 @@ final class SidebarDrag {
         bookmarksVisible: Bool
     ) {
         if self.item == nil {
-            self.item = item
+            guard !NSEvent.modifierFlags.contains(.shift) || item.selectionItem.map(store.validSidebarSelection.contains) == true else { return }
+            begin(item, store: store)
             grabOffset = value.startLocation.y - rowTop
+            if case .tab = item, let offset = items.firstIndex(of: item) {
+                grabOffset += CGFloat(offset) * Self.pitch
+            }
         }
-        ghostTop = value.location.y - grabOffset
-        let overBookmarks = bookmarksVisible && value.location.y < tabsSectionTop
+        updateTarget(ghostTop: value.location.y - grabOffset, pointerY: value.location.y,
+                     store: store, bookmarksVisible: bookmarksVisible)
+    }
+
+    func updateTarget(ghostTop: CGFloat, pointerY: CGFloat, store: TabStore, bookmarksVisible: Bool) {
+        guard let item else { return }
+        self.ghostTop = ghostTop
+        let overBookmarks = bookmarksVisible && pointerY < tabsSectionTop
         let newTarget: Target
         if overBookmarks {
-            newTarget = pinnedTarget(at: value.location.y, item: item, store: store)
-        } else if case .tab = item {
-            newTarget = .tabs(slot(rowsTop: tabRowsTop, others: (store.currentWindow.map { store.displayedTabs(in: $0, showBookmarks: bookmarksVisible).count } ?? 0) - 1))
+            newTarget = pinnedTarget(at: pointerY, item: item, store: store)
+        } else if items.allSatisfy({ if case .tab = $0 { return true }; return false }) {
+            newTarget = .tabs(slot(rowsTop: tabRowsTop, others: (store.currentWindow.map { store.displayedTabs(in: $0, showBookmarks: bookmarksVisible).count } ?? 0) - items.count))
         } else { newTarget = .none }
         if newTarget != target {
             withAnimation(.snappy(duration: 0.18)) {
                 target = newTarget
             }
         }
+    }
+
+    /// Capture selection once so live reordering cannot change the drag's membership.
+    func begin(_ item: Item, store: TabStore) {
+        self.item = item
+        let selected = store.validSidebarSelection
+        guard let source = item.selectionItem, selected.contains(source), let window = store.currentWindow else {
+            items = [item]
+            store.clearSidebarSelection()
+            return
+        }
+        items = store.selectableSidebarItems.filter(selected.contains).compactMap { row in
+            switch row {
+            case .bookmark(let id): return store.bookmark(id).map { .bookmark($0) }
+            case .tab(let key): return window.window.tabs.first { $0.id == key.tabId }.map { .tab($0, instance: key.instance) }
+            }
+        }
+    }
+
+    func previewTabs(_ tabs: [BrowserTab]) -> [BrowserTab] {
+        guard case .tabs(let index) = target else { return tabs }
+        let ids = Set(items.compactMap { if case .tab(let tab, _) = $0 { return tab.id }; return nil })
+        let moved = tabs.filter { ids.contains($0.id) }
+        var remaining = tabs.filter { !ids.contains($0.id) }
+        remaining.insert(contentsOf: moved, at: min(max(index, 0), remaining.count))
+        return remaining
     }
 
     /// The slot whose position the floating copy overlaps most.
@@ -96,23 +141,23 @@ final class SidebarDrag {
         let target = self.target
         withAnimation(.snappy(duration: 0.18)) {
             switch (item, target) {
-            case (.bookmark(let bookmark), .pinned(let folder, let index)):
-                store.movePinnedItem(.bookmark(bookmark.id), to: folder, at: index)
+            case (.bookmark, .pinned(let folder, let index)):
+                store.moveSidebarItems(items.compactMap(\.selectionItem), toPinned: folder, at: index)
             case (.folder(let folder), .pinned(let parent, let index)):
                 store.movePinnedItem(.folder(folder.id), to: parent, at: index)
-            case (.tab(let tab, let instance), .tabs(let index)):
-                store.moveTab(tab, instance: instance, to: index, showBookmarks: showBookmarks)
-            case (.tab(let tab, let instance), .pinned(let folder, let index)):
-                store.addBookmark(from: tab, instance: instance, at: index, folderID: folder)
+            case (.tab(_, let instance), .tabs(let index)):
+                let tabs = items.compactMap { if case .tab(let tab, _) = $0 { return tab }; return nil }
+                store.moveTabs(tabs, instance: instance, to: index, showBookmarks: showBookmarks)
+            case (.tab, .pinned(let folder, let index)):
+                store.moveSidebarItems(items.compactMap(\.selectionItem), toPinned: folder, at: index)
             default:
                 break
             }
-            self.item = nil
-            self.target = .none
+            cancel()
         }
     }
 
-    func cancel() { item = nil; target = .none }
+    func cancel() { item = nil; items = []; target = .none }
 
     func isSlot(folder: PinnedFolder) -> Bool {
         if case .folder(let dragged)? = item { return dragged.id == folder.id }
@@ -137,15 +182,17 @@ final class SidebarDrag {
         }
         let parent = store.parentFolder(of: entry.item)
         guard node(for: item).map({ store.canMovePinnedItem($0, into: parent) }) ?? true else { return .none }
+        let moving = Set(items.compactMap(node))
         let peers = store.pinnedChildren(of: parent)
-        let before = Array(peers.prefix(while: { $0 != entry.item })).filter { $0 != node(for: item) }.count
-        let extra = y > frame.midY && entry.item != node(for: item) ? 1 : 0
+        let before = Array(peers.prefix(while: { $0 != entry.item })).filter { !moving.contains($0) }.count
+        let extra = y > frame.midY && !moving.contains(entry.item) ? 1 : 0
         return .pinned(folderID: parent, index: before + extra)
     }
 
     func isInsertionBefore(_ node: PinnedItem, store: TabStore) -> Bool {
         guard case .pinned(let folder, let index?) = target else { return false }
-        let peers = store.pinnedChildren(of: folder).filter { $0 != item.flatMap(self.node) }
+        let moving = Set(items.compactMap(self.node))
+        let peers = store.pinnedChildren(of: folder).filter { !moving.contains($0) }
         return peers.indices.contains(index) && peers[index] == node
     }
 
@@ -164,6 +211,7 @@ struct DropSlot: View {
 /// The floating copy of the row being dragged.
 struct DragGhost: View {
     let item: SidebarDrag.Item
+    var count = 1
     @Environment(TabStore.self) private var store
 
     var body: some View {
@@ -182,6 +230,11 @@ struct DragGhost: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
+            if count > 1 {
+                Text("\(count)").font(.caption.weight(.semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.accentColor.opacity(0.15), in: Capsule())
+            }
         }
         .font(.system(size: 13))
         .padding(.horizontal, 8)

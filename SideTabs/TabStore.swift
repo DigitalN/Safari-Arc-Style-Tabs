@@ -34,14 +34,19 @@ final class TabStore {
     private(set) var arcRestoreMessage: String?
     @ObservationIgnored private var arcRestoreDestinations: [String: ArcImportDestination] = [:]
     @ObservationIgnored private var arcRestoreTimeout: DispatchWorkItem?
-    var isEditingSpace = false
+    var isEditingSpace = false { didSet { if oldValue != isEditingSpace { updateSidebarFocus() } } }
     private struct PendingSpaceCreate {
         var spaceID: UUID
+        var discardOnCreation = false
+        var bookmarkID: UUID? = nil
         let at: Date
         let privateWindow: Bool
         let profile: String?
     }
     @ObservationIgnored private var pendingSpaceCreates: [String: PendingSpaceCreate] = [:]
+    @ObservationIgnored var cleanupInterval: () -> TabCleanupInterval = { .off }
+    @ObservationIgnored var activityClock: () -> Date = Date.init
+    @ObservationIgnored private var pendingCleanup: [TabKey: Date] = [:]
     @ObservationIgnored private var rememberedTabs: [String: [UUID: Int]] = [:]
     @ObservationIgnored private var expectedSpaceActivation: TabKey?
     /// Empty spaces keep Safari's current page without adopting its space on each
@@ -58,6 +63,7 @@ final class TabStore {
     private struct WindowCache { var selection: WindowSelection? }
     private struct BookmarkMatchCache {
         var selection: WindowSelection
+        var spaceID: UUID
         var matches: [UUID: BrowserTab]
     }
     @ObservationIgnored private var currentWindowCache: WindowCache?
@@ -74,7 +80,149 @@ final class TabStore {
         return index
     }
 
-    var renaming: RenameTarget?
+    var renaming: RenameTarget? { didSet { if oldValue != renaming { updateSidebarFocus() } } }
+    private(set) var selectedSidebarItems = Set<SidebarSelectionItem>()
+    @ObservationIgnored private var selectionAnchor: SidebarSelectionItem?
+    @ObservationIgnored private var selectionContext: String?
+    var selectionShowsBookmarks = true
+    enum SidebarDeletion {
+        case folder(PinnedFolder)
+        case space(BrowserSpace)
+        case selection(Set<SidebarSelectionItem>, context: String?)
+
+        var title: String {
+            switch self {
+            case .folder(let folder): "Delete \(folder.name)?"
+            case .space(let space): "Delete \(space.name)?"
+            case .selection(let items, _): "Delete \(items.count) Selected Tabs?"
+            }
+        }
+    }
+    var pendingSidebarDeletion: SidebarDeletion?
+    var isConfirmingSidebarDeletion = false { didSet { if oldValue != isConfirmingSidebarDeletion { updateSidebarFocus() } } }
+    var needsSidebarFocus: Bool { renaming != nil || isEditingSpace || isConfirmingSidebarDeletion }
+
+    private func updateSidebarFocus() {
+        if needsSidebarFocus {
+            onSidebarFocusChanged?(true)
+        } else {
+            // SwiftUI clears isPresented before running an alert's button action.
+            // Let that action finish before handing focus back to Safari.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.onSidebarFocusChanged?(self.needsSidebarFocus)
+            }
+        }
+    }
+    func requestDeleteFolder(_ id: UUID) {
+        guard let folder = folder(id) else { return }
+        pendingSidebarDeletion = .folder(folder)
+        isConfirmingSidebarDeletion = true
+    }
+    func requestDeleteSpace(_ id: UUID) {
+        guard spaces.count > 1, let space = spaces.first(where: { $0.id == id }) else { return }
+        pendingSidebarDeletion = .space(space)
+        isConfirmingSidebarDeletion = true
+    }
+    func requestDeleteSidebarSelection() {
+        let items = validSidebarSelection
+        guard !items.isEmpty else { return }
+        pendingSidebarDeletion = .selection(items, context: sidebarSelectionContext)
+        isConfirmingSidebarDeletion = true
+    }
+    func confirmDeleteSidebarSelection() {
+        guard case .selection(let items, let context) = pendingSidebarDeletion else { return }
+        pendingSidebarDeletion = nil
+        isConfirmingSidebarDeletion = false
+        deleteSidebarSelection(items, context: context)
+    }
+
+    var sidebarSelectionContext: String? {
+        currentWindow.map { "\($0.instance):\($0.window.id):\(selectedSpace.id)" }
+    }
+    var selectableSidebarItems: [SidebarSelectionItem] {
+        guard let window = currentWindow else { return [] }
+        var rows: [SidebarSelectionItem] = []
+        if selectionShowsBookmarks {
+            rows += favorites.map { .bookmark($0.id) }
+            rows += visiblePinnedEntries.compactMap { if case .bookmark(let id) = $0.item { return .bookmark(id) }; return nil }
+        }
+        rows += displayedTabs(in: window, showBookmarks: selectionShowsBookmarks).map { .tab(TabKey(instance: window.instance, tabId: $0.id)) }
+        return rows
+    }
+    var validSidebarSelection: Set<SidebarSelectionItem> {
+        guard selectionContext == sidebarSelectionContext else { return [] }
+        return selectedSidebarItems.intersection(selectableSidebarItems)
+    }
+    func clearSidebarSelection() {
+        selectedSidebarItems.removeAll(); selectionAnchor = nil; selectionContext = nil
+        if case .selection = pendingSidebarDeletion {
+            pendingSidebarDeletion = nil
+            isConfirmingSidebarDeletion = false
+        }
+    }
+    func selectSidebarItem(_ item: SidebarSelectionItem, extending: Bool) {
+        guard renaming == nil, !isEditingSpace else { return }
+        let context = sidebarSelectionContext
+        if selectionContext != context { clearSidebarSelection() }
+        selectionContext = context
+        if !extending {
+            selectedSidebarItems.removeAll(); selectionAnchor = item
+            return
+        }
+        let order = selectableSidebarItems
+        guard let end = order.firstIndex(of: item) else { return }
+        if selectedSidebarItems.isEmpty, let window = currentWindow,
+           let active = window.window.tabs.first(where: \.active) {
+            let represented = bookmarkTabs(in: window).first { $0.value.id == active.id }?.key
+            let current: SidebarSelectionItem = represented.map { .bookmark($0) } ?? .tab(TabKey(instance: window.instance, tabId: active.id))
+            if order.contains(current) { selectionAnchor = current }
+        }
+        let start = selectionAnchor.flatMap { order.firstIndex(of: $0) } ?? end
+        selectionAnchor = order[start]
+        selectedSidebarItems = Set(order[min(start,end)...max(start,end)])
+    }
+
+    private func selectedTabKeys(_ items: Set<SidebarSelectionItem>) -> Set<TabKey> {
+        guard let window = currentWindow else { return [] }
+        let matches = bookmarkTabs(in: window)
+        return Set(items.compactMap {
+            switch $0 {
+            case .tab(let key): return key
+            case .bookmark(let id): return matches[id].map { TabKey(instance: window.instance, tabId: $0.id) }
+            }
+        })
+    }
+    func deleteSidebarSelection(_ confirmed: Set<SidebarSelectionItem>, context: String?) {
+        guard context == sidebarSelectionContext else { clearSidebarSelection(); return }
+        let items = confirmed.intersection(validSidebarSelection)
+        guard !items.isEmpty else { clearSidebarSelection(); return }
+        let keys = selectedTabKeys(items)
+        let pins = Set(items.compactMap { if case .bookmark(let id) = $0 { return id }; return nil })
+        clearSidebarSelection()
+        removeContents(bookmarkIDs: pins, folderIDs: [])
+        closeOwnedTabs(keys)
+        scheduleSave()
+    }
+    func moveSidebarSelection(to spaceID: UUID) {
+        guard spaceID != selectedSpace.id, spaces.contains(where: { $0.id == spaceID }) else { return }
+        let items = validSidebarSelection
+        guard !items.isEmpty else { clearSidebarSelection(); return }
+        let keys = selectedTabKeys(items)
+        let pins = Set(items.compactMap { if case .bookmark(let id) = $0 { return id }; return nil })
+        clearSidebarSelection()
+        for key in keys { spaceState.assign(key, to: spaceID) }
+        for index in bookmarks.indices where pins.contains(bookmarks[index].id) {
+            bookmarks[index].spaceID = spaceID; bookmarks[index].folderID = nil
+        }
+        for request in Array(pendingSpaceCreates.keys) where pendingSpaceCreates[request]?.bookmarkID.map(pins.contains) == true {
+            pendingSpaceCreates[request]?.spaceID = spaceID
+        }
+        folderState.order.removeAll { if case .bookmark(let id) = $0 { return pins.contains(id) }; return false }
+        folderState.order += bookmarks.filter { pins.contains($0.id) }.map { .bookmark($0.id) }
+        scheduleSave()
+        if let window = currentWindow { activateSelectedSpace(in: window) }
+    }
 
     /// Hints from SafariTracker, used to pick the window the sidebar is docked to.
     var safariIsFrontmost = false
@@ -95,7 +243,7 @@ final class TabStore {
     @ObservationIgnored var sendCommand: (([String: Any]) -> Void)?
     @ObservationIgnored var onOpenArcImport: (() -> Void)?
     @ObservationIgnored var onToggleSidebar: (() -> Void)?
-    @ObservationIgnored var onRenameStateChanged: ((Bool) -> Void)?
+    @ObservationIgnored var onSidebarFocusChanged: ((Bool) -> Void)?
     @ObservationIgnored var onOpenAddressBar: (() -> Void)?
 
     /// Names whose tab ids are gone (Safari restarted), keyed by URL so they can be
@@ -112,6 +260,38 @@ final class TabStore {
         load()
     }
 
+    /// Only fresh snapshots initiate cleanup. Safari rechecks candidates at execution.
+    private func cleanupCandidates(in snapshot: Snapshot, now: Date) -> [BrowserTab] {
+        guard let seconds = cleanupInterval().seconds, snapshot.capabilities?.contains("tabCleanupV1") == true,
+              renaming == nil, !isEditingSpace, !arcRestoreRunning,
+              selectedSidebarItems.isEmpty, !isConfirmingSidebarDeletion else { return [] }
+        var protected = Set<Int>()
+        for window in snapshot.windows {
+            let selection = WindowSelection(instance: snapshot.instance, window: window)
+            for space in spaces {
+                protected.formUnion(bookmarkTabs(in: selection, space: space).values.map(\.id))
+            }
+        }
+        let activity = Dictionary(spaceState.memberships.map { ($0.key, $0.lastUsedAt) }, uniquingKeysWith: { first, _ in first })
+        return snapshot.windows.flatMap { window in
+            window.tabs.filter { tab in
+                guard !window.incognito, !tab.active, !tab.pinned, !tab.audible, !tab.loading,
+                      !protected.contains(tab.id), let url = tab.url, !url.isEmpty,
+                      let date = activity[TabKey(instance: snapshot.instance, tabId: tab.id)] ?? nil else { return false }
+                return now.timeIntervalSince(date) >= seconds
+            }
+        }
+    }
+
+    private func cleanUpInactiveTabs(in snapshot: Snapshot) {
+        let now = activityClock()
+        pendingCleanup = pendingCleanup.filter { now.timeIntervalSince($0.value) < 60 }
+        let tabs = cleanupCandidates(in: snapshot, now: now).filter { pendingCleanup[TabKey(instance: snapshot.instance, tabId: $0.id)] == nil }
+        guard !tabs.isEmpty else { return }
+        for tab in tabs { pendingCleanup[TabKey(instance: snapshot.instance, tabId: tab.id)] = now }
+        send(["action": "cleanupClose", "tabs": tabs.map { ["id": $0.id, "windowId": $0.windowId, "url": $0.url ?? ""] }], to: snapshot.instance)
+    }
+
     // MARK: - Messages from the extension
 
     func handleMessage(type: String, payload: Data, object: [String: Any]) -> [String: Any] {
@@ -124,6 +304,18 @@ final class TabStore {
                 NSLog("Side Tabs: bad snapshot: \(error)")
             }
             return [:]
+
+        case "cleanupAuthorize":
+            let instance = object["instance"] as? String ?? ""
+            guard let snapshot = snapshots[instance] else { return ["cleanupTabIds": [Int]()] }
+            let eligible = Dictionary(cleanupCandidates(in: snapshot, now: activityClock()).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let requested = object["tabs"] as? [[String: Any]] ?? []
+            let allowed = requested.compactMap { item -> Int? in
+                guard let id = item["id"] as? Int, let tab = eligible[id],
+                      item["windowId"] as? Int == tab.windowId, item["url"] as? String == tab.url else { return nil }
+                return id
+            }
+            return ["cleanupTabIds": allowed]
 
         case "hello":
             return ["needSnapshot": true]
@@ -150,6 +342,13 @@ final class TabStore {
                let tabId = object["tabId"] as? Int,
                let pending = pendingSpaceCreates.removeValue(forKey: requestId) {
                 let key = TabKey(instance: instance, tabId: tabId)
+                if pending.discardOnCreation {
+                    pendingBookmarkOpens[requestId] = nil
+                    send(["action": "close", "tabIds": [tabId]], to: instance)
+                    spaceState.memberships.removeAll { $0.key == key }
+                    scheduleSave()
+                    return [:]
+                }
                 // The created reply can arrive before or after the first snapshot.
                 if spaceState.spaceID(for: key) == nil {
                     spaceState.memberships.append(.init(key: key, spaceID: pending.spaceID,
@@ -189,11 +388,13 @@ final class TabStore {
             orphanNamesOfDeadInstances()
         }
         let priorSpaces = spaceState
-        spaceState.reconcile(snapshot, liveInstances: Set(snapshots.keys))
+        let recentlyUsed = Set(previous?.windows.flatMap { $0.tabs.filter { $0.active || $0.audible || $0.loading || $0.pinned }.map { TabKey(instance: snapshot.instance, tabId: $0.id) } } ?? [])
+        spaceState.reconcile(snapshot, liveInstances: Set(snapshots.keys), now: activityClock(), recentlyUsed: recentlyUsed)
         followSafariSelection(snapshot, previous: previous)
         if priorSpaces != spaceState { scheduleSave() }
         reconcileNames(with: snapshot)
         pruneBookmarkLinks()
+        cleanUpInactiveTabs(in: snapshot)
 
         if let pending = pendingActivation, pending.key.instance == snapshot.instance,
            snapshot.windows.contains(where: { $0.tabs.contains { $0.id == pending.key.tabId && $0.active } }) {
@@ -215,6 +416,7 @@ final class TabStore {
         retainedBackgroundTab = nil
         lastObservedWindow = nil
         pendingSpaceCreates.removeAll()
+        pendingCleanup.removeAll()
         scheduleSave()
     }
 
@@ -334,7 +536,6 @@ final class TabStore {
 
     func beginRename(_ target: RenameTarget) {
         renaming = target
-        onRenameStateChanged?(true)
     }
 
     func commitRename(_ text: String) {
@@ -359,13 +560,11 @@ final class TabStore {
         }
         renaming = nil
         scheduleSave()
-        onRenameStateChanged?(false)
     }
 
     func cancelRename() {
         guard renaming != nil else { return }
         renaming = nil
-        onRenameStateChanged?(false)
     }
 
     private func reconcileNames(with snapshot: Snapshot) {
@@ -437,6 +636,11 @@ final class TabStore {
 
     func activate(_ tab: BrowserTab, instance: String) {
         let key = TabKey(instance: instance, tabId: tab.id)
+        let justUsed = Set((window(instance: instance, id: tab.windowId)?.tabs.filter(\.active).map { TabKey(instance: instance, tabId: $0.id) } ?? []) + [key])
+        let now = activityClock()
+        for index in spaceState.memberships.indices where justUsed.contains(spaceState.memberships[index].key) {
+            spaceState.memberships[index].lastUsedAt = now
+        }
         if let id = spaceState.spaceID(for: key) {
             spaceState.selectedID = id
             rememberedTabs[windowKey(instance: instance, windowID: tab.windowId), default: [:]][id] = tab.id
@@ -452,7 +656,7 @@ final class TabStore {
         send(["action": "activate", "tabId": tab.id], to: instance)
     }
 
-    func close(_ tabs: [BrowserTab], instance: String) {
+    func close(_ tabs: [BrowserTab], instance: String, activateReplacement: Bool = true) {
         guard let windowId = tabs.first?.windowId else { return }
         let ids = Set(tabs.map(\.id))
         let closesActive = window(instance: instance, id: windowId)?.tabs.contains { ids.contains($0.id) && $0.active } == true
@@ -468,7 +672,7 @@ final class TabStore {
             window.tabs.removeAll { ids.contains($0.id) }
         }
         send(["action": "close", "tabIds": Array(ids)], to: instance)
-        if closesActive, let remaining = window(instance: instance, id: windowId) {
+        if activateReplacement, closesActive, let remaining = window(instance: instance, id: windowId) {
             activateSelectedSpace(in: WindowSelection(instance: instance, window: remaining))
         }
     }
@@ -517,24 +721,77 @@ final class TabStore {
         NSPasteboard.general.setString(url, forType: .string)
     }
 
-    /// Moves a tab to `index` (its position once moved) and tells Safari.
+    /// Moves an ordered group to a slot in the ordinary-tab list, preserving hidden tabs.
     func moveTab(_ tab: BrowserTab, instance: String, to index: Int, showBookmarks: Bool = true) {
-        guard let fullWindow = window(instance: instance, id: tab.windowId) else { return }
+        moveTabs([tab], instance: instance, to: index, showBookmarks: showBookmarks)
+    }
+
+    func moveTabs(_ tabs: [BrowserTab], instance: String, to index: Int, showBookmarks: Bool = true) {
+        guard let first = tabs.first, let fullWindow = window(instance: instance, id: first.windowId) else { return }
         let visible = displayedTabs(in: WindowSelection(instance: instance, window: fullWindow), showBookmarks: showBookmarks)
-        guard visible.contains(where: { $0.id == tab.id }) else { return }
-        let slot = min(max(index, 0), visible.count - 1)
-        var destination = visible[slot].index
-        mutateWindow(instance: instance, windowId: tab.windowId) { window in
-            guard let from = window.tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-            let moved = window.tabs.remove(at: from)
-            destination = min(max(destination, 0), window.tabs.count)
-            window.tabs.insert(moved, at: destination)
-            for position in window.tabs.indices {
-                window.tabs[position].index = position
+        let ids = Set(tabs.filter { $0.windowId == first.windowId }.map(\.id))
+        let moved = visible.filter { ids.contains($0.id) }
+        guard !moved.isEmpty else { return }
+        let remaining = visible.filter { !ids.contains($0.id) }
+        let slot = min(max(index, 0), remaining.count)
+        let preview = Array(remaining.prefix(slot)) + moved + Array(remaining.dropFirst(slot))
+        guard preview.map(\.id) != visible.map(\.id) else { return }
+        var ordered = fullWindow.tabs.filter { !ids.contains($0.id) }
+        let destination: Int
+        if slot < remaining.count {
+            destination = ordered.firstIndex { $0.id == remaining[slot].id }!
+        } else if let last = remaining.last {
+            destination = ordered.firstIndex { $0.id == last.id }! + 1
+        } else { return }
+        let anchor = ordered.indices.contains(destination) ? ordered[destination].id : nil
+        ordered = fullWindow.tabs
+        var moves: [[String: Int]] = []
+        for tab in moved {
+            guard let from = ordered.firstIndex(where: { $0.id == tab.id }) else { continue }
+            let value = ordered.remove(at: from)
+            let to = anchor.flatMap { id in ordered.firstIndex { $0.id == id } } ?? ordered.count
+            ordered.insert(value, at: to)
+            if from != to { moves.append(["tabId": tab.id, "index": to]) }
+        }
+        mutateWindow(instance: instance, windowId: first.windowId) { window in
+            window.tabs = ordered
+            for position in window.tabs.indices { window.tabs[position].index = position }
+        }
+        if moved.count == 1, let move = moves.first {
+            send(["action": "move", "tabId": move["tabId"]!, "index": move["index"]!], to: instance)
+        } else if !moves.isEmpty {
+            // One command keeps Safari's asynchronous moves in the same order as the preview.
+            send(["action": "moveTabs", "moves": moves], to: instance)
+        }
+    }
+
+    /// Move saved rows and pin ordinary tabs as one ordered group.
+    func moveSidebarItems(_ items: [SidebarSelectionItem], toPinned parentID: UUID?, at index: Int?) {
+        guard let selection = currentWindow, parentID == nil || parentID.flatMap(folder) != nil else { return }
+        let carriesSelection = items.contains(where: validSidebarSelection.contains)
+        let movingPins = Set(items.compactMap { if case .bookmark(let id) = $0 { return PinnedItem.bookmark(id) }; return nil })
+        let peers = pinnedChildren(of: parentID).filter { !movingPins.contains($0) }
+        let slot = min(max(index ?? peers.count, 0), peers.count)
+        var nodes: [PinnedItem] = []
+        for item in items {
+            switch item {
+            case .bookmark(let id):
+                guard bookmark(id) != nil else { continue }
+                movePinnedItem(.bookmark(id), to: parentID)
+                nodes.append(.bookmark(id))
+            case .tab(let key):
+                guard key.instance == selection.instance,
+                      let tab = selection.window.tabs.first(where: { $0.id == key.tabId }),
+                      let url = tab.url, !url.isEmpty else { continue }
+                addBookmark(from: tab, instance: key.instance, folderID: parentID)
+                if let pin = bookmarks.last { nodes.append(.bookmark(pin.id)) }
             }
         }
-        guard destination != tab.index else { return }
-        send(["action": "move", "tabId": tab.id, "index": destination], to: instance)
+        for (offset, node) in nodes.enumerated() { movePinnedItem(node, to: parentID, at: slot + offset) }
+        if carriesSelection {
+            selectedSidebarItems = Set(nodes.compactMap { if case .bookmark(let id) = $0 { return .bookmark(id) }; return nil })
+            selectionAnchor = nodes.first.flatMap { if case .bookmark(let id) = $0 { return .bookmark(id) }; return nil }
+        }
     }
 
     private func window(instance: String, id: Int) -> BrowserWindow? {
@@ -564,12 +821,13 @@ final class TabStore {
 
     /// A physical tab has one sidebar row. Explicit links survive navigation; URL
     /// fallback consumes one tab per bookmark so extra copies stay ordinary tabs.
-    private func bookmarkTabs(in selection: WindowSelection) -> [UUID: BrowserTab] {
+    private func bookmarkTabs(in selection: WindowSelection, space: BrowserSpace? = nil) -> [UUID: BrowserTab] {
         _ = bookmarks; _ = bookmarkLinks; _ = spaceState
-        if let cache = bookmarkMatchCache, cache.selection == selection { return cache.matches }
+        let owner = space ?? selectedSpace
+        if let cache = bookmarkMatchCache, cache.selection == selection, cache.spaceID == owner.id { return cache.matches }
         let visible = bookmarks.filter { bookmark in
-            bookmark.spaceID == selectedSpace.id || (bookmark.spaceID == nil &&
-                (bookmark.arcProfileID == nil || bookmark.arcProfileID == selectedSpace.arcProfileID))
+            bookmark.spaceID == owner.id || (bookmark.spaceID == nil &&
+                (bookmark.arcProfileID == nil || bookmark.arcProfileID == owner.arcProfileID))
         }
         var result: [UUID: BrowserTab] = [:]
         var claimed = Set<Int>()
@@ -592,7 +850,7 @@ final class TabStore {
         for tab in ordered where !claimed.contains(tab.id) {
             guard let url = tab.url?.comparableURL else { continue }
             all[url, default: []].append(tab)
-            if ownership[TabKey(instance: selection.instance, tabId: tab.id)] == selectedSpace.id {
+            if ownership[TabKey(instance: selection.instance, tabId: tab.id)] == owner.id {
                 scoped[url, default: []].append(tab)
             }
         }
@@ -615,7 +873,7 @@ final class TabStore {
                 claimed.insert(tab.id)
             }
         }
-        bookmarkMatchCache = BookmarkMatchCache(selection: selection, matches: result)
+        bookmarkMatchCache = BookmarkMatchCache(selection: selection, spaceID: owner.id, matches: result)
         return result
     }
 
@@ -664,6 +922,7 @@ final class TabStore {
             return
         }
         let requestId = spaceCreateRequest(for: bookmark.spaceID ?? selectedSpace.id)
+        pendingSpaceCreates[requestId]?.bookmarkID = bookmark.id
         pendingBookmarkOpens[requestId] = (bookmark.id, Date())
         send([
             "action": "create",
@@ -879,7 +1138,26 @@ extension TabStore {
         scheduleSave()
     }
 
-    func deleteSpace(_ id: UUID) {
+    func deleteSpace(_ id: UUID, deleteContents: Bool = false) {
+        guard spaces.count > 1, spaces.contains(where: { $0.id == id }) else { return }
+        if deleteContents {
+            let keys = Set(spaceState.memberships.filter { $0.spaceID == id }.map(\.key))
+            removeContents(bookmarkIDs: Set(bookmarks.filter { $0.spaceID == id }.map(\.id)),
+                           folderIDs: Set(folders.filter { $0.spaceID == id }.map(\.id)))
+            for request in Array(pendingSpaceCreates.keys) where pendingSpaceCreates[request]?.spaceID == id {
+                pendingSpaceCreates[request]?.discardOnCreation = true
+            }
+            if arcMigration.tabs.contains(where: { $0.spaceID == id && $0.status == .sending }) { pauseArcRestore() }
+            for index in arcMigration.tabs.indices where arcMigration.tabs[index].spaceID == id && arcMigration.tabs[index].status != .restored {
+                arcMigration.tabs[index].deleteOnArrival = arcMigration.tabs[index].status == .sending
+                arcMigration.tabs[index].status = .cancelled
+            }
+            spaceState.memberships.removeAll { $0.spaceID == id }
+            _ = spaceState.remove(id)
+            closeOwnedTabs(keys)
+            scheduleSave()
+            return
+        }
         guard let destination = spaceState.remove(id) else { return }
         for index in folderState.folders.indices where folderState.folders[index].spaceID == id {
             folderState.folders[index].spaceID = destination
@@ -890,7 +1168,37 @@ extension TabStore {
         for request in Array(pendingSpaceCreates.keys) where pendingSpaceCreates[request]?.spaceID == id {
             pendingSpaceCreates[request]?.spaceID = destination
         }
+        for index in arcMigration.tabs.indices where arcMigration.tabs[index].spaceID == id {
+            arcMigration.tabs[index].spaceID = destination
+        }
         scheduleSave()
+        if let selection = currentWindow { activateSelectedSpace(in: selection) }
+    }
+
+    private func removeContents(bookmarkIDs: Set<UUID>, folderIDs: Set<UUID>) {
+        for (request, pending) in pendingSpaceCreates where pending.bookmarkID.map(bookmarkIDs.contains) == true {
+            pendingSpaceCreates[request]?.discardOnCreation = true
+        }
+        bookmarks.removeAll { bookmarkIDs.contains($0.id) }
+        folderState.folders.removeAll { folderIDs.contains($0.id) }
+        folderState.order.removeAll {
+            switch $0 { case .bookmark(let id): bookmarkIDs.contains(id); case .folder(let id): folderIDs.contains(id) }
+        }
+        bookmarkLinks = bookmarkLinks.filter { !bookmarkIDs.contains($0.key) }
+        if case .bookmark(let id)? = renaming, bookmarkIDs.contains(id) { cancelRename() }
+        if case .folder(let id)? = renaming, folderIDs.contains(id) { cancelRename() }
+    }
+
+    private func closeOwnedTabs(_ keys: Set<TabKey>) {
+        let live = snapshots
+        for (instance, snapshot) in live {
+            for window in snapshot.windows {
+                let tabs = window.tabs.filter { keys.contains(TabKey(instance: instance, tabId: $0.id)) }
+                if !tabs.isEmpty { close(tabs, instance: instance, activateReplacement: false) }
+            }
+        }
+        customNames = customNames.filter { !keys.contains($0.key) }
+        spaceState.memberships.removeAll { keys.contains($0.key) }
         if let selection = currentWindow { activateSelectedSpace(in: selection) }
     }
 
@@ -981,7 +1289,11 @@ extension TabStore {
     func reorderSelectedSpace(direction: Int) {
         guard let index = spaceState.spaces.firstIndex(where: { $0.id == selectedSpace.id }),
               spaceState.spaces.indices.contains(index + direction) else { return }
-        spaceState.spaces.swapAt(index, index + direction)
+        moveSpace(selectedSpace.id, to: index + direction)
+    }
+
+    func moveSpace(_ id: UUID, to destination: Int) {
+        guard spaceState.move(id, to: destination) else { return }
         scheduleSave()
     }
 }
@@ -1029,6 +1341,9 @@ extension TabStore {
     func toggleFolder(_ id: UUID) {
         guard let index = folderState.folders.firstIndex(where: { $0.id == id }) else { return }
         folderState.folders[index].isExpanded.toggle()
+        if !selectedSidebarItems.isEmpty {
+            selectedSidebarItems.formIntersection(selectableSidebarItems)
+        }
         scheduleSave()
     }
     private func expandFolder(_ id: UUID) {
@@ -1086,8 +1401,26 @@ extension TabStore {
     }
     /// Only removes the container. Immediate children take its place in the parent;
     /// nested hierarchies, pinned sites, and all live Safari tabs are retained.
-    func removeFolder(_ id: UUID) {
+    func removeFolder(_ id: UUID, deleteContents: Bool = false) {
         guard let folder = folder(id) else { return }
+        if deleteContents {
+            let subtree = folderState.descendants(of: id)
+            let pins = Set(bookmarks.filter { $0.spaceID == folder.spaceID && $0.folderID.map(subtree.contains) == true }.map(\.id))
+            var keys = Set<TabKey>()
+            if let owner = spaces.first(where: { $0.id == folder.spaceID }) {
+                for (instance, snapshot) in snapshots {
+                    for window in snapshot.windows {
+                        for (pin, tab) in bookmarkTabs(in: .init(instance: instance, window: window), space: owner) where pins.contains(pin) {
+                            keys.insert(TabKey(instance: instance, tabId: tab.id))
+                        }
+                    }
+                }
+            }
+            removeContents(bookmarkIDs: pins, folderIDs: subtree)
+            closeOwnedTabs(keys)
+            scheduleSave()
+            return
+        }
         let siblings = pinnedChildren(of: folder.parentID, spaceID: folder.spaceID)
         let position = siblings.firstIndex(of: .folder(id)) ?? siblings.count
         let children = pinnedChildren(of: id, spaceID: folder.spaceID)
@@ -1304,6 +1637,15 @@ extension TabStore {
         DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
     }
     private func handleArcRestoreReply(type: String, object: [String: Any]) {
+        if type == "migrationCreated", let request = object["requestId"] as? String,
+           let instance = object["instance"] as? String, let tabID = object["tabId"] as? Int,
+           let index = arcMigration.tabs.firstIndex(where: { $0.requestID == request && $0.deleteOnArrival == true && $0.destination?.instance == instance }) {
+            send(["action": "close", "tabIds": [tabID]], to: instance)
+            arcMigration.tabs[index].deleteOnArrival = false
+            spaceState.memberships.removeAll { $0.key == TabKey(instance: instance, tabId: tabID) }
+            scheduleSave()
+            return
+        }
         guard let request = object["requestId"] as? String,
               let index = arcMigration.tabs.firstIndex(where: { $0.requestID == request && $0.status == .sending }),
               let instance = object["instance"] as? String,

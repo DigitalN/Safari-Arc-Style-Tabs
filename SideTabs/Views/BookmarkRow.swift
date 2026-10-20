@@ -50,7 +50,7 @@ struct BookmarkRow: View {
         .font(.system(size: 13))
         .padding(.horizontal, 8)
         .frame(height: SidebarDrag.rowHeight)
-        .background(RowBackground(isActive: openTab?.active == true, isHovering: hovering && !drag.isActive))
+        .background(RowBackground(isActive: openTab?.active == true, isHovering: hovering && !drag.isActive, isSelected: store.selectedSidebarItems.contains(.bookmark(bookmark.id))))
         .background(MouseTracking(onHover: { hovering = $0 }, onMiddleClick: {
             if let openTab, let selection = store.currentWindow { store.close([openTab], instance: selection.instance) }
         }))
@@ -63,6 +63,9 @@ struct BookmarkRow: View {
         .contentShape(Rectangle())
         .onTapGesture {
             guard !isRenaming else { return }
+            let extending = NSEvent.modifierFlags.contains(.shift)
+            store.selectSidebarItem(.bookmark(bookmark.id), extending: extending)
+            if extending { return }
             store.open(bookmark, inNewTab: NSEvent.modifierFlags.contains(.command))
         }
         .sidebarDraggable(
@@ -75,6 +78,10 @@ struct BookmarkRow: View {
         )
         .onSidebarTop { rowTop = $0 }
         .contextMenu {
+            if store.selectedSidebarItems.contains(.bookmark(bookmark.id)) {
+                BulkSelectionActions()
+                Divider()
+            }
             Button("Open") { store.open(bookmark) }
             Button("Open in New Tab") { store.open(bookmark, inNewTab: true) }
             if let openTab, let selection = store.currentWindow {
@@ -101,6 +108,6 @@ struct BookmarkRow: View {
         }
         .help("\(bookmark.title)\n\(bookmark.url)")
         .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(openTab?.active == true ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAddTraits(openTab?.active == true || store.selectedSidebarItems.contains(.bookmark(bookmark.id)) ? [.isButton, .isSelected] : .isButton)
     }
 }

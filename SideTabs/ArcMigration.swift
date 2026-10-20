@@ -219,6 +219,7 @@ struct ArcTabRestore: Codable, Identifiable {
     var destination: ArcImportDestination?
     var key: TabKey?
     var message: String?
+    var deleteOnArrival: Bool? = nil
 }
 struct ArcImportReceipt: Codable, Identifiable {
     var id = UUID()

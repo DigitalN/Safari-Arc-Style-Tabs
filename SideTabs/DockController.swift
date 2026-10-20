@@ -454,7 +454,7 @@ final class DockController {
 
     // MARK: - Focus
 
-    /// Renaming needs keyboard input in the panel; afterwards hand focus back to Safari.
+    /// Editors and deletion confirmations keep the panel open and retain its focus.
     func setEditing(_ editing: Bool) {
         isEditing = editing
         if editing {
@@ -470,7 +470,7 @@ final class DockController {
 
     /// Clicking the sidebar while another app is in front should bring Safari forward.
     func bringSafariForward() {
-        // A space editor or inline rename needs to keep keyboard focus in Side Tabs.
+        // Editors and confirmation sheets must keep focus until their action finishes.
         guard !isEditing else { return }
         if tracker.isSafariFrontmost {
             tracker.raiseDockedWindowIfNeeded()

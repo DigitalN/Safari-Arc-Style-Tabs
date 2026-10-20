@@ -114,7 +114,7 @@ struct FolderRow: View {
             Button("Move Up") { store.reorderPinnedItem(.folder(folder.id), direction: -1) }
             Button("Move Down") { store.reorderPinnedItem(.folder(folder.id), direction: 1) }
             Divider()
-            Button("Remove Folder, Keep Contents") { store.removeFolder(folder.id) }
+            Button("Delete Folder…") { store.requestDeleteFolder(folder.id) }
         }
         .help(store.folderPath(folder.id))
         .accessibilityElement(children: .contain)

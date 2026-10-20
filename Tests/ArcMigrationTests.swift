@@ -205,6 +205,25 @@ import Foundation
         let blockedStore = TabStore(stateURL: blocked)
         do { _ = try blockedStore.importArc(cleanSource, selectedSpaces: selected, includeFavorites: true); fatalError("failed persistence accepted") } catch { checks += 1 }
         expect(blockedStore.spaces.count == 1 && blockedStore.bookmarks.isEmpty && blockedStore.arcMigration.records.isEmpty, "failed persistence rolls back the whole in-memory transaction")
+        let deletionFile = temp.appendingPathComponent("deletion-source.json")
+        try write(fixture(), deletionFile)
+        let deletionSource = try ArcImportReader.read(deletionFile)
+        let deletionState = temp.appendingPathComponent("deletion-state.json")
+        let deleting = TabStore(stateURL: deletionState)
+        _ = try deleting.importArc(deletionSource, selectedSpaces: selected, includeFavorites: true)
+        deleting.sendCommand = { _ in }
+        try apply(snapshot(), deleting)
+        deleting.restoreArcTabs(destinations: ["Default": .init(instance: "safari", windowID: 10)])
+        let sending = deleting.arcMigration.tabs.first { $0.status == .sending }!
+        deleting.deleteSpace(sending.spaceID, deleteContents: true)
+        expect(!deleting.arcRestoreRunning && !deleting.arcPendingTabs.contains { $0.spaceID == sending.spaceID }, "space deletion pauses in-flight restore and cancels its queued tabs")
+        deleting.save()
+        let deletionLoaded = TabStore(stateURL: deletionState)
+        var deletionCommands: [[String: Any]] = []
+        deletionLoaded.sendCommand = { deletionCommands.append($0) }
+        _ = deletionLoaded.handleMessage(type: "migrationCreated", payload: Data(), object: ["instance": "safari", "requestId": sending.requestID, "tabId": 909])
+        expect(deletionCommands.last?["tabIds"] as? [Int] == [909], "late restore acknowledgement closes deleted-space tab after app restart")
+        expect(!deletionLoaded.spaces.contains { $0.id == sending.spaceID }, "late restore cannot resurrect deleted space")
         print("Passed \(checks) Arc migration checks.")
     }
 }

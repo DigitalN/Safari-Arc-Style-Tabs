@@ -313,6 +313,16 @@ struct SettingsView: View {
                 Toggle("Show bookmarks", isOn: $settings.showBookmarks)
             }
 
+            Section("Tab Cleanup") {
+                Picker("Clean up unpinned tabs", selection: $settings.tabCleanupInterval) {
+                    ForEach(TabCleanupInterval.allCases) { interval in
+                        Text(interval.title).tag(interval)
+                    }
+                }
+                Text("Closes unpinned tabs after this much inactivity. Pinned tabs, Favorites, private tabs, and each window’s current tab are kept. Tabs playing audio or loading are also kept.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("General") {
                 Toggle("Open at login", isOn: Binding(
                     get: { settings.launchAtLoginStatus() },

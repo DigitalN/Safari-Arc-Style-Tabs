@@ -31,6 +31,10 @@ final class AppSettings {
         didSet { defaults.set(showBookmarks, forKey: "showBookmarks") }
     }
 
+    var tabCleanupInterval: TabCleanupInterval {
+        didSet { defaults.set(tabCleanupInterval.rawValue, forKey: "tabCleanupInterval") }
+    }
+
     /// Check GitHub for new versions and install them in the background.
     var updatesAutomatically: Bool {
         didSet { defaults.set(updatesAutomatically, forKey: "updatesAutomatically") }
@@ -70,15 +74,17 @@ final class AppSettings {
         }
     }
 
-    @ObservationIgnored private let defaults = UserDefaults.standard
+    @ObservationIgnored private let defaults: UserDefaults
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         defaults.register(defaults: [
             "sidebarVisible": true,
             "autoHideSidebar": false,
             "sidebarWidth": 260.0,
             "closeButtonMode": CloseButtonMode.hover.rawValue,
             "showBookmarks": true,
+            "tabCleanupInterval": TabCleanupInterval.off.rawValue,
             "hasCompletedSetup": false,
             "updatesAutomatically": true,
         ])
@@ -91,6 +97,7 @@ final class AppSettings {
         width = defaults.double(forKey: "sidebarWidth").clamped(to: Self.widthRange)
         closeButtonMode = CloseButtonMode(rawValue: defaults.string(forKey: "closeButtonMode") ?? "") ?? .hover
         showBookmarks = defaults.bool(forKey: "showBookmarks")
+        tabCleanupInterval = TabCleanupInterval(rawValue: defaults.string(forKey: "tabCleanupInterval") ?? "") ?? .off
         hasCompletedSetup = defaults.bool(forKey: "hasCompletedSetup")
         updatesAutomatically = defaults.bool(forKey: "updatesAutomatically")
     }

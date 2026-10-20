@@ -66,7 +66,7 @@ async function buildSnapshot() {
 
     return {
         type: "snapshot",
-        capabilities: ["arcMigrationV1"],
+        capabilities: ["arcMigrationV1", "tabCleanupV1"],
         instance,
         seq: ++seq,
         focusedWindowId,
@@ -199,6 +199,23 @@ async function runCommand(command) {
             await browser.tabs.remove(command.tabIds ?? [command.tabId]);
             break;
 
+        case "cleanupClose": {
+            const candidates = Array.isArray(command.tabs) ? command.tabs : [];
+            // Reauthorize at execution, so switching Off or pinning after enqueue wins.
+            const reply = await postToApp({ type: "cleanupAuthorize", instance, tabs: candidates });
+            const allowed = new Set(reply?.cleanupTabIds ?? []);
+            for (const candidate of candidates) {
+                if (!allowed.has(candidate.id)) continue;
+                try {
+                    const tab = await browser.tabs.get(candidate.id);
+                    if (tab.windowId !== candidate.windowId || tab.url !== candidate.url ||
+                        tab.active || tab.pinned || tab.audible || tab.status === "loading" || tab.incognito) continue;
+                    await browser.tabs.remove(tab.id);
+                } catch { /* A tab may already be closed or no longer accessible. */ }
+            }
+            break;
+        }
+
         case "migrationCreate":
             await migrationCreate(command);
             break;
@@ -217,6 +234,12 @@ async function runCommand(command) {
 
         case "move":
             await browser.tabs.move(command.tabId, { index: command.index });
+            break;
+
+        case "moveTabs":
+            for (const move of command.moves ?? []) {
+                await browser.tabs.move(move.tabId, { index: move.index });
+            }
             break;
 
         case "duplicate": {

@@ -1,5 +1,21 @@
 import Foundation
 
+enum TabCleanupInterval: String, CaseIterable, Identifiable {
+    case off, twelveHours, twentyFourHours, weekly
+    var id: String { rawValue }
+    var title: String {
+        switch self { case .off: "Off"; case .twelveHours: "12 hours"; case .twentyFourHours: "24 hours"; case .weekly: "Once a week" }
+    }
+    var seconds: TimeInterval? {
+        switch self { case .off: nil; case .twelveHours: 12 * 3600; case .twentyFourHours: 24 * 3600; case .weekly: 7 * 24 * 3600 }
+    }
+}
+
+enum SidebarSelectionItem: Hashable {
+    case tab(TabKey)
+    case bookmark(UUID)
+}
+
 /// A Safari tab as reported by background.js.
 struct BrowserTab: Codable, Identifiable, Hashable {
     let id: Int
