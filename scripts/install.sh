@@ -13,7 +13,7 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 
 BUILT=$(scripts/build.sh "$@")
 
-echo "Installing to $DEST…"
+echo "Installing to ${DEST}…"
 osascript -e 'tell application id "com.digitaln.sidetabs" to quit' >/dev/null 2>&1 || true
 pkill -x "Side Tabs" >/dev/null 2>&1 || true
 sleep 0.5

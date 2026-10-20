@@ -293,6 +293,10 @@ struct SettingsView: View {
         Form {
             Section("Sidebar") {
                 Toggle("Show sidebar", isOn: $settings.sidebarVisible)
+                Toggle(isOn: $settings.autoHideSidebar) {
+                    Text("Automatically hide sidebar")
+                    Text("Move to Safari’s left edge to reveal it. Move away to hide it and keep the full page width.")
+                }.disabled(!settings.sidebarVisible)
                 LabeledContent("Width") {
                     HStack {
                         Slider(value: $settings.width, in: AppSettings.widthRange, step: 10)
@@ -307,6 +311,16 @@ struct SettingsView: View {
                     Text("Every tab").tag(AppSettings.CloseButtonMode.always)
                 }
                 Toggle("Show bookmarks", isOn: $settings.showBookmarks)
+            }
+
+            Section("Tab Cleanup") {
+                Picker("Clean up unpinned tabs", selection: $settings.tabCleanupInterval) {
+                    ForEach(TabCleanupInterval.allCases) { interval in
+                        Text(interval.title).tag(interval)
+                    }
+                }
+                Text("Closes unpinned tabs after this much inactivity. Pinned tabs, Favorites, private tabs, and each window’s current tab are kept. Tabs playing audio or loading are also kept.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("General") {
@@ -370,7 +384,7 @@ struct MenuContent: View {
     @Environment(TabStore.self) private var store
 
     var body: some View {
-        Button(settings.sidebarVisible ? "Hide Sidebar" : "Show Sidebar") {
+        Button(settings.autoHideSidebar && settings.sidebarVisible ? "Show or Hide Sidebar" : settings.sidebarVisible ? "Hide Sidebar" : "Show Sidebar") {
             app.toggleSidebar()
         }
         Divider()
@@ -379,6 +393,8 @@ struct MenuContent: View {
             Text("Accessibility access needed")
         }
         Button("Set Up…") { app.showWelcome() }
+        Toggle("Automatically Hide Sidebar", isOn: Binding(get: { settings.autoHideSidebar }, set: { settings.autoHideSidebar = $0 }))
+        Button("Import from Arc…") { app.showArcImport() }
         Button("Settings…") { app.showSettings() }
             .keyboardShortcut(",")
         Divider()

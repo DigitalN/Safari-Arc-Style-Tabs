@@ -70,7 +70,7 @@ struct TabRow: View {
         .padding(.leading, 8)
         .padding(.trailing, 4)
         .frame(height: SidebarDrag.rowHeight)
-        .background(RowBackground(isActive: tab.active, isHovering: hovering && !drag.isActive))
+        .background(RowBackground(isActive: tab.active, isHovering: hovering && !drag.isActive, isSelected: store.selectedSidebarItems.contains(.tab(key))))
         .opacity(isSlot ? 0 : 1)
         .overlay {
             if isSlot {
@@ -83,6 +83,9 @@ struct TabRow: View {
             // A separate double-tap gesture would make SwiftUI hold every single click
             // for the double-click interval, so read the click count instead.
             guard !isRenaming else { return }
+            let extending = NSEvent.modifierFlags.contains(.shift)
+            store.selectSidebarItem(.tab(key), extending: extending)
+            if extending { return }
             if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
                 store.beginRename(.tab(key))
             } else {
@@ -101,7 +104,7 @@ struct TabRow: View {
         .contextMenu { contextMenu }
         .help(tooltip)
         .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(tab.active ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAddTraits(tab.active || store.selectedSidebarItems.contains(.tab(key)) ? [.isButton, .isSelected] : .isButton)
     }
 
     private var tooltip: String {
@@ -115,13 +118,38 @@ struct TabRow: View {
     }
 
     @ViewBuilder private var contextMenu: some View {
+        if store.selectedSidebarItems.contains(.tab(key)) {
+            BulkSelectionActions()
+            Divider()
+        }
         Button("Rename Tab…") { store.beginRename(.tab(key)) }
         if store.hasCustomName(key) {
             Button("Reset Name") { store.resetName(key) }
         }
         Divider()
-        Button("Add to Bookmarks") { store.addBookmark(from: tab, instance: instance) }
+        Button("Pin in This Space") { store.addBookmark(from: tab, instance: instance) }
             .disabled(tab.url == nil)
+        Menu("Pin in Folder") {
+            FolderDestinations(item: nil) { folderID in
+                store.addBookmark(from: tab, instance: instance, folderID: folderID)
+            }
+        }
+        .disabled(tab.url == nil)
+        Menu("Move to Space") {
+            ForEach(store.spaces) { space in
+                Button { store.moveTabToSpace(tab, instance: instance, spaceID: space.id) } label: {
+                    Label(space.name, systemImage: space.icon)
+                }
+                .disabled(space.id == store.selectedSpace.id)
+            }
+        }
+        Button("Add to Favorites") {
+            store.addBookmark(from: tab, instance: instance)
+            if let bookmark = store.pinnedBookmarks.last {
+                store.moveBookmarkToSpace(bookmark, spaceID: nil)
+            }
+        }
+        .disabled(tab.url == nil)
         Button("Copy Link") { store.copyLink(tab.url) }
             .disabled(tab.url == nil)
         Button("Duplicate Tab") { store.duplicate(tab, instance: instance) }

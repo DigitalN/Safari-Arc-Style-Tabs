@@ -6,15 +6,18 @@ import os.log
 ///
 /// Incoming: SafariWebExtensionHandler forwards each `sendNativeMessage` call over a
 /// CFMessagePort and waits for the reply.
-/// Outgoing: `SFSafariApplication.dispatchMessage` delivers commands to the port that
-/// background.js opened with `connectNative`.
+/// Outgoing: acknowledged replies carry commands. Safari push is only a wake hint;
+/// polling keeps clicks working when Safari cannot resolve the unsigned extension.
 final class ExtensionBridge {
     /// Handles one JSON message from the extension and returns the JSON reply.
     var onMessage: ((_ type: String, _ payload: Data, _ object: [String: Any]) -> [String: Any])?
+    var commandPollInterval: (() -> Int)?
 
     private(set) var isListening = false
     private var port: CFMessagePort?
     private var seenTypes: Set<String> = []
+    private let commands = ExtensionCommandQueue()
+    private var notedPushFailure = false
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "bridge")
 
     func start() {
@@ -55,19 +58,32 @@ final class ExtensionBridge {
             log.notice("first “\(type, privacy: .public)” message from the extension")
         }
         var reply = onMessage?(type, data, object) ?? [:]
+        let queued = commands.reply(to: object)
+        if !queued.isEmpty {
+            reply["commands"] = queued
+            log.info("delivering \(queued.count) queued Safari commands")
+        }
+        reply["commandPollIntervalMs"] = commandPollInterval?() ?? 250
         reply["appRunning"] = true
         return (try? JSONSerialization.data(withJSONObject: reply)) ?? Data("{}".utf8)
     }
 
     /// Sends a command to background.js. `command["instance"]` limits it to one profile.
     func send(_ command: [String: Any]) {
+        commands.enqueue(command)
+        var wake: [String: Any] = ["action": "pollCommands"]
+        if let instance = command["instance"] { wake["instance"] = instance }
         SFSafariApplication.dispatchMessage(
             withName: "command",
             toExtensionWithIdentifier: SideTabsBridge.extensionBundleIdentifier,
-            userInfo: command
-        ) { [log] error in
+            userInfo: wake
+        ) { [weak self] error in
             if let error {
-                log.error("dispatchMessage failed: \(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async {
+                    guard let self, !self.notedPushFailure else { return }
+                    self.notedPushFailure = true
+                    self.log.notice("Safari push unavailable; using acknowledged reply delivery: \(error.localizedDescription, privacy: .public)")
+                }
             }
         }
     }

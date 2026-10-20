@@ -1,5 +1,21 @@
 import Foundation
 
+enum TabCleanupInterval: String, CaseIterable, Identifiable {
+    case off, twelveHours, twentyFourHours, weekly
+    var id: String { rawValue }
+    var title: String {
+        switch self { case .off: "Off"; case .twelveHours: "12 hours"; case .twentyFourHours: "24 hours"; case .weekly: "Once a week" }
+    }
+    var seconds: TimeInterval? {
+        switch self { case .off: nil; case .twelveHours: 12 * 3600; case .twentyFourHours: 24 * 3600; case .weekly: 7 * 24 * 3600 }
+    }
+}
+
+enum SidebarSelectionItem: Hashable {
+    case tab(TabKey)
+    case bookmark(UUID)
+}
+
 /// A Safari tab as reported by background.js.
 struct BrowserTab: Codable, Identifiable, Hashable {
     let id: Int
@@ -35,6 +51,7 @@ struct Snapshot: Codable {
     let focusChangedAt: Double
     var windows: [BrowserWindow]
     var profile: String?
+    var capabilities: [String]? = nil
 }
 
 /// Tab ids are only unique within one background page instance.
@@ -48,6 +65,11 @@ struct Bookmark: Codable, Identifiable, Hashable {
     var title: String
     var url: String
     var faviconURL: String?
+    /// nil means a favorite shared across all spaces.
+    var spaceID: UUID? = nil
+    var folderID: UUID? = nil
+    /// Imported Arc Favorites are shared only by spaces from their source profile.
+    var arcProfileID: String? = nil
 }
 
 /// A tab name the user picked, plus the URL it had so it can be matched up again
@@ -60,6 +82,7 @@ struct CustomName: Codable, Hashable {
 enum RenameTarget: Hashable {
     case tab(TabKey)
     case bookmark(UUID)
+    case folder(UUID)
 }
 
 extension String {

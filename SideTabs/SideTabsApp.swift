@@ -31,9 +31,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let bridge = ExtensionBridge()
     private let tracker = SafariTracker()
     private let accessibilityWatcher = AccessibilityWatcher()
+    private var cleanupTimer: Timer?
     private var dock: DockController?
     private var welcomeWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private var arcImportWindow: NSWindow?
     /// Set while Side Tabs activates itself to show one of its own windows.
     private var presentingOwnWindow = false
     /// Set when quitting to relaunch into an update.
@@ -49,19 +51,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .environment(store)
             .environment(settings)
             .environment(favicons))
+        panel.onSpaceSwipe = { [store] direction in store.switchSpace(direction: direction) }
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
         self.dock = dock
+
+        store.cleanupInterval = { [settings] in settings.tabCleanupInterval }
+        observeCleanupSettings()
+        cleanupTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.settings.tabCleanupInterval != .off else { return }
+                self.store.requestSnapshot()
+            }
+        }
 
         bridge.onMessage = { [store] type, payload, object in
             store.handleMessage(type: type, payload: payload, object: object)
         }
+        bridge.commandPollInterval = { [store] in store.safariIsFrontmost ? 250 : 5000 }
         bridge.start()
 
         store.sendCommand = { [weak self] command in
             self?.bridge.send(command)
         }
+        store.onOpenArcImport = { [weak self] in self?.showArcImport() }
         store.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
-        store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
+        store.onSidebarFocusChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
         store.onOpenAddressBar = { [weak self] in self?.dock?.openSafariAddressBar() }
 
         dock.start()
@@ -74,13 +88,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             settings.turnOnLaunchAtLoginByDefault()
         }
         showSetupIfNeeded()
+        if CommandLine.arguments.contains("--preview-arc") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.showArcImport() }
+        }
 
         updater.isBusy = { [weak self] in
             guard let self else { return true }
-            return self.store.renaming != nil || [self.welcomeWindow, self.settingsWindow].contains { $0?.isVisible == true }
+            return self.store.needsSidebarFocus || self.store.arcRestoreRunning || [self.welcomeWindow, self.settingsWindow, self.arcImportWindow].contains { $0?.isVisible == true }
         }
         updater.willRelaunch = { [weak self] in self?.relaunchingForUpdate = true }
         updater.start()
+    }
+
+    private func observeCleanupSettings() {
+        withObservationTracking { _ = settings.tabCleanupInterval } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.settings.tabCleanupInterval != .off { self.store.requestSnapshot() }
+                self.observeCleanupSettings()
+            }
+        }
     }
 
     /// Setup shows until Accessibility and the Safari extension are both on, and again right
@@ -117,6 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        cleanupTimer?.invalidate()
         // After an update, the new copy docks right where this one is, so leave Safari's
         // window alone rather than widening it only to narrow it again a second later.
         if !relaunchingForUpdate {
@@ -128,8 +156,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Side Tabs only becomes the active app to show its own windows, or when the sidebar
     /// itself is picked, e.g. in Mission Control. In that case the user wants Safari.
     func applicationDidBecomeActive(_ notification: Notification) {
-        let ownWindowShowing = [welcomeWindow, settingsWindow].contains { $0?.isVisible == true }
-        guard !presentingOwnWindow, !ownWindowShowing, NSApp.modalWindow == nil else { return }
+        let ownWindowShowing = [welcomeWindow, settingsWindow, arcImportWindow].contains { $0?.isVisible == true }
+        guard !presentingOwnWindow, !ownWindowShowing, NSApp.modalWindow == nil,
+              !store.needsSidebarFocus else { return }
         dock?.bringSafariForward()
     }
 
@@ -141,10 +170,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// The toolbar button, its keyboard shortcut, and the menu bar item. In full screen the
     /// sidebar is a hover overlay, so this slides it out or away instead of turning it off.
     func toggleSidebar() {
-        if settings.sidebarVisible, let dock, dock.isShowingFullScreenOverlay {
+        if settings.sidebarVisible, let dock, dock.isUsingHoverOverlay {
             dock.toggleOverlay()
         } else {
             settings.sidebarVisible.toggle()
+            if settings.sidebarVisible && settings.autoHideSidebar { dock?.toggleOverlay() }
         }
     }
 
@@ -171,6 +201,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         present(welcomeWindow)
     }
 
+    func showArcImport() {
+        if arcImportWindow == nil {
+            arcImportWindow = makeWindow(title: "Import from Arc — Preview", content: ArcImportView().environment(store))
+        }
+        present(arcImportWindow)
+    }
+
     func showSettings() {
         if settingsWindow == nil {
             settingsWindow = makeWindow(title: "Side Tabs Settings", content: SettingsView().environment(settings))
@@ -194,7 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let closing = notification.object as? NSWindow
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let stillOpen = [self.welcomeWindow, self.settingsWindow].contains { $0 !== closing && $0?.isVisible == true }
+            let stillOpen = [self.welcomeWindow, self.settingsWindow, self.arcImportWindow].contains { $0 !== closing && $0?.isVisible == true }
             if !stillOpen && NSApp.isActive {
                 NSApp.deactivate()
             }

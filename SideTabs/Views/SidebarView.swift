@@ -15,24 +15,41 @@ struct SidebarView: View {
                     .padding(.horizontal, 8)
                     .padding(.top, 12)
                     .padding(.bottom, 4)
+                if !store.validSidebarSelection.isEmpty {
+                    HStack {
+                        Text("\(store.validSidebarSelection.count) selected").font(.caption)
+                        Spacer()
+                        Menu("Actions") { BulkSelectionActions() }
+                        SidebarIconButton(systemImage: "xmark", help: "Clear Selection") { store.clearSidebarSelection() }
+                    }.padding(.horizontal, 12).padding(.vertical, 4)
+                }
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 0) {
                         if store.lacksWebsiteAccess {
                             WebsiteAccessBanner()
                                 .padding(.bottom, 8)
                         }
+                        if settings.showBookmarks && !store.favorites.isEmpty {
+                            FavoritesSection()
+                                .padding(.bottom, 8)
+                        }
+                        SpaceHeader()
                         if settings.showBookmarks {
-                            BookmarksSection()
+                            PinnedSection()
                             Divider()
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 7)
                         }
                         TabsSection(selection: selection)
+                        if store.arcPendingTabs.contains(where: { $0.spaceID == store.selectedSpace.id }) {
+                            Button("Restore queued Arc tabs…") { store.onOpenArcImport?() }
+                                .buttonStyle(.plain).font(.caption).foregroundStyle(.secondary).padding(8)
+                        }
                     }
                     .coordinateSpace(.named(SidebarDrag.coordinateSpace))
                     .overlay(alignment: .topLeading) {
                         if let item = drag.item {
-                            DragGhost(item: item)
+                            DragGhost(item: drag.items.first ?? item, count: drag.items.count)
                                 .offset(y: drag.ghostTop)
                                 .allowsHitTesting(false)
                         }
@@ -42,8 +59,44 @@ struct SidebarView: View {
                     .padding(.bottom, 10)
                 }
                 .scrollIndicators(.automatic)
+                SpaceSwitcher()
             } else {
                 EmptySidebar()
+            }
+        }
+        .background(spaceColor(store.selectedSpace.theme).opacity(0.08))
+        .onChange(of: store.selectedSpace.id) { _, _ in drag.cancel() }
+        .onChange(of: store.sidebarSelectionContext) { _, _ in drag.cancel(); store.clearSidebarSelection() }
+        .onAppear { store.selectionShowsBookmarks = settings.showBookmarks }
+        .onChange(of: settings.showBookmarks) { _, show in
+            drag.cancel(); store.clearSidebarSelection(); store.selectionShowsBookmarks = show
+        }
+        // A sheet on the stable sidebar root survives row updates and holds focus
+        // while the pointer leaves an auto-hiding sidebar to choose an action.
+        .alert(store.pendingSidebarDeletion?.title ?? "Delete?", isPresented: Binding(
+            get: { store.isConfirmingSidebarDeletion }, set: { store.isConfirmingSidebarDeletion = $0 }),
+               presenting: store.pendingSidebarDeletion) { deletion in
+            switch deletion {
+            case .folder(let folder):
+                Button("Remove Folder, Keep Contents") { store.removeFolder(folder.id) }
+                Button("Delete Folder and All Its Tabs", role: .destructive) { store.removeFolder(folder.id, deleteContents: true) }
+            case .space(let space):
+                Button("Move Items to \(store.spaces.first { $0.id != space.id }?.name ?? "Another Space") and Delete Space") {
+                    store.deleteSpace(space.id)
+                }
+                Button("Delete Space and All Its Tabs", role: .destructive) { store.deleteSpace(space.id, deleteContents: true) }
+            case .selection(let items, let context):
+                Button("Delete Selected Tabs", role: .destructive) { store.deleteSidebarSelection(items, context: context) }
+            }
+            Button("Cancel", role: .cancel) { store.pendingSidebarDeletion = nil }
+        } message: { deletion in
+            switch deletion {
+            case .folder:
+                Text("Keep the contents in the parent folder, or delete all saved tabs and nested folders and close their open Safari tabs. Other copies of the same page are kept.")
+            case .space:
+                Text("Move the contents to another space, or delete its saved tabs and folders and close its open Safari tabs in all windows. Shared Favorites are kept.")
+            case .selection:
+                Text("Selected saved tabs will be removed and their open tabs closed. Other copies of the same page and folders are kept.")
             }
         }
         .environment(drag)
@@ -51,102 +104,35 @@ struct SidebarView: View {
     }
 }
 
-private struct BookmarksSection: View {
+struct BulkSelectionActions: View {
     @Environment(TabStore.self) private var store
-    @Environment(SidebarDrag.self) private var drag
-
-    private enum Slot: Identifiable {
-        case bookmark(Bookmark)
-        case dropSlot
-
-        var id: String {
-            switch self {
-            case .bookmark(let bookmark): bookmark.id.uuidString
-            case .dropSlot: "drop-slot"
-            }
-        }
-    }
-
-    /// Bookmarks in display order. While a bookmark is dragged over the list it moves to the
-    /// target slot (and draws itself as the slot); a dragged tab gets a separate slot.
-    private var slots: [Slot] {
-        var bookmarks = store.bookmarks
-        switch (drag.item, drag.target) {
-        case (.bookmark(let dragged)?, .bookmarks(let index)):
-            if let from = bookmarks.firstIndex(where: { $0.id == dragged.id }) {
-                let moved = bookmarks.remove(at: from)
-                bookmarks.insert(moved, at: min(index, bookmarks.count))
-            }
-            return bookmarks.map(Slot.bookmark)
-        case (.tab?, .bookmarks(let index)):
-            var slots = bookmarks.map(Slot.bookmark)
-            slots.insert(.dropSlot, at: min(index, slots.count))
-            return slots
-        default:
-            return bookmarks.map(Slot.bookmark)
-        }
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-            SectionHeader(title: "Bookmarks") {
-                SidebarIconButton(systemImage: "plus", help: "Bookmark Current Tab") {
-                    store.addBookmarkForCurrentTab()
-                }
-            }
-
-            VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-                ForEach(slots) { slot in
-                    switch slot {
-                    case .bookmark(let bookmark):
-                        BookmarkRow(bookmark: bookmark)
-                    case .dropSlot:
-                        DropSlot()
-                    }
-                }
-            }
-            .onSidebarTop { drag.bookmarkRowsTop = $0 }
-
-            if store.bookmarks.isEmpty && drag.target == .none {
-                Text("Drag a tab here, or click + to bookmark the current page.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        Button("Delete \(store.validSidebarSelection.count) Selected Tabs…", role: .destructive) { store.requestDeleteSidebarSelection() }
+        Menu("Move Selected Tabs to Space") {
+            ForEach(store.spaces) { space in
+                Button { store.moveSidebarSelection(to: space.id) } label: {
+                    Label { Text(space.name) } icon: { SpaceIcon(space: space) }
+                }.disabled(space.id == store.selectedSpace.id)
             }
         }
-        .contentShape(Rectangle())
-        .onSidebarTop { drag.bookmarksSectionTop = $0 }
-        // Links dragged in from a web page or Safari's address bar.
-        .onDrop(of: [.url], isTargeted: nil) { providers, location in
-            let index = drag.bookmarkIndex(forDropAt: location.y, count: store.bookmarks.count)
-            return loadDroppedURL(from: providers) { url in
-                store.addBookmark(url: url, at: index)
-            }
-        }
+        Button("Clear Selection") { store.clearSidebarSelection() }
     }
 }
 
 private struct TabsSection: View {
     let selection: TabStore.WindowSelection
     @Environment(TabStore.self) private var store
+    @Environment(AppSettings.self) private var settings
     @Environment(SidebarDrag.self) private var drag
 
-    /// Tabs in display order; a tab dragged within the list moves to the target slot.
+    /// Preview the selected group together at its destination slot.
     private var tabs: [BrowserTab] {
-        var tabs = selection.window.tabs
-        if case .tab(let dragged, _)? = drag.item, case .tabs(let index) = drag.target,
-           let from = tabs.firstIndex(where: { $0.id == dragged.id }) {
-            let moved = tabs.remove(at: from)
-            tabs.insert(moved, at: min(index, tabs.count))
-        }
-        return tabs
+        drag.previewTabs(store.displayedTabs(in: selection, showBookmarks: settings.showBookmarks))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-            SectionHeader(title: "Tabs", detail: "\(selection.window.tabs.count)") {
+            SectionHeader(title: "Tabs", detail: "\(store.displayedTabs(in: selection, showBookmarks: settings.showBookmarks).count)") {
                 SidebarIconButton(systemImage: "plus", help: "New Tab") {
                     store.newTab()
                 }

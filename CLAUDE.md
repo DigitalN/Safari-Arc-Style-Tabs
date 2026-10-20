@@ -44,6 +44,11 @@ Building, the release checklist, how it works, and testing the updater are in
   access`, ask the maintainer to select Side Tabs in Privacy & Security → Device Control
   and Data Access, click −, then add it back with +. An entry created by the system
   prompt can be tied to a single build. Claude can't change that setting.
+- Normal local iteration now uses the existing Apple Development identity and Personal
+  Team for both targets. Use `scripts/build.sh` without `--adhoc`; keep bundle IDs,
+  signing team, and `/Applications/Side Tabs.app` unchanged. If signing fails, repair
+  it instead of silently reverting to ad hoc signing. Verify designated-requirement
+  compatibility and the running app's Accessibility/extension connection after install.
 - The maintainer creates signing certificates in Xcode (Settings → Apple Accounts →
   Personal Team → Manage Certificates). `xcodebuild -allowProvisioningUpdates` can't use
   the Xcode account from Claude's shell. The paid developer membership has lapsed and the
