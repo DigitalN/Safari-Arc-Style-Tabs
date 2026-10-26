@@ -275,8 +275,10 @@ final class DockController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
 
+    /// Only while the sidebar is docked: when it's hidden or turned off, Safari can use the
+    /// whole screen, and pushing it would undo the user's resizing.
     private func makeRoom(for window: AXUIElement) {
-        guard let frame = tracker.frame(of: window), !tracker.isFullScreen(window) else { return }
+        guard mode == .docked, let frame = tracker.frame(of: window), !tracker.isFullScreen(window) else { return }
         let visible = screen(containing: frame).visibleFrame.flippedScreenCoordinates
         let left = visible.minX + settings.width
         guard frame.minX < left - 0.5 else { return }
