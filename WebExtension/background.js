@@ -189,6 +189,10 @@ async function runCommand(command) {
         case "mute":
             await browser.tabs.update(command.tabId, { muted: !!command.muted });
             break;
+
+        case "fetchIcons":
+            (command.urls ?? []).forEach(sendIcon);
+            break;
         }
     } catch (error) {
         console.warn("Side Tabs: command failed", command, error);
@@ -227,6 +231,47 @@ function connectPort() {
     } catch (error) {
         console.warn("Side Tabs: connectNative failed", error);
         setTimeout(connectPort, 5000);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Favicons
+//
+// The app gets its icons from here rather than downloading them itself: connecting to a
+// router or other device on the local network would make macOS ask for Local Network
+// access. Safari has it already.
+
+const ICON_TIMEOUT_MS = 10000;
+const ICON_MAX_BYTES = 512 * 1024;
+
+async function sendIcon(url) {
+    let data = null;
+    try {
+        data = await fetchIcon(url);
+    } catch {
+        // Unreachable, too slow, or not allowed: the app shows a letter instead.
+    }
+    postToApp({ type: "icon", instance, url, data });
+}
+
+// The icon as base64, or null.
+async function fetchIcon(url) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ICON_TIMEOUT_MS);
+    try {
+        const response = await fetch(url, { cache: "force-cache", signal: controller.signal });
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        if (!blob.size || blob.size > ICON_MAX_BYTES) return null;
+        const dataURL = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(blob);
+        });
+        return dataURL.slice(dataURL.indexOf(",") + 1);
+    } finally {
+        clearTimeout(timer);
     }
 }
 
