@@ -59,7 +59,8 @@ async function buildSnapshot() {
     const known = new Map(windows.filter((w) => !w.type || w.type === "normal").map((w) => [w.id, w]));
     for (const windowId of tabsByWindow.keys()) {
         if (!known.has(windowId) && !windows.some((w) => w.id === windowId)) {
-            known.set(windowId, { id: windowId, focused: windowId === focusedWindowId, incognito: false });
+            const incognito = tabsByWindow.get(windowId).some((tab) => tab.incognito);
+            known.set(windowId, { id: windowId, focused: windowId === focusedWindowId, incognito });
         }
     }
 
