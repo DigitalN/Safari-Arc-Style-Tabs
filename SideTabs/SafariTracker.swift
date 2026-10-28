@@ -45,6 +45,7 @@ final class SafariTracker {
     private var workspaceTokens: [NSObjectProtocol] = []
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "tracker")
     private var lastWindowDescription = ""
+    private var lastRejectedDescription = ""
 
     private static let appNotifications = [
         kAXFocusedWindowChangedNotification,
@@ -204,30 +205,48 @@ final class SafariTracker {
     // MARK: - Choosing the window
 
     /// Picks the browser window to dock to: the focused one if it's a browser window,
-    /// otherwise keeps the current one, otherwise the frontmost browser window.
-    func refreshWindow() {
-        guard let appElement else {
-            setWindow(nil)
-            return
+    /// otherwise keeps the current one, otherwise the frontmost browser window. Returns
+    /// whether the window changed.
+    @discardableResult
+    func refreshWindow() -> Bool {
+        let previous = window
+        setWindow(chooseWindow())
+        switch (previous, window) {
+        case let (old?, new?): return !CFEqual(old, new)
+        case (nil, nil): return false
+        default: return true
         }
-        for attribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
-            if let candidate = element(appElement, attribute), isBrowserWindow(candidate) {
-                setWindow(candidate)
-                return
+    }
+
+    private func chooseWindow() -> AXUIElement? {
+        guard let appElement else { return nil }
+        let focused = element(appElement, kAXFocusedWindowAttribute)
+        if let focused, isBrowserWindow(focused) {
+            return focused
+        }
+        if let main = element(appElement, kAXMainWindowAttribute), isBrowserWindow(main) {
+            return main
+        }
+        if let focused {
+            let description = describe(focused)
+            if description != lastRejectedDescription {
+                lastRejectedDescription = description
+                log.notice("focused window isn't a browser window: \(description, privacy: .public)")
             }
         }
         if let window, isBrowserWindow(window) {
-            return
+            return window
         }
         let windows = elements(appElement, kAXWindowsAttribute)
-        setWindow(windows.first(where: isBrowserWindow))
-        if window == nil {
-            let description = windows.isEmpty ? "Safari reports no windows" : windows.map(describe).joined(separator: "; ")
-            if description != lastWindowDescription {
-                lastWindowDescription = description
-                log.notice("no browser window among: \(description, privacy: .public)")
-            }
+        if let first = windows.first(where: isBrowserWindow) {
+            return first
         }
+        let description = windows.isEmpty ? "Safari reports no windows" : windows.map(describe).joined(separator: "; ")
+        if description != lastWindowDescription {
+            lastWindowDescription = description
+            log.notice("no browser window among: \(description, privacy: .public)")
+        }
+        return nil
     }
 
     private func describe(_ window: AXUIElement) -> String {
@@ -255,7 +274,9 @@ final class SafariTracker {
     }
 
     /// Browser windows are standard windows that can go full screen. Safari's Settings
-    /// window has a disabled full-screen button, which is how it's told apart.
+    /// window has a disabled full-screen button, which is how it's told apart. Safari now and
+    /// then leaves the button out of a browser window for a few seconds, so a missing button
+    /// doesn't count against a window.
     func isBrowserWindow(_ window: AXUIElement) -> Bool {
         guard string(window, kAXRoleAttribute) == kAXWindowRole,
               string(window, kAXSubroleAttribute) == kAXStandardWindowSubrole,
@@ -263,7 +284,7 @@ final class SafariTracker {
         if isFullScreen(window) {
             return true
         }
-        guard let button = element(window, kAXFullScreenButtonAttribute) else { return false }
+        guard let button = element(window, kAXFullScreenButtonAttribute) else { return true }
         return bool(button, kAXEnabledAttribute) ?? true
     }
 

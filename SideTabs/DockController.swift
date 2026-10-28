@@ -61,13 +61,15 @@ final class DockController {
         update(makeRoom: true)
 
         // Picks up Accessibility access being granted, Safari windows appearing, etc., and
-        // puts the sidebar right after changes macOS didn't announce.
+        // puts the sidebar right after changes macOS didn't announce, including a switch to
+        // another Safari window that the window notifications missed.
         healthTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 let wasAttached = self.tracker.isAttached
                 self.tracker.attachIfNeeded()
-                if !wasAttached && self.tracker.isAttached || self.mode == .hidden {
+                let windowChanged = self.tracker.refreshWindow()
+                if !wasAttached && self.tracker.isAttached || self.mode == .hidden || windowChanged {
                     self.update(makeRoom: true)
                 } else if let problem = self.placementProblem() {
                     self.log.notice("fixing: \(problem, privacy: .public)")
@@ -277,14 +279,17 @@ final class DockController {
 
     /// Only while the sidebar is docked: when it's hidden or turned off, Safari can use the
     /// whole screen, and pushing it would undo the user's resizing.
+    ///
+    /// Moves the window rather than narrowing it, if the screen has room. Safari can open a
+    /// new window at the left edge with the size of an earlier one, so narrowing it would make
+    /// each new window narrower than the one before.
     private func makeRoom(for window: AXUIElement) {
         guard mode == .docked, let frame = tracker.frame(of: window), !tracker.isFullScreen(window) else { return }
         let visible = screen(containing: frame).visibleFrame.flippedScreenCoordinates
         let left = visible.minX + settings.width
         guard frame.minX < left - 0.5 else { return }
 
-        let right = min(frame.maxX, visible.maxX)
-        let width = max(right - left, minimumSafariWidth)
+        let width = max(min(frame.width, visible.maxX - left), minimumSafariWidth)
         let target = CGRect(x: left, y: frame.minY, width: width, height: frame.height)
         tracker.setFrame(target, of: window)
         let result = String(describing: tracker.frame(of: window))

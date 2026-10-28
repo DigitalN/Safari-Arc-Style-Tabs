@@ -130,7 +130,7 @@ final class TabStore {
     private func requestSnapshotIfUnknown(title: String?) {
         guard let title, !title.isEmpty else { return }
         let known = snapshots.values.contains { snapshot in
-            snapshot.windows.contains { activeTitle(of: $0) == title }
+            snapshot.windows.contains { isDockedWindow($0, title: title) }
         }
         guard !known, Date().timeIntervalSince(lastSnapshotRequest) > 0.5 else { return }
         requestSnapshot()
@@ -138,7 +138,7 @@ final class TabStore {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self, self.dockedWindowTitle == title else { return }
             let stillUnknown = !self.snapshots.values.contains { snapshot in
-                snapshot.windows.contains { self.activeTitle(of: $0) == title }
+                snapshot.windows.contains { self.isDockedWindow($0, title: title) }
             }
             if stillUnknown {
                 self.requestSnapshot()
@@ -178,10 +178,10 @@ final class TabStore {
             best = WindowSelection(instance: snapshot.instance, window: snapshot.windows[0])
         }
 
-        if let title = dockedWindowTitle, !title.isEmpty, let current = best, activeTitle(of: current.window) != title {
+        if let title = dockedWindowTitle, !title.isEmpty, let current = best, !isDockedWindow(current.window, title: title) {
             let matches = snapshots.values.flatMap { snapshot in
                 snapshot.windows
-                    .filter { activeTitle(of: $0) == title }
+                    .filter { isDockedWindow($0, title: title) }
                     .map { WindowSelection(instance: snapshot.instance, window: $0) }
             }
             if matches.count == 1 {
@@ -193,6 +193,14 @@ final class TabStore {
 
     private func activeTitle(of window: BrowserWindow) -> String? {
         window.tabs.first(where: \.active)?.title
+    }
+
+    /// Whether `title`, the title Safari gives the docked window, is this window's. Safari
+    /// titles a window after its current page, plus a note in private windows (“Apple, Private
+    /// Browsing”, worded for the user's language), so there the page title only has to be in it.
+    private func isDockedWindow(_ window: BrowserWindow, title: String) -> Bool {
+        guard let active = activeTitle(of: window), !active.isEmpty else { return false }
+        return active == title || window.incognito && title.contains(active)
     }
 
     // MARK: - Tab names
