@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var presentingOwnWindow = false
     /// Set when quitting to relaunch into an update.
     private var relaunchingForUpdate = false
+    private let launchedAt = Date()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         replaceOlderCopies()
@@ -146,8 +147,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         dock?.bringSafariForward()
     }
 
+    /// Opening Side Tabs again while it runs (from Finder, Spotlight or Launchpad) shows
+    /// Settings, since it has no Dock icon. Not right after launch, though: those reopens
+    /// come from two things starting it at once, such as an update relaunching it while
+    /// Safari's extension starts it too, not from the user.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showSettings()
+        if Date().timeIntervalSince(launchedAt) > 10 {
+            showSettings()
+        }
         return false
     }
 
