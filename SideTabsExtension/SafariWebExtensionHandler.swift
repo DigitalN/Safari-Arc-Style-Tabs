@@ -21,7 +21,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         if let data = try? JSONSerialization.data(withJSONObject: envelope) {
             if let replyData = Self.sendToApp(data) {
                 reply = (try? JSONSerialization.jsonObject(with: replyData)) as? [String: Any] ?? ["appRunning": true]
-            } else if message["launchApp"] as? Bool == true {
+            } else if message["launchApp"] as? Bool == true, !Self.appIsRunning {
                 launchContainingApp()
             }
         }
@@ -51,6 +51,13 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             return nil
         }
         return reply as Data
+    }
+
+    /// The app doesn't answer while it's starting up or quitting. Opening it then would only
+    /// reach the running copy, which takes that as the user reopening it and shows Settings.
+    private static var appIsRunning: Bool {
+        NSRunningApplication.runningApplications(withBundleIdentifier: SideTabsBridge.appBundleIdentifier)
+            .contains { !$0.isTerminated }
     }
 
     /// The extension lives at `Side Tabs.app/Contents/PlugIns/Side Tabs Extension.appex`.
