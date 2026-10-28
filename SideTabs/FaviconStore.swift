@@ -1,30 +1,37 @@
 import AppKit
 import Observation
 
-/// Downloads and caches favicons. Tries the icon URL the page declared, then the
+/// Favicons for tabs and bookmarks. Tries the icon URL the page declared, then the
 /// site's /favicon.ico; views fall back to a letter tile when both fail.
+///
+/// Safari fetches the icons (background.js) and sends them over, so Side Tabs itself
+/// never connects to websites. Tabs are often open on devices at home, like a router or
+/// Home Assistant, and connecting to those from the app makes macOS ask for Local
+/// Network access.
 @Observable
 final class FaviconStore {
     private(set) var images: [String: NSImage] = [:]
+    /// Goes up when the extension is back after missing requests, so views ask again.
+    private(set) var generation = 0
 
-    @ObservationIgnored private var inFlight: Set<String> = []
+    /// Asks background.js to fetch these icon URLs and send them back.
+    @ObservationIgnored var requestIcons: (([String]) -> Void)?
+
+    private enum Outcome {
+        case loaded, failed, unanswered
+    }
+
+    private struct Request {
+        let id: Int
+        var waiters: [CheckedContinuation<Outcome, Never>]
+    }
+
+    @ObservationIgnored private var requests: [String: Request] = [:]
+    @ObservationIgnored private var nextRequestID = 0
+    @ObservationIgnored private var queued: [String] = []
     @ObservationIgnored private var failedAt: [String: Date] = [:]
-    @ObservationIgnored private let session: URLSession = {
-        let configuration = URLSessionConfiguration.default
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        configuration.urlCache = URLCache(
-            memoryCapacity: 4 * 1024 * 1024,
-            diskCapacity: 64 * 1024 * 1024,
-            directory: caches.appending(path: "Favicons", directoryHint: .isDirectory)
-        )
-        configuration.requestCachePolicy = .returnCacheDataElseLoad
-        configuration.timeoutIntervalForRequest = 10
-        configuration.httpAdditionalHeaders = [
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15",
-            "Accept": "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5",
-        ]
-        return URLSession(configuration: configuration)
-    }()
+    @ObservationIgnored private var missedAnswer = false
+    @ObservationIgnored private var lastRetry = Date.distantPast
 
     /// Icon URLs to try for a page, best first.
     static func candidates(iconURL: String?, pageURL: String?) -> [String] {
@@ -61,30 +68,72 @@ final class FaviconStore {
             if let failed = failedAt[candidate], Date().timeIntervalSince(failed) < 600 {
                 continue
             }
-            if await fetch(candidate) {
+            switch await fetch(candidate) {
+            case .loaded:
+                return
+            case .failed:
+                continue
+            case .unanswered:
+                // Safari isn't running or the extension is off; try again once it's back.
                 return
             }
         }
     }
 
-    private func fetch(_ urlString: String) async -> Bool {
-        guard !inFlight.contains(urlString), let url = URL(string: urlString) else { return false }
-        inFlight.insert(urlString)
-        defer { inFlight.remove(urlString) }
-
-        do {
-            let (data, response) = try await session.data(from: url)
-            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                throw URLError(.badServerResponse)
+    private func fetch(_ url: String) async -> Outcome {
+        await withCheckedContinuation { continuation in
+            if requests[url] != nil {
+                requests[url]?.waiters.append(continuation)
+                return
             }
-            guard let image = NSImage(data: data), image.isValid, image.size.width > 0 else {
-                throw URLError(.cannotDecodeContentData)
+            nextRequestID += 1
+            let id = nextRequestID
+            requests[url] = Request(id: id, waiters: [continuation])
+            queued.append(url)
+            if queued.count == 1 {
+                // Views appear together; ask for all of their icons in one message.
+                DispatchQueue.main.async { [weak self] in self?.sendQueued() }
             }
-            images[urlString] = image
-            return true
-        } catch {
-            failedAt[urlString] = Date()
-            return false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+                guard let self, self.requests[url]?.id == id else { return }
+                self.missedAnswer = true
+                self.finish(url, .unanswered)
+            }
         }
+    }
+
+    private func sendQueued() {
+        let urls = queued
+        queued.removeAll()
+        if !urls.isEmpty {
+            requestIcons?(urls)
+        }
+    }
+
+    /// An icon background.js fetched, or `nil` if it couldn't get one.
+    func receive(url: String, data: Data?) {
+        if let data, let image = NSImage(data: data), image.isValid, image.size.width > 0 {
+            images[url] = image
+            failedAt[url] = nil
+            finish(url, .loaded)
+        } else {
+            failedAt[url] = Date()
+            finish(url, .failed)
+        }
+    }
+
+    /// Called for every message from the extension. If requests went unanswered before it
+    /// got here (Safari opened after Side Tabs, or the extension was turned on), ask again.
+    /// At most once a minute, in case an older background.js is still running and ignores them.
+    func extensionIsReachable() {
+        guard missedAnswer, Date().timeIntervalSince(lastRetry) > 60 else { return }
+        missedAnswer = false
+        lastRetry = Date()
+        generation += 1
+    }
+
+    private func finish(_ url: String, _ outcome: Outcome) {
+        guard let request = requests.removeValue(forKey: url) else { return }
+        request.waiters.forEach { $0.resume(returning: outcome) }
     }
 }

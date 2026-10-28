@@ -52,13 +52,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
         self.dock = dock
 
-        bridge.onMessage = { [store] type, payload, object in
-            store.handleMessage(type: type, payload: payload, object: object)
+        bridge.onMessage = { [store, favicons] type, payload, object in
+            favicons.extensionIsReachable()
+            if type == "icon", let url = object["url"] as? String {
+                favicons.receive(url: url, data: (object["data"] as? String).flatMap { Data(base64Encoded: $0) })
+            }
+            return store.handleMessage(type: type, payload: payload, object: object)
         }
         bridge.start()
 
         store.sendCommand = { [weak self] command in
             self?.bridge.send(command)
+        }
+        favicons.requestIcons = { [weak self] urls in
+            guard let self else { return }
+            var command: [String: Any] = ["action": "fetchIcons", "urls": urls]
+            // Any profile can fetch any icon, so when one is known, only ask it.
+            if let instance = store.currentWindow?.instance {
+                command["instance"] = instance
+            }
+            bridge.send(command)
         }
         store.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }

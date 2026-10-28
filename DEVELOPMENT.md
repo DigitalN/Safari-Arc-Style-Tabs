@@ -133,8 +133,11 @@ separate window that the app keeps attached to Safari's window:
 
 - `WebExtension/`: the Safari web extension. `background.js` sends windows and tabs to
   the app (with retries, and a heartbeat every 5 seconds so missed updates are noticed)
-  and carries out the app's commands: switch, close, open, move, and so on. `content.js`
-  reports each page's favicon URL, which Safari's tabs API doesn't provide.
+  and carries out the app's commands: switch, close, open, move, and so on. It also
+  fetches favicons for the app, which never connects to websites itself: reaching a
+  device on the local network, like a router, would make macOS ask for Local Network
+  access. `content.js` reports each page's favicon URL, which Safari's tabs API doesn't
+  provide.
 - `SideTabsExtension/`: the extension's native handler. It passes messages to the app
   over a CFMessagePort named after the app group, which is what lets the sandboxed
   extension reach the app.
@@ -144,7 +147,7 @@ separate window that the app keeps attached to Safari's window:
   - `DockController` positions the panel directly behind Safari's window, narrows Safari
     to fit, and handles full screen.
   - `TabStore` holds tabs, bookmarks and custom names.
-  - `FaviconStore` downloads and caches icons.
+  - `FaviconStore` asks the extension for icons and keeps them.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
   - `AppLocation` offers to move the app into Applications.
   - `Updater` checks GitHub for new releases, verifies the download's code signature

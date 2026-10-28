@@ -11,6 +11,11 @@ struct FaviconView: View {
         FaviconStore.candidates(iconURL: iconURL, pageURL: pageURL)
     }
 
+    private struct Load: Equatable {
+        let candidates: [String]
+        let generation: Int
+    }
+
     var body: some View {
         Group {
             if let image = favicons.image(for: candidates) {
@@ -28,7 +33,7 @@ struct FaviconView: View {
             }
         }
         .frame(width: size, height: size)
-        .task(id: candidates) {
+        .task(id: Load(candidates: candidates, generation: favicons.generation)) {
             await favicons.load(candidates)
         }
     }
