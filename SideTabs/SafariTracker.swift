@@ -23,6 +23,13 @@ private func CGSCopyManagedDisplaySpaces(_ connection: Int32) -> Unmanaged<CFArr
 final class SafariTracker {
     static let safariBundleID = "com.apple.Safari"
 
+    /// Query the process list, not the cached Accessibility attachment: Safari can quit
+    /// before its workspace termination notification reaches us.
+    static var isSafariRunning: Bool {
+        NSRunningApplication.runningApplications(withBundleIdentifier: safariBundleID)
+            .contains { !$0.isTerminated }
+    }
+
     enum Event {
         case focusChanged
         case moved
@@ -33,6 +40,7 @@ final class SafariTracker {
     }
 
     var onEvent: ((Event) -> Void)?
+    var onSafariTermination: (() -> Void)?
 
     private(set) var app: NSRunningApplication?
     /// The browser window the sidebar docks to.
@@ -93,6 +101,7 @@ final class SafariTracker {
             tracker.app = app
             // Give Safari a moment to create its accessibility hierarchy.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard !app.isTerminated, tracker.app?.processIdentifier == app.processIdentifier else { return }
                 tracker.attach(app)
                 tracker.onEvent?(.launched)
             }
@@ -102,6 +111,7 @@ final class SafariTracker {
             tracker.detach()
             tracker.app = nil
             tracker.onEvent?(.terminated)
+            tracker.onSafariTermination?()
         }
         observe(NSWorkspace.didActivateApplicationNotification) { tracker, app in
             if app?.bundleIdentifier == Self.safariBundleID {
@@ -417,7 +427,8 @@ final class SafariTracker {
         app.activate(from: .current, options: [])
 
         waitForSafari(attempts: 6) { [weak self] inFront in
-            guard let self else { return }
+            guard let self, !app.isTerminated,
+                  self.app?.processIdentifier == app.processIdentifier else { return }
             if inFront {
                 completion?()
                 return

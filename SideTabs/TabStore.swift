@@ -204,6 +204,23 @@ final class TabStore {
         closeOwnedTabs(keys)
         scheduleSave()
     }
+    /// A selected row's context menu acts on the whole selection.
+    func moveSidebarItem(_ item: SidebarSelectionItem, toSpace spaceID: UUID) {
+        guard spaces.contains(where: { $0.id == spaceID }) else { return }
+        if validSidebarSelection.contains(item) {
+            moveSidebarSelection(to: spaceID)
+            return
+        }
+        switch item {
+        case .tab(let key):
+            guard let tab = snapshots[key.instance]?.windows.flatMap(\.tabs).first(where: { $0.id == key.tabId }) else { return }
+            moveTabToSpace(tab, instance: key.instance, spaceID: spaceID)
+        case .bookmark(let id):
+            guard let bookmark = bookmark(id) else { return }
+            moveBookmarkToSpace(bookmark, spaceID: spaceID)
+        }
+    }
+
     func moveSidebarSelection(to spaceID: UUID) {
         guard spaceID != selectedSpace.id, spaces.contains(where: { $0.id == spaceID }) else { return }
         let items = validSidebarSelection

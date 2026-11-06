@@ -8,13 +8,14 @@ it, see the [README](README.md).
 You need macOS 26 or later, Xcode 26 or later, and an **Apple Development** signing
 certificate. For local development, start with your free Personal Team in Xcode: Xcode → Settings → Apple Accounts → sign in → select
 your **Personal Team** → Manage Certificates… → **+** → **Apple Development**. Without a
-certificate, Safari switches the extension off every time it restarts.
+certificate, local Safari testing needs Allow unsigned extensions. On a friend’s Mac,
+Safari may require that setting even for a development-signed build; it resets on quit.
 
 ```bash
 scripts/install.sh
 ```
 
-This builds a Release copy, signs it with your certificate, installs it to
+This builds a universal Release copy (arm64 and x86_64), signs it with your certificate, installs it to
 `/Applications/Side Tabs.app`, and launches it. Run it again after making changes.
 `scripts/install.sh --adhoc` builds without a certificate; Safari then needs *Allow
 unsigned extensions* turned on after every restart.
@@ -22,6 +23,12 @@ unsigned extensions* turned on after every restart.
 Builds go to `~/Library/Developer/Xcode/DerivedData/SideTabs-CLI`, not the repository.
 Folders synced by iCloud Drive (such as `~/Documents`) add Finder metadata to app
 bundles, and codesign rejects bundles that have it.
+
+`scripts/package.sh` also needs Python 3.10 or later. It installs its pinned packaging
+dependencies into an isolated `packaging-env` under the build directory on first use.
+It writes the installer layout directly, without opening Finder or requesting Automation
+permission. `SIDETABS_DERIVED_DATA=/absolute/path` overrides the build directory for
+isolated verification; it never changes the installed app.
 
 ## Release checklist
 
@@ -47,13 +54,14 @@ release is published.
 
 ### Build and check the disk image
 
-- [ ] `scripts/package.sh` makes `dist/Side-Tabs-<version>.dmg`. That's the only file a
-  release has: people download it, and installed copies update from it. No `.zip`.
+- [ ] `scripts/package.sh` makes `dist/Side-Tabs.dmg`. Keep that asset name: the README
+  uses `/releases/latest/download/Side-Tabs.dmg` as its one-click download link. That's the
+  only release asset: people download it, and installed copies update from it. No `.zip`.
 - [ ] Open the DMG: Side Tabs and Applications with the arrow between them, and the
   first-launch card at the bottom easy to read.
 - [ ] The app inside has the new version, a valid signature, and the right team:
   ```bash
-  M=$(hdiutil attach -nobrowse -readonly -noautoopen dist/Side-Tabs-1.2.dmg | grep -o '/Volumes/.*$')
+  M=$(hdiutil attach -nobrowse -readonly -noautoopen dist/Side-Tabs.dmg | grep -o '/Volumes/.*$')
   defaults read "$M/Side Tabs.app/Contents/Info" CFBundleShortVersionString
   codesign --verify --deep --strict "$M/Side Tabs.app" && codesign -dvv "$M/Side Tabs.app" 2>&1 | grep TeamIdentifier
   hdiutil detach "$M"
@@ -76,7 +84,7 @@ release is published.
   that aren't attached.
 - [ ] Publish it, tagged `v<version>`, from the commit it was built from:
   ```bash
-  gh release create v1.2 dist/Side-Tabs-1.2.dmg --title "Side Tabs 1.2" --notes-file notes.md
+  gh release create v1.2 dist/Side-Tabs.dmg --title "Side Tabs 1.2" --notes-file notes.md
   ```
   Drafts and pre-releases are skipped by the updater, so publish a pre-release first to
   try a build before everyone gets it.
@@ -101,13 +109,40 @@ release is published.
 - [ ] An installed copy, restarted while Safari is open, logs `up to date at <version>` (or
   updates itself, if it was older).
 
+### Test on a fresh Mac before inviting friends
+
+Use another Mac or a clean macOS VM with macOS 26 or later, without Xcode, a developer
+account, saved Side Tabs permissions, or Safari developer settings. A local build opening
+on the maintainer's Mac does not establish that the downloaded app works elsewhere.
+
+- Download the actual release in Safari so macOS applies normal download checks.
+- Mount the DMG, drag Side Tabs into Applications, eject the DMG, and launch the installed
+  app. Follow Open Anyway in Privacy & Security, then confirm Open.
+- Complete each setup step. Check that setup resumes after granting Accessibility and
+  still appears when closed before website access is granted.
+- If the extension isn't listed, expand its setup help and follow Allow unsigned
+  extensions in Safari Settings → Developer. No Xcode or Terminal should be needed.
+- Allow website access, keep a regular Safari tab open, and verify tab names, switching,
+  and the Start Browsing screen. Also test Safari with no windows and only private windows;
+  setup must explain opening a regular window rather than silently declaring success.
+- Quit and reopen Safari. If the extension is disabled, open Side Tabs from Applications
+  and confirm setup provides the steps to enable it again. Safari resets its unsigned
+  extension setting on quit; the app cannot make that setting permanent.
+- Check the DMG and setup at the default display scaling on a 13-inch MacBook, including
+  scrolling through the expanded extension help.
+
+Packaging runs `scripts/verify-app.sh` to check both executable architectures, signatures,
+matching versions, minimum macOS, and the extension's bridge entitlement. These automated
+checks do not replace the fresh-Mac check above.
+
 ### Signing
 
 Releases are signed with a free development certificate. They aren't notarized by Apple,
 so people have to click **Open Anyway** the first time (see Install in the README). An
 [Apple Developer Program](https://developer.apple.com/programs/) membership would allow
-signing with Developer ID and notarizing, which removes that step. Development
-certificates last a year, so package a new release with a fresh certificate before the
+signing with Developer ID and notarizing, which removes that step. The maintainer has
+chosen to keep distribution free of that membership; do not require it for this workflow.
+Development certificates last a year, so package a new release with a fresh certificate before the
 old one expires.
 
 Installed copies only accept an update signed by the same team (the `OU` of the signing

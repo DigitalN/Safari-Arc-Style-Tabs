@@ -1,94 +1,39 @@
 #!/bin/bash
-# Builds Side Tabs and packages it as a disk image for a GitHub release:
-#   dist/Side-Tabs-<version>.dmg
-# When opened, it shows Side Tabs and the Applications folder on a background with an
-# arrow between them. Attach it to a release tagged v<version>; installed copies update
-# themselves from it too.
-#
-# Finder lays out the window, so the first run asks to let Terminal control Finder.
-
+# Build a universal, development-signed app and package dist/Side-Tabs.dmg.
+# Layout metadata is written directly; Finder and Automation permission aren't needed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-VOLUME_NAME="Side Tabs"
-
 BUILT=$(scripts/build.sh "$@")
-# Keep the build product from showing up in Safari as a second copy of the extension.
+scripts/verify-app.sh "$BUILT" >&2
+# Keep the build product from showing up in Safari as a second extension.
 "$LSREGISTER" -u "$BUILT" >/dev/null 2>&1 || true
 
-VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$BUILT/Contents/Info.plist")
-DMG="dist/Side-Tabs-$VERSION.dmg"
-
-# Work outside the repo, which may be synced by iCloud Drive (see build.sh).
-WORK="$HOME/Library/Developer/Xcode/DerivedData/SideTabs-CLI/dmg"
-rm -rf "$WORK"
-mkdir -p "$WORK/source/.background"
-ditto "$BUILT" "$WORK/source/Side Tabs.app"
-ln -s /Applications "$WORK/source/Applications"
-echo "Drawing the window background…" >&2
-swift scripts/make-dmg-background.swift "$WORK/source/.background/background.tiff"
-
-echo "Laying out the window…" >&2
-hdiutil create -quiet -volname "$VOLUME_NAME" -srcfolder "$WORK/source" -fs HFS+ \
-    -format UDRW -size 40m -ov "$WORK/layout.dmg"
-MOUNT=$(hdiutil attach -readwrite -noverify -noautoopen "$WORK/layout.dmg" | grep -o '/Volumes/.*$')
-DISK=$(basename "$MOUNT")
-detach() { hdiutil detach -quiet "$MOUNT" 2>/dev/null || hdiutil detach -quiet -force "$MOUNT" 2>/dev/null || true; }
-trap detach EXIT
-
-# Icon positions match the arrow in make-dmg-background.swift: a 660 × 420 pt window
-# with icon centers at x = 170 and x = 490.
-if ! osascript <<EOF
-tell application "Finder"
-    tell disk "$DISK"
-        open
-        set current view of container window to icon view
-        set toolbar visible of container window to false
-        set statusbar visible of container window to false
-        set the bounds of container window to {200, 120, 860, 568}
-        set viewOptions to the icon view options of container window
-        set arrangement of viewOptions to not arranged
-        set icon size of viewOptions to 112
-        set text size of viewOptions to 13
-        set label position of viewOptions to bottom
-        set shows item info of viewOptions to false
-        set shows icon preview of viewOptions to false
-        set background picture of viewOptions to file ".background:background.tiff"
-        set position of item "Side Tabs.app" of container window to {170, 205}
-        set position of item "Applications" of container window to {490, 205}
-        close
-        open
-        update without registering applications
-        delay 2
-        close
-    end tell
-end tell
-EOF
-then
-    echo "Finder couldn't lay out the window. If macOS asked, allow Terminal to control Finder" >&2
-    echo "(System Settings → Privacy & Security → Automation), then run this again." >&2
-    exit 1
+# Only the maintainer needs these packaging tools. Friends just open the finished DMG.
+PACKAGING_ENV="${SIDETABS_DERIVED_DATA:-$HOME/Library/Developer/Xcode/DerivedData/SideTabs-CLI}/packaging-env"
+if [[ ! -x "$PACKAGING_ENV/bin/python" ]]; then
+    python3 -m venv "$PACKAGING_ENV"
+fi
+PYTHON="$PACKAGING_ENV/bin/python"
+if ! "$PYTHON" -c 'import importlib.metadata as m; assert all(m.version(n) == v for n, v in [("dmgbuild", "1.6.7"), ("ds_store", "1.3.3"), ("mac_alias", "2.2.3")])' 2>/dev/null; then
+    "$PYTHON" -m pip install --disable-pip-version-check -r scripts/package-requirements.txt >&2
 fi
 
-# Wait for Finder to save the layout before detaching.
-for _ in $(seq 1 20); do
-    [[ -f "$MOUNT/.DS_Store" ]] && break
-    sleep 0.25
-done
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/sidetabs-dmg.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
 
-# Show the Side Tabs icon on the mounted disk. Added after the layout step because Finder
-# removes .VolumeIcon.icns while it arranges the window.
-cp "$BUILT/Contents/Resources/AppIcon.icns" "$MOUNT/.VolumeIcon.icns"
-xcrun SetFile -a C "$MOUNT"
-rm -rf "$MOUNT/.fseventsd"
-sync
-detach
-trap - EXIT
+echo "Drawing the installer background…" >&2
+swift scripts/make-dmg-background.swift "$WORK/background.tiff"
 
+echo "Packaging the disk image…" >&2
 mkdir -p dist
-rm -f "$DMG"
-hdiutil convert -quiet "$WORK/layout.dmg" -format UDZO -imagekey zlib-level=9 -o "$DMG"
-rm -rf "$WORK"
+# Build to a temporary file so a failed packaging run leaves the last good DMG intact.
+"$PYTHON" -m dmgbuild -s scripts/dmg-settings.py \
+    -D "app=$BUILT" -D "background=$WORK/background.tiff" \
+    "Side Tabs" "$WORK/Side-Tabs.dmg" >&2
 
-echo "$DMG"
+# Catch unexpected layout defaults before handing the image to someone else.
+"$PYTHON" scripts/verify-dmg.py "$WORK/Side-Tabs.dmg" >&2
+mv -f "$WORK/Side-Tabs.dmg" dist/Side-Tabs.dmg
+echo "dist/Side-Tabs.dmg"

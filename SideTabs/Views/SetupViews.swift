@@ -32,7 +32,30 @@ enum Permissions {
     }
 
     static func openExtensionSettings() {
-        SFSafariApplication.showPreferencesForExtension(withIdentifier: SideTabsBridge.extensionBundleIdentifier)
+        SFSafariApplication.showPreferencesForExtension(withIdentifier: SideTabsBridge.extensionBundleIdentifier) { error in
+            guard error != nil else { return }
+            Task { @MainActor in
+                let alert = NSAlert()
+                alert.messageText = "Open Safari Settings"
+                alert.informativeText = "In Safari, choose Settings → Extensions and turn on Side Tabs. If it isn't listed, follow the ‘Side Tabs isn't listed?’ help in setup."
+                alert.addButton(withTitle: "Open Safari")
+                alert.addButton(withTitle: "Cancel")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    openSafari()
+                }
+            }
+        }
+    }
+
+    static func openSafari() {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: SafariTracker.safariBundleID) else { return }
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+    }
+
+    static func openSafariTestPage() {
+        guard let safari = NSWorkspace.shared.urlForApplication(withBundleIdentifier: SafariTracker.safariBundleID) else { return }
+        NSWorkspace.shared.open([URL(string: "https://example.com")!], withApplicationAt: safari,
+                                configuration: NSWorkspace.OpenConfiguration())
     }
 }
 
@@ -51,9 +74,20 @@ struct WelcomeView: View {
     @State private var accessibility = Permissions.accessibilityGranted
     @State private var extensionEnabled = false
     @State private var askedForAccessibilityAt: Date?
+    @State private var askedForExtensionAt: Date?
+    @State private var showExtensionHelp = false
     @State private var now = Date()
 
-    private var websiteAccess: Bool { store.hasData && !store.lacksWebsiteAccess }
+    private var websiteAccess: Bool {
+        store.isConnected && store.snapshots.values.contains { snapshot in
+            snapshot.windows.contains { window in
+                window.tabs.contains { tab in
+                    guard let raw = tab.url, let url = URL(string: raw), url.host != nil else { return false }
+                    return url.scheme == "https" || url.scheme == "http"
+                }
+            }
+        }
+    }
 
     /// The first step that isn't done yet; nil once everything is.
     private var currentStep: Int? {
@@ -69,19 +103,23 @@ struct WelcomeView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Welcome to Side Tabs")
                         .font(.title2.bold())
-                    Text("Your Safari tabs, in a sidebar. Setup takes about a minute.")
+                    Text("Your Safari tabs, in a sidebar. We'll guide you through setup.")
                         .foregroundStyle(.secondary)
                 }
             }
             .padding(24)
 
             if let current = currentStep {
-                VStack(spacing: 8) {
-                    accessibilityStep(state(of: 0, current: current))
-                    extensionStep(state(of: 1, current: current))
-                    websiteStep(state(of: 2, current: current))
+                ScrollView {
+                    VStack(spacing: 8) {
+                        accessibilityStep(state(of: 0, current: current))
+                        extensionStep(state(of: 1, current: current))
+                        websiteStep(state(of: 2, current: current))
+                    }
+                    .padding(.horizontal, 16)
                 }
-                .padding(.horizontal, 16)
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(height: current == 1 && showExtensionHelp ? 440 : 320)
                 .padding(.bottom, 20)
             } else {
                 finished
@@ -96,10 +134,8 @@ struct WelcomeView: View {
                     Spacer()
                     Button("Finish Later", action: onLater)
                 } else {
-                    Toggle("Open Side Tabs when I log in", isOn: Binding(
-                        get: { settings.launchAtLoginStatus() },
-                        set: { settings.launchAtLogin = $0 }
-                    ))
+                    Text("Side Tabs opens and quits with Safari.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("Start Browsing", action: onFinish)
                         .keyboardShortcut(.defaultAction)
@@ -120,11 +156,11 @@ struct WelcomeView: View {
             while !Task.isCancelled {
                 accessibility = Permissions.accessibilityGranted
                 extensionEnabled = await Permissions.extensionEnabled()
-                if accessibility && extensionEnabled && !settings.hasCompletedSetup {
-                    // From here on, Side Tabs starts quietly even if setup is left open.
-                    settings.hasCompletedSetup = true
-                }
                 now = Date()
+                if !extensionEnabled, let asked = askedForExtensionAt,
+                   now.timeIntervalSince(asked) > 10 {
+                    showExtensionHelp = true
+                }
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -162,8 +198,26 @@ struct WelcomeView: View {
         SetupStepCard(number: 2, title: "Turn on the extension in Safari", state: state) {
             Text("In the Safari Settings window that opens, check the box next to Side Tabs.")
                 .foregroundStyle(.secondary)
-            Button("Open Safari Settings") { Permissions.openExtensionSettings() }
+            Button("Open Safari Settings") {
+                askedForExtensionAt = Date()
+                Permissions.openExtensionSettings()
+            }
                 .buttonStyle(.borderedProminent)
+            DisclosureGroup("Side Tabs isn't listed or won't stay enabled?", isExpanded: $showExtensionHelp) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("This free build isn't signed for distribution through Apple. On another Mac, Safari may require its unsigned-extension setting:")
+                    Text("1. In Safari → Settings → Advanced, turn on **Show features for web developers**.")
+                    Text("2. Open the **Developer** tab in Safari Settings and turn on **Allow unsigned extensions**. macOS may ask for your password.")
+                    Text("3. Return to **Extensions** and turn on **Side Tabs**.")
+                    Text("Safari resets Allow unsigned extensions when it quits. If Side Tabs stops working after reopening Safari, repeat steps 2 and 3. You can reopen this setup from Applications.")
+                    Button("Show Side Tabs in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+                    }
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.top, 6)
+            }
         }
     }
 
@@ -178,6 +232,8 @@ struct WelcomeView: View {
             .foregroundStyle(.secondary)
             Button("Open Safari Settings") { Permissions.openExtensionSettings() }
                 .buttonStyle(.borderedProminent)
+            SetupHint("After allowing websites, open a web page in a regular Safari window so we can confirm it's working. Safari's Start Page can't confirm website access. Private windows need separate extension permission.")
+            Button("Open a Test Page in Safari") { Permissions.openSafariTestPage() }
         }
     }
 
@@ -196,7 +252,7 @@ struct WelcomeView: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 SetupTip(systemImage: "sidebar.left", text: "Side Tabs lives in your menu bar. Use it to show or hide the sidebar and to open Settings.")
-                SetupTip(systemImage: "star", text: "Drag a tab up into Bookmarks to keep a site at the top.")
+                SetupTip(systemImage: "star", text: "Drag a tab into Pinned to keep a site at the top.")
                 SetupTip(systemImage: "pencil", text: "Double-click a tab to rename it.")
             }
         }
@@ -324,10 +380,8 @@ struct SettingsView: View {
             }
 
             Section("General") {
-                Toggle("Open at login", isOn: Binding(
-                    get: { settings.launchAtLoginStatus() },
-                    set: { settings.launchAtLogin = $0 }
-                ))
+                Text("Side Tabs opens automatically with Safari and quits when Safari quits.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle(isOn: $settings.updatesAutomatically) {
                     Text("Update automatically")
                     Text("Checks GitHub when Safari starts and installs new versions when you're not using your Mac.")

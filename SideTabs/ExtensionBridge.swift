@@ -1,13 +1,12 @@
-import Foundation
-import SafariServices
+import AppKit
 import os.log
 
 /// The app's end of the connection to the Safari extension.
 ///
 /// Incoming: SafariWebExtensionHandler forwards each `sendNativeMessage` call over a
 /// CFMessagePort and waits for the reply.
-/// Outgoing: acknowledged replies carry commands. Safari push is only a wake hint;
-/// polling keeps clicks working when Safari cannot resolve the unsigned extension.
+/// Outgoing: acknowledged polling replies carry commands. The app never sends a
+/// Safari push wakeup, which could relaunch the browser after the user quits it.
 final class ExtensionBridge {
     /// Handles one JSON message from the extension and returns the JSON reply.
     var onMessage: ((_ type: String, _ payload: Data, _ object: [String: Any]) -> [String: Any])?
@@ -17,7 +16,6 @@ final class ExtensionBridge {
     private var port: CFMessagePort?
     private var seenTypes: Set<String> = []
     private let commands = ExtensionCommandQueue()
-    private var notedPushFailure = false
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "bridge")
 
     func start() {
@@ -70,21 +68,9 @@ final class ExtensionBridge {
 
     /// Sends a command to background.js. `command["instance"]` limits it to one profile.
     func send(_ command: [String: Any]) {
+        // Drop work for a closed session. Safari's existing command poll retrieves
+        // queued commands without any API call that could launch the browser.
+        guard SafariTracker.isSafariRunning else { return }
         commands.enqueue(command)
-        var wake: [String: Any] = ["action": "pollCommands"]
-        if let instance = command["instance"] { wake["instance"] = instance }
-        SFSafariApplication.dispatchMessage(
-            withName: "command",
-            toExtensionWithIdentifier: SideTabsBridge.extensionBundleIdentifier,
-            userInfo: wake
-        ) { [weak self] error in
-            if let error {
-                DispatchQueue.main.async {
-                    guard let self, !self.notedPushFailure else { return }
-                    self.notedPushFailure = true
-                    self.log.notice("Safari push unavailable; using acknowledged reply delivery: \(error.localizedDescription, privacy: .public)")
-                }
-            }
-        }
     }
 }

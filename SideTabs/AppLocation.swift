@@ -66,8 +66,9 @@ enum AppLocation {
     static func relaunch(from url: URL = Bundle.main.bundleURL, arguments: [String] = [], inBackground: Bool = false) {
         var openArguments = inBackground ? ["-g"] : []
         openArguments.append(url.path)
-        if !arguments.isEmpty {
-            openArguments += ["--args"] + arguments
+        let launchArguments = arguments + (inBackground ? ["--background-launch"] : [])
+        if !launchArguments.isEmpty {
+            openArguments += ["--args"] + launchArguments
         }
         let script = """
             pid=$1; shift; tries=0

@@ -137,7 +137,7 @@ struct TabRow: View {
         .disabled(tab.url == nil)
         Menu("Move to Space") {
             ForEach(store.spaces) { space in
-                Button { store.moveTabToSpace(tab, instance: instance, spaceID: space.id) } label: {
+                Button { store.moveSidebarItem(.tab(key), toSpace: space.id) } label: {
                     Label(space.name, systemImage: space.icon)
                 }
                 .disabled(space.id == store.selectedSpace.id)

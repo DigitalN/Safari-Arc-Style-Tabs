@@ -40,11 +40,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var presentingOwnWindow = false
     /// Set when quitting to relaunch into an update.
     private var relaunchingForUpdate = false
+    private var quittingWithSafari = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         replaceOlderCopies()
         if !AppLocation.isInApplicationsFolder, AppLocation.offerToMove() {
             return
+        }
+
+        if AppLocation.isInApplicationsFolder {
+            settings.followSafariInsteadOfLogin()
+        }
+        // A late extension launch or background relaunch must not reopen a closed Safari.
+        // Opening the app by hand still lets someone recover a disabled extension.
+        let backgroundLaunch = CommandLine.arguments.contains("--from-safari")
+            || CommandLine.arguments.contains("--background-launch")
+        if backgroundLaunch && settings.hasCompletedSetup && !SafariTracker.isSafariRunning {
+            NSApp.terminate(nil)
+            return
+        }
+        tracker.onSafariTermination = { [weak self] in
+            guard let self, !SafariTracker.isSafariRunning else { return }
+            self.quittingWithSafari = true
+            NSLog("Side Tabs: Safari quit; quitting with it")
+            NSApp.terminate(nil)
         }
 
         let panel = SidebarPanel(rootView: SidebarView()
@@ -59,7 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         observeCleanupSettings()
         cleanupTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.settings.tabCleanupInterval != .off else { return }
+                guard let self, SafariTracker.isSafariRunning,
+                      self.settings.tabCleanupInterval != .off else { return }
                 self.store.requestSnapshot()
             }
         }
@@ -84,9 +104,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         accessibilityWatcher.onGranted = { AccessibilityWatcher.relaunch() }
         accessibilityWatcher.start()
 
-        if AppLocation.isInApplicationsFolder {
-            settings.turnOnLaunchAtLoginByDefault()
-        }
         showSetupIfNeeded()
         if CommandLine.arguments.contains("--preview-arc") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.showArcImport() }
@@ -110,19 +127,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Setup shows until Accessibility and the Safari extension are both on, and again right
-    /// after the restart that follows granting Accessibility. After that, Side Tabs starts
-    /// quietly in the menu bar. (The sidebar itself explains website access if it's missing.)
+    /// Resume unfinished setup and help recover if Safari has disabled the extension.
     private func showSetupIfNeeded() {
-        if CommandLine.arguments.contains(AccessibilityWatcher.resumeSetupArgument) || !Permissions.accessibilityGranted {
+        if CommandLine.arguments.contains(AccessibilityWatcher.resumeSetupArgument)
+            || !Permissions.accessibilityGranted || !settings.hasCompletedSetup || !SafariTracker.isSafariRunning {
             showWelcome()
             return
         }
-        guard !settings.hasCompletedSetup else { return }
         Task { @MainActor in
-            if await Permissions.extensionEnabled() {
-                settings.hasCompletedSetup = true
-            } else {
+            if !(await Permissions.extensionEnabled()) {
                 showWelcome()
             }
         }
@@ -147,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         cleanupTimer?.invalidate()
         // After an update, the new copy docks right where this one is, so leave Safari's
         // window alone rather than widening it only to narrow it again a second later.
-        if !relaunchingForUpdate {
+        if !relaunchingForUpdate && !quittingWithSafari {
             dock?.restoreSafariFrame()
         }
         store.save()
@@ -163,7 +176,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showSettings()
+        Task { @MainActor in
+            let extensionEnabled = await Permissions.extensionEnabled()
+            if !settings.hasCompletedSetup || !Permissions.accessibilityGranted
+                || !extensionEnabled {
+                showWelcome()
+            } else {
+                showSettings()
+            }
+        }
         return false
     }
 
@@ -182,6 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if welcomeWindow == nil {
             let view = WelcomeView(
                 onFinish: { [weak self] in
+                    self?.settings.hasCompletedSetup = true
                     self?.welcomeWindow?.close()
                     self?.dock?.bringSafariForward()
                 },

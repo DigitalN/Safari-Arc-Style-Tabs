@@ -64,6 +64,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.addsToRecentItems = false
+        configuration.arguments = ["--from-safari"]
         NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { [log] _, error in
             if let error {
                 log.error("Could not launch Side Tabs: \(error.localizedDescription, privacy: .public)")

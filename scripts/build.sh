@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 
 # Build outside the repo: folders synced by iCloud Drive (like ~/Documents) add
 # Finder metadata to app bundles, which codesign rejects.
-DERIVED="$HOME/Library/Developer/Xcode/DerivedData/SideTabs-CLI"
+DERIVED="${SIDETABS_DERIVED_DATA:-$HOME/Library/Developer/Xcode/DerivedData/SideTabs-CLI}"
 BUILT="$DERIVED/Build/Products/Release/Side Tabs.app"
 LOG="$DERIVED/build.log"
 
@@ -55,7 +55,9 @@ if ! xcodebuild \
     -project SideTabs.xcodeproj \
     -scheme "Side Tabs" \
     -configuration Release \
+    -destination 'generic/platform=macOS' \
     -derivedDataPath "$DERIVED" \
+    'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
     "${SIGNING[@]}" \
     build >"$LOG" 2>&1; then
     grep -E "error:|failed" "$LOG" | head -20 >&2

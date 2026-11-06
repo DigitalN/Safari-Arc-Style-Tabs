@@ -99,7 +99,7 @@ struct BookmarkRow: View {
             Menu("Move To") {
                 Button("Favorites (All Spaces)") { store.moveBookmarkToSpace(bookmark, spaceID: nil) }
                 ForEach(store.spaces) { space in
-                    Button(space.name) { store.moveBookmarkToSpace(bookmark, spaceID: space.id) }
+                    Button(space.name) { store.moveSidebarItem(.bookmark(bookmark.id), toSpace: space.id) }
                 }
             }
             Button("Copy Link") { store.copyLink(bookmark.url) }

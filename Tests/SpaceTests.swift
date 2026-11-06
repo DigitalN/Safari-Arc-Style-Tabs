@@ -192,7 +192,7 @@ import Observation
         expect(store.validSidebarSelection == Set([item(1),item(2)]), "reverse Shift-click retains original anchor and replaces range")
         store.selectSidebarItem(item(4),extending:true)
         expect(store.validSidebarSelection == Set([item(2),item(3),item(4)]), "repeated Shift-click extends from stable anchor")
-        store.moveSidebarSelection(to: target.id)
+        store.moveSidebarItem(item(3), toSpace: target.id)
         expect([2,3,4].allSatisfy { store.spaceState.spaceID(for:.init(instance:"one",tabId:$0)) == target.id }, "bulk move assigns every selected tab")
         expect(store.spaceState.spaceID(for:.init(instance:"one",tabId:1)) == home && store.spaceState.spaceID(for:.init(instance:"one",tabId:5)) == home, "bulk move preserves unselected tabs")
         expect(store.selectedSidebarItems.isEmpty && !commands.contains { $0["action"] as? String == "create" }, "bulk move clears selection without placeholders")
@@ -226,7 +226,7 @@ import Observation
         pins.toggleFolder(folder.id)
         pins.selectSidebarItem(.bookmark(unopened.id),extending:true)
         expect(pins.validSidebarSelection.count == 2, "range selection works after folder expands")
-        pins.moveSidebarSelection(to:destination.id)
+        pins.moveSidebarItem(.bookmark(unopened.id), toSpace:destination.id)
         expect(pins.bookmark(pin.id)?.spaceID == destination.id && pins.bookmark(unopened.id)?.folderID == nil, "bulk move carries saved pins to destination root")
         expect(pins.spaceState.spaceID(for:.init(instance:"one",tabId:10)) == destination.id && pins.spaceState.spaceID(for:.init(instance:"one",tabId:11)) == source, "pin move carries its linked tab, preserving duplicate page")
         pins.selectSpace(destination.id)
@@ -246,6 +246,29 @@ import Observation
         commands.removeAll()
         pins.confirmDeleteSidebarSelection()
         expect(commands.isEmpty, "confirmation from a different space cannot delete tabs")
+    }
+
+    static func checkContextMenuSpaceMove(in dir: URL) throws {
+        for clicked in 1...5 {
+            let store = TabStore(stateURL: dir.appendingPathComponent("context-move-\(clicked).json"))
+            let live = (1...5).map { tab($0, active: $0 == 2) }
+            try apply(snapshot(live), to: store)
+            let source = store.selectedSpace.id
+            let destination = store.createSpace()
+            store.selectSpace(source)
+            func item(_ id: Int) -> SidebarSelectionItem { .tab(.init(instance: "one", tabId: id)) }
+            store.selectSidebarItem(item(4), extending: true)
+            expect(store.validSidebarSelection == Set([item(2), item(3), item(4)]), "context move starts with the selected range")
+            store.moveSidebarItem(item(clicked), toSpace: destination.id)
+            let moved = (2...4).contains(clicked) ? Set([2, 3, 4]) : Set([clicked])
+            for id in 1...5 {
+                expect(store.spaceState.spaceID(for: .init(instance: "one", tabId: id)) == (moved.contains(id) ? destination.id : source), "context move from row \(clicked) assigns exactly its intended tabs")
+            }
+            store.clearSidebarSelection()
+            let remaining = (1...5).first { !moved.contains($0) }!
+            store.moveSidebarItem(item(remaining), toSpace: destination.id)
+            expect(store.spaceState.spaceID(for: .init(instance: "one", tabId: remaining)) == destination.id, "context move without a selection still moves one tab")
+        }
     }
 
     static func checkGroupDragging(in dir: URL) throws {
@@ -632,6 +655,7 @@ import Observation
         try checkTabCleanup(in: dir)
         try checkSpaceIconReordering(in: dir)
         try checkRangeSelection(in: dir)
+        try checkContextMenuSpaceMove(in: dir)
         try checkGroupDragging(in: dir)
         try checkDeletionConfirmationFocus(in: dir)
         try checkContentDeletion(in: dir)

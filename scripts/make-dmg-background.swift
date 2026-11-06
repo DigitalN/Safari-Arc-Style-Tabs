@@ -187,7 +187,7 @@ func drawFirstLaunchNote() {
         // No-break spaces keep the path on one line.
         (". Then go to ", false), ("System\u{A0}Settings\u{A0}→\u{A0}Privacy\u{A0}&\u{A0}Security", true),
         (", scroll down, and click ", false), ("Open Anyway", true),
-        (". You only do this once.", false),
+        (", then confirm ", false), ("Open", true), (".", false),
     ] {
         text.append(NSAttributedString(string: part, attributes: isBold ? bold : regular))
     }

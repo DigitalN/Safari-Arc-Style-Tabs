@@ -40,37 +40,22 @@ final class AppSettings {
         didSet { defaults.set(updatesAutomatically, forKey: "updatesAutomatically") }
     }
 
-    /// Accessibility and the Safari extension have both been turned on.
+    /// The user finished setup after Accessibility, the extension and readable tabs worked.
     var hasCompletedSetup: Bool {
         didSet { defaults.set(hasCompletedSetup, forKey: "hasCompletedSetup") }
     }
 
-    var launchAtLogin: Bool {
-        get { SMAppService.mainApp.status == .enabled }
-        set {
-            do {
-                if newValue {
-                    try SMAppService.mainApp.register()
-                } else {
-                    try SMAppService.mainApp.unregister()
-                }
-            } catch {
-                NSLog("Side Tabs: could not change login item: \(error)")
+    /// Safari's extension starts Side Tabs when the browser opens. Remove the old
+    /// independent login item once so Side Tabs doesn't stay alive after Safari quits.
+    func followSafariInsteadOfLogin() {
+        guard !defaults.bool(forKey: "safariLifecycleMigrationApplied") else { return }
+        do {
+            if SMAppService.mainApp.status == .enabled || SMAppService.mainApp.status == .requiresApproval {
+                try SMAppService.mainApp.unregister()
             }
-            launchAtLoginRevision += 1
-        }
-    }
-
-    /// Bumped so views re-read `launchAtLogin`, which lives in ServiceManagement.
-    private var launchAtLoginRevision = 0
-
-    /// Open at login starts out on. It's only switched on once, so turning it off sticks.
-    /// Call this from Applications: the login item points at wherever the app is running.
-    func turnOnLaunchAtLoginByDefault() {
-        guard !defaults.bool(forKey: "launchAtLoginDefaultApplied") else { return }
-        defaults.set(true, forKey: "launchAtLoginDefaultApplied")
-        if !launchAtLogin {
-            launchAtLogin = true
+            defaults.set(true, forKey: "safariLifecycleMigrationApplied")
+        } catch {
+            NSLog("Side Tabs: could not remove old login item: \(error)")
         }
     }
 
@@ -100,11 +85,6 @@ final class AppSettings {
         tabCleanupInterval = TabCleanupInterval(rawValue: defaults.string(forKey: "tabCleanupInterval") ?? "") ?? .off
         hasCompletedSetup = defaults.bool(forKey: "hasCompletedSetup")
         updatesAutomatically = defaults.bool(forKey: "updatesAutomatically")
-    }
-
-    func launchAtLoginStatus() -> Bool {
-        _ = launchAtLoginRevision
-        return launchAtLogin
     }
 }
 
