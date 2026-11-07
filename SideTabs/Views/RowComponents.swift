@@ -1,27 +1,24 @@
 import AppKit
 import SwiftUI
 
-/// Hover and middle-click detection that works even though Side Tabs is never the
-/// active app (SwiftUI's own hover tracking only runs in the active app).
+/// Hover detection that works even though Side Tabs is never the active app (SwiftUI's own
+/// hover tracking only runs in the active app). (Middle clicks are not handled here: this view
+/// never gets them, see SidebarPanel.)
 struct MouseTracking: NSViewRepresentable {
     var onHover: (Bool) -> Void
-    var onMiddleClick: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> TrackingView {
         let view = TrackingView()
         view.onHover = onHover
-        view.onMiddleClick = onMiddleClick
         return view
     }
 
     func updateNSView(_ view: TrackingView, context: Context) {
         view.onHover = onHover
-        view.onMiddleClick = onMiddleClick
     }
 
     final class TrackingView: NSView {
         var onHover: ((Bool) -> Void)?
-        var onMiddleClick: (() -> Void)?
         private var trackingArea: NSTrackingArea?
 
         override func updateTrackingAreas() {
@@ -48,19 +45,8 @@ struct MouseTracking: NSViewRepresentable {
             }
         }
 
-        /// Only claim middle clicks; everything else goes to the SwiftUI row.
-        override func hitTest(_ point: NSPoint) -> NSView? {
-            guard onMiddleClick != nil, let event = NSApp.currentEvent, event.type == .otherMouseDown else {
-                return nil
-            }
-            return super.hitTest(point)
-        }
-
-        override func otherMouseDown(with event: NSEvent) {
-            if event.buttonNumber == 2 {
-                onMiddleClick?()
-            }
-        }
+        /// Never claims a click: they all go to the SwiftUI row.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
 

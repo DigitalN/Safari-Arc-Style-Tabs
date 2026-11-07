@@ -7,6 +7,7 @@ struct TabRow: View {
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
     @Environment(SidebarDrag.self) private var drag
+    @Environment(SidebarRows.self) private var rows
     @State private var hovering = false
     @State private var rowTop: CGFloat = 0
     /// Where the mute and close buttons are, in sidebar coordinates (the space the row's gesture
@@ -85,7 +86,7 @@ struct TabRow: View {
                 DropSlot()
             }
         }
-        .background(MouseTracking(onHover: { hovering = $0 }, onMiddleClick: { store.close([tab], instance: instance) }))
+        .background(MouseTracking(onHover: { hovering = $0 }))
         .contentShape(Rectangle())
         // Safari's own tab bar switches on mouse-down, so this does too: waiting for the
         // mouse-up would add the length of the click to every switch. The second press of a
@@ -102,6 +103,9 @@ struct TabRow: View {
             onPress: press(at:)
         )
         .onSidebarTop { rowTop = $0 }
+        // Where the row is, so a middle click on it can be found (SidebarPanel.sendEvent).
+        .onWindowFrame { rows.setFrame($0, for: key) }
+        .onDisappear { rows.remove(key) }
         .contextMenu { contextMenu }
         .help(tooltip)
         .accessibilityElement(children: .combine)

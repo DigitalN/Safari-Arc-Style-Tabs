@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let settings = AppSettings()
     let store = TabStore()
     let favicons = FaviconStore()
+    let rows = SidebarRows()
     private(set) lazy var updater = Updater(settings: settings)
 
     private let bridge = ExtensionBridge()
@@ -49,7 +50,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let panel = SidebarPanel(rootView: SidebarView()
             .environment(store)
             .environment(settings)
-            .environment(favicons))
+            .environment(favicons)
+            .environment(rows))
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
         self.dock = dock
 
@@ -78,6 +80,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
         store.onOpenAddressBar = { [weak self] in self?.dock?.openSafariAddressBar() }
         store.lastPointerDown = { [weak panel] in panel?.lastMouseDown ?? .distantPast }
+        // A middle click on a tab row closes the tab. It doesn't switch to it first: only a left
+        // press does that. (Safari has already been brought forward by then, like for any click.)
+        panel.onMiddleClick = { [weak self] point in
+            guard let self, let key = rows.tab(at: point), let tab = store.tab(for: key) else { return false }
+            store.close([tab], instance: key.instance)
+            return true
+        }
         store.pressTab = { [weak self] target, completion in
             guard let self else {
                 completion(.fallback("the app is shutting down"))

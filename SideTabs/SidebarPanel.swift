@@ -48,6 +48,14 @@ final class SidebarPanel: NSPanel {
     /// handled. Right-clicks are left alone so context menus open without switching apps.
     var onMouseDown: (() -> Void)?
 
+    /// Called on a middle mouse-down with its position in the window's coordinates (origin at the
+    /// top left, like SwiftUI's `.global`), after Safari has been brought forward. Says whether
+    /// the click was used; if not, it is passed on.
+    ///
+    /// SwiftUI has no gesture for the middle button, and asking its views what is under the pointer
+    /// gets an internal container, not the row (#21), so the panel finds the row itself.
+    var onMiddleClick: ((CGPoint) -> Bool)?
+
     /// When the last left or middle mouse-down reached the panel, taken from the event itself
     /// so it doesn't include time spent before the event was handled.
     private(set) var lastMouseDown = Date.distantPast
@@ -56,6 +64,13 @@ final class SidebarPanel: NSPanel {
         if event.type == .leftMouseDown || event.type == .otherMouseDown {
             lastMouseDown = Date(timeIntervalSinceNow: event.timestamp - ProcessInfo.processInfo.systemUptime)
             onMouseDown?()
+        }
+        if event.type == .otherMouseDown, event.buttonNumber == 2, let onMiddleClick, let view = contentView {
+            let local = view.convert(event.locationInWindow, from: nil)
+            let point = CGPoint(x: local.x, y: view.isFlipped ? local.y : view.bounds.height - local.y)
+            if onMiddleClick(point) {
+                return
+            }
         }
         super.sendEvent(event)
     }

@@ -37,6 +37,10 @@ swiftc -o "$WORK/finder-checks" \
     Tests/TabBarFinderChecks/main.swift SideTabs/TabBarFinder.swift SideTabs/TabBarMatcher.swift
 "$WORK/finder-checks"
 
+echo "== row hit testing"
+swiftc -o "$WORK/row-hit-checks" Tests/RowHitChecks/main.swift SideTabs/RowHitTesting.swift SideTabs/Models.swift
+"$WORK/row-hit-checks"
+
 echo "== row press"
 swiftc -o "$WORK/row-press-checks" Tests/RowPressChecks/main.swift SideTabs/RowPress.swift
 "$WORK/row-press-checks"
