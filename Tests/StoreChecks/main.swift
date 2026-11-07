@@ -175,6 +175,10 @@ func activations(_ commands: [[String: Any]]) -> [Int] {
     commands.filter { $0["action"] as? String == "activate" }.compactMap { $0["tabId"] as? Int }
 }
 
+func snapshotRequests(_ commands: [[String: Any]]) -> Int {
+    commands.filter { $0["action"] as? String == "snapshot" }.count
+}
+
 withPresser { store, presses, commands in
     click(store, tab: 3)
     check(presses().count == 1, "by default a click asks for the tab bar's button")
@@ -198,7 +202,8 @@ withPresser { store, presses, commands in
     click(store, tab: 3)
     presses()[0].finish(.pressed(milliseconds: 4))
     wait(1.2)
-    check(activations(commands()) == [3], "a press Safari never confirms is followed by the extension's command")
+    check(activations(commands()).isEmpty, "a press Safari doesn't confirm in time is not followed by a command that could pull Safari back (#20 item 3)")
+    check(snapshotRequests(commands()) == 1, "Safari is asked where it is instead")
 }
 
 withPresser { store, presses, commands in
@@ -291,7 +296,7 @@ withPresser { store, presses, commands in
     activated(store, tab: 3, seq: 2, at: earlier)
     check(highlighted(store) == 3, "a report from before the click for the clicked tab leaves the highlight there")
     wait(1.2)
-    check(activations(commands()) == [3], "but doesn't count as Safari confirming the click")
+    check(snapshotRequests(commands()) == 1, "but doesn't count as Safari confirming the click, so Safari is asked where it is")
 }
 
 withPresser { store, presses, commands in
@@ -302,7 +307,7 @@ withPresser { store, presses, commands in
     activated(store, tab: 2, seq: 2, at: earlier)
     check(highlighted(store) == 3, "a report from before the click for another tab doesn't move the highlight back")
     wait(1.2)
-    check(activations(commands()) == [3], "and the click is still being waited for")
+    check(snapshotRequests(commands()) == 1, "and the click is still being waited for")
 }
 
 withPresser { store, presses, commands in
@@ -354,7 +359,7 @@ withPresser { store, presses, commands in
     send(store, snapshotObject(seq: 2, active: 3, startedAt: earlier))
     check(highlighted(store) == 3, "a snapshot started before the click that shows the clicked tab leaves the highlight there")
     wait(1.2)
-    check(activations(commands()) == [3], "but it isn't Safari's answer to the click, so the one-second command stays")
+    check(snapshotRequests(commands()) == 1, "but it isn't Safari's answer to the click, so Safari is asked where it is")
 }
 
 withPresser { store, presses, commands in
@@ -406,6 +411,30 @@ do {
     check(highlighted(store) == 3, "the earlier click's report is held back")
     send(store, snapshotObject(seq: 4, active: 3, startedAt: nowMilliseconds()))
     check(highlighted(store) == 3, "and a snapshot started before that report doesn't bring it back")
+}
+
+// MARK: - What the live test of the branch found (#20)
+
+withPresser { store, presses, commands in
+    // Item 3: under load the extension's reports come seconds late. Two clicks 1.2 s apart, both
+    // pressed, no report in time: the first click's one-second command used to be sent, run
+    // after the second click, and put Safari back on the first tab.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    wait(1.2)
+    click(store, tab: 4)
+    presses()[1].finish(.pressed(milliseconds: 4))
+    wait(1.2)
+    check(activations(commands()).isEmpty, "no command is ever sent for a click whose press worked, so none can run late and undo a newer click")
+}
+
+withPresser { store, presses, commands in
+    // ...and when Safari's report finally arrives, it is believed as before.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    wait(1.2)
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds() - 1000)
+    check(highlighted(store) == 3, "a late report for the clicked tab keeps the highlight there")
 }
 
 try? FileManager.default.removeItem(at: stateFolder)

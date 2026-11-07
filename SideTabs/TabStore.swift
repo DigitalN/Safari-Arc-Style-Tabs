@@ -26,7 +26,8 @@ final class TabStore {
         var replaced: [TabKey] = []
 
         /// A switch that's gone unconfirmed this long was lost, or Safari went somewhere else
-        /// first. Reports from Safari are no longer held back on its account.
+        /// first. Reports from Safari are no longer held back on its account, and Safari is
+        /// asked where it is.
         static let lifetime: TimeInterval = 1
 
         var isFresh: Bool { Date().timeIntervalSince(requestedAt) < Self.lifetime }
@@ -512,6 +513,7 @@ final class TabStore {
             replaced: earlier
         )
         pendingActivation = request
+        scheduleCheck(of: request)
         let plan = switchPlan(for: tab, instance: instance)
         mutateWindow(instance: instance, windowId: tab.windowId) { window in
             for index in window.tabs.indices {
@@ -534,6 +536,18 @@ final class TabStore {
             pressTab(target) { [weak self] outcome in
                 self?.pressFinished(outcome, request: request, tab: tab, instance: instance)
             }
+        }
+    }
+
+    /// Once a click has waited as long as it's worth, if Safari still hasn't said it switched,
+    /// asks where it is. A snapshot is the safe thing to ask: whatever it says is true, and it
+    /// can't move Safari. (A command to switch could be run late, after a newer click that
+    /// switched Safari some other way, and would undo it. See `pressFinished`.)
+    private func scheduleCheck(of request: PendingActivation) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + PendingActivation.lifetime) { [weak self] in
+            guard let self, self.pendingActivation?.id == request.id else { return }
+            self.log.notice("tab switch wasn't confirmed within a second; asking Safari where it is")
+            self.requestSnapshot()
         }
     }
 
@@ -565,15 +579,13 @@ final class TabStore {
         case .superseded:
             break
         case .pressed(let milliseconds):
+            // Safari did what the button does before it answered, so there is nothing more to
+            // send. In particular no command for the extension to run a second later "just in
+            // case": under load the extension runs commands seconds late, after the user has
+            // clicked something else, and a late `activate` puts Safari back on the old tab (#20).
+            // If the press was somehow acknowledged and not acted on, the check scheduled with
+            // the click puts the sidebar back where Safari is.
             log.notice("tab switch via accessibility: pressed the tab bar's button \(milliseconds) ms after the click")
-            // A press Safari acknowledged but then didn't act on would leave the click lost. If
-            // the switch isn't confirmed in time, have the extension make it.
-            DispatchQueue.main.asyncAfter(deadline: .now() + PendingActivation.lifetime) { [weak self] in
-                guard let self, self.pendingActivation?.id == request.id else { return }
-                self.log.notice("tab switch via push: the press wasn't confirmed within a second")
-                self.pendingActivation?.path = "accessibility, then push"
-                self.sendActivation(of: tab, instance: instance)
-            }
         case .fallback(let reason):
             // Only if this is still the click being waited for. If a newer click replaced it, Safari
             // confirmed it, or Safari went to another tab meanwhile, a late command would only pull
