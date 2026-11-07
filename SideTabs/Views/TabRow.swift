@@ -9,6 +9,10 @@ struct TabRow: View {
     @Environment(SidebarDrag.self) private var drag
     @State private var hovering = false
     @State private var rowTop: CGFloat = 0
+    /// Set once a press has been acted on, so the drag gesture's repeated updates don't repeat it.
+    @State private var pressHandled = false
+    /// The pointer is over the mute or close button, whose presses belong to the button.
+    @State private var overControl = false
 
     private var key: TabKey { TabKey(instance: instance, tabId: tab.id) }
     private var isSlot: Bool { drag.isSlot(tab: tab) }
@@ -47,7 +51,8 @@ struct TabRow: View {
                 SidebarIconButton(
                     systemImage: tab.muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
                     help: tab.muted ? "Unmute Tab" : "Mute Tab",
-                    size: 10
+                    size: 10,
+                    onHover: { overControl = $0 }
                 ) {
                     store.setMuted(!tab.muted, tab: tab, instance: instance)
                 }
@@ -55,7 +60,7 @@ struct TabRow: View {
 
             ZStack {
                 if showsClose {
-                    SidebarIconButton(systemImage: "xmark", help: "Close Tab", size: 9) {
+                    SidebarIconButton(systemImage: "xmark", help: "Close Tab", size: 9, onHover: { overControl = $0 }) {
                         store.close([tab], instance: instance)
                     }
                 } else if tab.pinned {
@@ -79,16 +84,24 @@ struct TabRow: View {
         }
         .background(MouseTracking(onHover: { hovering = $0 }, onMiddleClick: { store.close([tab], instance: instance) }))
         .contentShape(Rectangle())
-        .onTapGesture {
-            // A separate double-tap gesture would make SwiftUI hold every single click
-            // for the double-click interval, so read the click count instead.
-            guard !isRenaming else { return }
-            if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
-                store.beginRename(.tab(key))
-            } else {
-                store.activate(tab, instance: instance)
-            }
-        }
+        // Safari's own tab bar switches on mouse-down, so this does too: waiting for the
+        // mouse-up would add the length of the click to every switch. The second press of a
+        // double-click renames instead. A separate double-tap gesture would make SwiftUI hold
+        // every single click for the double-click interval, so the click count is read here.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !pressHandled else { return }
+                    pressHandled = true
+                    guard !isRenaming, !overControl else { return }
+                    if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
+                        store.beginRename(.tab(key))
+                    } else {
+                        store.activate(tab, instance: instance)
+                    }
+                }
+                .onEnded { _ in pressHandled = false }
+        )
         .sidebarDraggable(
             .tab(tab, instance: instance),
             drag: drag,
