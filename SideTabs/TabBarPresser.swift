@@ -22,6 +22,9 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
 
     // Only used on `queue`.
     private var cachedTabGroup: (window: AXUIElement, group: AXUIElement)?
+    // [TEMP-tabSwitchMethod] The fallback diagnostics (this, the `diagnostic` closures `attempt`
+    // returns, `describe` and `describeChildren`) write the window's tab titles to the system log,
+    // public. They are for measuring the tab bar press and go with the switch, not before.
     private var lastDiagnostic = ""
 
     private struct Button {
@@ -42,6 +45,7 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
             let (outcome, diagnostic) = attempt(target, in: window, issued: issued, isStale: isStale)
             completion(outcome)
             // After the answer is on its way: the explanation costs more Accessibility calls.
+            // [TEMP-tabSwitchMethod] Logs tab titles, public.
             if let diagnostic, case .fallback = outcome {
                 let text = diagnostic()
                 if text != lastDiagnostic {
@@ -166,6 +170,10 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
 
     /// What the tab bar looked like, for the log, so a fallback that shouldn't have happened can
     /// be understood without Safari in front of you.
+    ///
+    /// [TEMP-tabSwitchMethod] Puts up to eight of the window's tab titles in the log. Browsing
+    /// titles shouldn't stay in the system log once the measurements are done: delete this and
+    /// `describeChildren` with the rest of the marked code.
     private static func describe(_ buttons: [Button], for target: TabBarTarget) -> String {
         func quoted(_ title: String?) -> String {
             let text = TabBarMatcher.normalized(title)
@@ -177,6 +185,7 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
         return "\(buttons.count) buttons [\(shown)\(order.count > 8 ? ", …" : "")] for \(target.windowTitles.count) tabs [\(tabs)\(target.windowTitles.count > 8 ? ", …" : "")]; wanted \(quoted(target.title)) at \(target.position)"
     }
 
+    // [TEMP-tabSwitchMethod] Part of the same diagnostics (it names no titles, but is only used by them).
     private func describeChildren(of window: AXUIElement) -> String {
         let roles = query.elements(window, kAXChildrenAttribute).map { query.string($0, kAXRoleAttribute) ?? "?" }
         return "no tab bar among the window's children: \(roles.joined(separator: ", "))"
