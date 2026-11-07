@@ -81,17 +81,36 @@ async function buildSnapshot() {
 }
 
 let sendTimer = null;
+let sendDue = 0;
 let sending = false;
 let resendRequested = false;
 let retryDelay = 250;
+let lastFlushAt = 0;
 
+// Asks for a snapshot in `delay` ms. An earlier request replaces a pending later one, so a
+// slow background refresh (see scheduleLazySnapshot) never holds up an urgent one.
 function scheduleSnapshot(delay = 30) {
-    if (sendTimer) return;
+    const due = Date.now() + delay;
+    if (sendTimer) {
+        if (sendDue <= due) return;
+        clearTimeout(sendTimer);
+    }
+    sendDue = due;
     sendTimer = setTimeout(flushSnapshot, delay);
+}
+
+// For changes that can wait, like a page loading in the background: every snapshot asks
+// Safari for all windows and tabs, so while pages load these are spaced out rather than
+// sent one after another, which would keep Safari busy and delay the commands that matter.
+const LAZY_SNAPSHOT_MS = 250;
+
+function scheduleLazySnapshot() {
+    scheduleSnapshot(Math.max(30, lastFlushAt + LAZY_SNAPSHOT_MS - Date.now()));
 }
 
 async function flushSnapshot() {
     sendTimer = null;
+    lastFlushAt = Date.now();
     if (sending) {
         resendRequested = true;
         return;
@@ -288,10 +307,18 @@ function originOf(url) {
 }
 
 browser.tabs.onCreated.addListener(() => scheduleSnapshot());
-browser.tabs.onActivated.addListener(() => scheduleSnapshot(0));
+browser.tabs.onActivated.addListener((info) => {
+    // Building a snapshot takes a while with many tabs; the app only needs this much to
+    // move the highlight and know the switch happened.
+    postToApp({ type: "activated", instance, windowId: info.windowId, tabId: info.tabId });
+    scheduleSnapshot(0);
+});
 browser.tabs.onMoved.addListener(() => scheduleSnapshot());
 browser.tabs.onAttached.addListener(() => scheduleSnapshot());
 browser.tabs.onDetached.addListener(() => scheduleSnapshot());
+
+// What the sidebar shows about a tab; other changes don't need a snapshot.
+const SHOWN_CHANGES = ["title", "url", "status", "favIconUrl", "pinned", "audible", "mutedInfo"];
 
 browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.url) {
@@ -299,7 +326,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
         const known = favicons.get(tabId);
         if (known && originOf(known) !== originOf(changeInfo.url) && !known.startsWith("data:")) favicons.delete(tabId);
     }
-    scheduleSnapshot();
+    if (SHOWN_CHANGES.some((key) => key in changeInfo)) scheduleLazySnapshot();
 });
 
 browser.tabs.onRemoved.addListener((tabId) => {

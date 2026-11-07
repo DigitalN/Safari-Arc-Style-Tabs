@@ -48,8 +48,13 @@ final class SidebarPanel: NSPanel {
     /// handled. Right-clicks are left alone so context menus open without switching apps.
     var onMouseDown: (() -> Void)?
 
+    /// When the last left or middle mouse-down reached the panel, taken from the event itself
+    /// so it doesn't include time spent before the event was handled.
+    private(set) var lastMouseDown = Date.distantPast
+
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown || event.type == .otherMouseDown {
+            lastMouseDown = Date(timeIntervalSinceNow: event.timestamp - ProcessInfo.processInfo.systemUptime)
             onMouseDown?()
         }
         super.sendEvent(event)

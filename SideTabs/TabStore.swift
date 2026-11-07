@@ -34,13 +34,16 @@ final class TabStore {
     @ObservationIgnored var onToggleSidebar: (() -> Void)?
     @ObservationIgnored var onRenameStateChanged: ((Bool) -> Void)?
     @ObservationIgnored var onOpenAddressBar: (() -> Void)?
+    /// When the pointer last went down on the sidebar, so a switch is timed from the click.
+    @ObservationIgnored var lastPointerDown: (() -> Date)?
 
     /// Names whose tab ids are gone (Safari restarted), keyed by URL so they can be
     /// given back to the restored tabs.
     @ObservationIgnored private var orphanNames: [String: String] = [:]
     @ObservationIgnored private var pendingBookmarkOpens: [String: (bookmark: UUID, at: Date)] = [:]
     @ObservationIgnored private var saveWork: DispatchWorkItem?
-    /// When the last tab switch was requested, to log how long Safari took to confirm it.
+    /// When the last tab switch started (the click, if there was one), to log how long Safari
+    /// took to confirm it.
     @ObservationIgnored private var pendingActivation: (key: TabKey, at: Date)?
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "store")
 
@@ -58,6 +61,16 @@ final class TabStore {
                 apply(try JSONDecoder().decode(Snapshot.self, from: payload))
             } catch {
                 NSLog("Side Tabs: bad snapshot: \(error)")
+            }
+            return [:]
+
+        case "activated":
+            // Safari switched tabs. The extension sends this the moment it happens, ahead of the
+            // snapshot, which takes longer to build with many tabs.
+            if let instance = object["instance"] as? String,
+               let windowId = object["windowId"] as? Int,
+               let tabId = object["tabId"] as? Int {
+                applyActivation(instance: instance, windowId: windowId, tabId: tabId)
             }
             return [:]
 
@@ -105,10 +118,38 @@ final class TabStore {
 
         if let pending = pendingActivation, pending.key.instance == snapshot.instance,
            snapshot.windows.contains(where: { $0.tabs.contains { $0.id == pending.key.tabId && $0.active } }) {
-            pendingActivation = nil
-            let milliseconds = Int(Date().timeIntervalSince(pending.at) * 1000)
-            log.notice("tab switch confirmed by Safari after \(milliseconds) ms")
+            confirmActivation(pending)
         }
+    }
+
+    /// Moves the highlight to the tab Safari says it switched to, without waiting for a snapshot.
+    private func applyActivation(instance: String, windowId: Int, tabId: Int) {
+        // After a quick second click, the report for the first switch arrives while the highlight
+        // is already on the second tab; moving it back would only make it jump.
+        let supersededByClick = pendingActivation.map { pending in
+            pending.key.instance == instance && pending.key.tabId != tabId && tab(for: pending.key)?.windowId == windowId
+        } ?? false
+        if !supersededByClick {
+            moveHighlight(instance: instance, windowId: windowId, tabId: tabId)
+        }
+        if let pending = pendingActivation, pending.key == TabKey(instance: instance, tabId: tabId) {
+            confirmActivation(pending)
+        }
+    }
+
+    private func moveHighlight(instance: String, windowId: Int, tabId: Int) {
+        mutateWindow(instance: instance, windowId: windowId) { window in
+            guard window.tabs.contains(where: { $0.id == tabId }) else { return }
+            for index in window.tabs.indices {
+                window.tabs[index].active = window.tabs[index].id == tabId
+            }
+        }
+    }
+
+    private func confirmActivation(_ pending: (key: TabKey, at: Date)) {
+        pendingActivation = nil
+        let milliseconds = Int(Date().timeIntervalSince(pending.at) * 1000)
+        log.notice("tab switch confirmed by Safari \(milliseconds) ms after the click")
     }
 
     /// Safari quit: forget its tabs but remember names by URL for next launch.
@@ -334,7 +375,9 @@ final class TabStore {
     }
 
     func activate(_ tab: BrowserTab, instance: String) {
-        pendingActivation = (TabKey(instance: instance, tabId: tab.id), Date())
+        let now = Date()
+        let pointerDown = lastPointerDown?() ?? .distantPast
+        pendingActivation = (TabKey(instance: instance, tabId: tab.id), now.timeIntervalSince(pointerDown) < 1.5 ? pointerDown : now)
         mutateWindow(instance: instance, windowId: tab.windowId) { window in
             for index in window.tabs.indices {
                 window.tabs[index].active = window.tabs[index].id == tab.id

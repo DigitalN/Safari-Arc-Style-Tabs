@@ -77,6 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
         store.onOpenAddressBar = { [weak self] in self?.dock?.openSafariAddressBar() }
+        store.lastPointerDown = { [weak panel] in panel?.lastMouseDown ?? .distantPast }
 
         dock.start()
         store.requestSnapshot()
