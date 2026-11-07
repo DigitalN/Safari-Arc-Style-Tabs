@@ -91,6 +91,12 @@ final class TabStore {
             }
             return [:]
 
+        case "log":
+            // Something the extension wants in the system log, which is where its console
+            // output can be read without Safari's developer tools.
+            log.notice("extension: \(object["message"] as? String ?? "", privacy: .public)")
+            return [:]
+
         case "hello":
             return ["needSnapshot": true]
 

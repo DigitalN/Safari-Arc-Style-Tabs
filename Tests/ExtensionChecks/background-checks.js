@@ -55,8 +55,11 @@ function load({ queryDelay = 20, tabCount = 5 } = {}) {
         },
         browserAction: { onClicked: event("action") },
     };
+    // background.js asks for extra snapshots 1, 3 and 6 s after it starts, to catch windows
+    // Safari restores late. They're left out so they can't land in the middle of a check.
+    const timer = (fn, ms, ...args) => ([1000, 3000, 6000].includes(ms) ? 0 : setTimeout(fn, ms, ...args));
     const context = vm.createContext({
-        browser, console, setTimeout, clearTimeout, setInterval: () => 0, crypto: { randomUUID: () => "test-instance" },
+        browser, console, setTimeout: timer, clearTimeout, setInterval: () => 0, crypto: { randomUUID: () => "test-instance" },
         URL, fetch: async () => ({}), AbortController, FileReader: class {}, Date, Math,
     });
     vm.runInContext(source.replace('"use strict";', ""), context);
@@ -65,8 +68,7 @@ function load({ queryDelay = 20, tabCount = 5 } = {}) {
     return { sent, tabs, fire, ofType };
 }
 
-// Waits for the first startup snapshot and forgets what was sent so far. (More follow at 1,
-// 3 and 6 s; the checks below are short enough not to meet them.)
+// Waits for the first startup snapshot and forgets what was sent so far.
 async function settled(page) {
     await sleep(150);
     page.sent.length = 0;
@@ -120,6 +122,70 @@ async function settled(page) {
         await sleep(200);
         const snapshots = page.ofType("snapshot");
         check(snapshots.every((snapshot, i) => i === 0 || snapshot.seq > snapshots[i - 1].seq), "snapshots are numbered in build order");
+    }
+
+    // --- #17 item 8: changes the sidebar shows reach it, whatever key Safari reports them under ---
+    {
+        const page = load();
+        await settled(page);
+        const snapshotsAfter = async (action) => {
+            page.sent.length = 0;
+            action();
+            await sleep(450);
+            return page.ofType("snapshot").length;
+        };
+        const unchanged = { ...page.tabs[0] };
+
+        check((await snapshotsAfter(() => page.fire("updated", 1, { title: "New" }, { ...unchanged, title: "New" }))) >= 1,
+            "a title change is sent");
+        check((await snapshotsAfter(() => page.fire("updated", 1, { status: "loading" }, { ...unchanged, title: "New", status: "loading" }))) >= 1,
+            "a status change is sent");
+        check((await snapshotsAfter(() => page.fire("updated", 1, { mutedInfo: { muted: true } }, { ...unchanged, title: "New", status: "loading" }))) >= 1,
+            "a mute change is sent");
+        check((await snapshotsAfter(() => page.fire("updated", 1, { unreadCount: 3 }, { ...unchanged, title: "New" }))) >= 1,
+            "a key nobody knew about is sent");
+        check((await snapshotsAfter(() => page.fire("updated", 1, {}, { ...unchanged, title: "New" }))) >= 1,
+            "an empty changeInfo is sent");
+
+        // The snapshots above rebuilt lastShown from the tab list, which still says "Tab 1".
+        // Changes that really aren't shown stay quiet:
+        check((await snapshotsAfter(() => page.fire("updated", 1, { isArticle: true }, { ...unchanged }))) === 0,
+            "a change the sidebar doesn't show is not sent");
+        check((await snapshotsAfter(() => page.fire("updated", 1, { attention: true, isInReaderMode: false }, { ...unchanged }))) === 0,
+            "several unshown changes are not sent");
+
+        // ...unless the tab itself shows that something the sidebar displays has changed.
+        check((await snapshotsAfter(() => page.fire("updated", 1, { isArticle: true }, { ...unchanged, title: "(3) Inbox" }))) >= 1,
+            "a title change reported without a title key is still sent");
+        const logs = page.ofType("log").map((message) => message.message);
+        check(logs.some((line) => line.includes("shown change reported only as: isArticle")),
+            "the app is told when Safari reports a shown change without its key");
+    }
+
+    {
+        // Which keys Safari sends is reported once per distinct set, not once per event.
+        const page = load();
+        await settled(page);
+        for (let i = 0; i < 20; i++) page.fire("updated", 1, { title: `t${i}` }, { ...page.tabs[0], title: `t${i}` });
+        page.fire("updated", 1, { status: "loading", title: "x" }, { ...page.tabs[0] });
+        page.fire("updated", 1, { title: "z", status: "complete" }, { ...page.tabs[0] });
+        await sleep(300);
+        const keyLogs = page.ofType("log").map((message) => message.message).filter((line) => line.includes("changeInfo keys"));
+        check(keyLogs.length === 2, `each distinct key set is logged once (got ${JSON.stringify(keyLogs)})`);
+        check(keyLogs.some((line) => line.endsWith("changeInfo keys: status,title")), "keys are sorted so the same set always reads the same");
+    }
+
+    {
+        // A page loading fires a stream of updates; they still go out spaced apart, not one each.
+        const page = load();
+        await settled(page);
+        for (let i = 0; i < 40; i++) {
+            page.fire("updated", 1, { title: `x${i}` }, { ...page.tabs[0], title: `x${i}` });
+            await sleep(10);
+        }
+        await sleep(700);
+        const count = page.ofType("snapshot").length;
+        check(count > 0 && count <= 6, `40 title updates over ~0.4 s sent ${count} snapshots`);
     }
 
     if (failures === 0) {

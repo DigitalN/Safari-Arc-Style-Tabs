@@ -49,6 +49,23 @@ function serializeTab(tab) {
     };
 }
 
+// What the sidebar shows about a tab, as one string, so a change to any of it can be told
+// from a change it doesn't show.
+function shownSignature(tab) {
+    return JSON.stringify([
+        tab.title ?? null,
+        tab.url ?? null,
+        !!tab.pinned,
+        !!tab.audible,
+        !!(tab.mutedInfo && tab.mutedInfo.muted),
+        tab.status === "loading",
+        tab.favIconUrl ?? null,
+    ]);
+}
+
+// The shown state of each tab as of the last snapshot built.
+let lastShown = new Map();
+
 async function buildSnapshot() {
     // The number is taken before asking Safari anything. Every report numbered lower
     // happened before the queries below, so the snapshot includes it; a higher-numbered one
@@ -57,6 +74,8 @@ async function buildSnapshot() {
     // Query tabs directly rather than windows.getAll({ populate: true }), which can
     // return windows without their tabs while Safari is still restoring them.
     const [windows, tabs] = await Promise.all([browser.windows.getAll(), browser.tabs.query({})]);
+
+    lastShown = new Map(tabs.map((tab) => [tab.id, shownSignature(tab)]));
 
     const tabsByWindow = new Map();
     for (const tab of tabs) {
@@ -325,16 +344,46 @@ browser.tabs.onMoved.addListener(() => scheduleSnapshot());
 browser.tabs.onAttached.addListener(() => scheduleSnapshot());
 browser.tabs.onDetached.addListener(() => scheduleSnapshot());
 
-// What the sidebar shows about a tab; other changes don't need a snapshot.
-const SHOWN_CHANGES = ["title", "url", "status", "favIconUrl", "pinned", "audible", "mutedInfo"];
+// `changeInfo` keys for changes the sidebar doesn't show. Anything else, including a key
+// that isn't known here and an empty `changeInfo`, may be a change to a title or an icon
+// that Safari reports under another name, so it gets a snapshot.
+const UNSHOWN_CHANGES = new Set([
+    "attention", "autoDiscardable", "discarded", "frozen", "hidden", "isArticle", "isInReaderMode",
+    "sharingState", "successorTabId",
+]);
 
-browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+function changeMayBeShown(changeInfo) {
+    const keys = Object.keys(changeInfo || {});
+    return keys.length === 0 || keys.some((key) => !UNSHOWN_CHANGES.has(key));
+}
+
+// Tells the app which `changeInfo` keys Safari sends, once per distinct combination, so
+// the system log shows what Safari really reports (see /usr/bin/log in DEVELOPMENT.md).
+const loggedChangeKeys = new Set();
+
+function noteChangeKeys(changeInfo, what = "changeInfo keys") {
+    const keys = Object.keys(changeInfo || {}).sort().join(",") || "(none)";
+    const message = `tabs.onUpdated ${what}: ${keys}`;
+    if (loggedChangeKeys.has(message) || loggedChangeKeys.size >= 60) return;
+    loggedChangeKeys.add(message);
+    postToApp({ type: "log", instance, message });
+}
+
+browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.url) {
         // Keep the old icon while navigating within a site; drop it when the site changes.
         const known = favicons.get(tabId);
         if (known && originOf(known) !== originOf(changeInfo.url) && !known.startsWith("data:")) favicons.delete(tabId);
     }
-    if (SHOWN_CHANGES.some((key) => key in changeInfo)) scheduleLazySnapshot();
+    noteChangeKeys(changeInfo);
+    if (changeMayBeShown(changeInfo)) {
+        scheduleLazySnapshot();
+    } else if (tab && shownSignature(tab) !== lastShown.get(tabId)) {
+        // Only keys for changes the sidebar doesn't show, yet something it does show differs
+        // from the last snapshot: Safari reported that change without its usual key.
+        noteChangeKeys(changeInfo, "shown change reported only as");
+        scheduleLazySnapshot();
+    }
 });
 
 browser.tabs.onRemoved.addListener((tabId) => {
