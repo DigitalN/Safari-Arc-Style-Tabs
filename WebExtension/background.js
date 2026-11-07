@@ -239,6 +239,10 @@ async function runCommand(command) {
 
         case "mute":
             await browser.tabs.update(command.tabId, { muted: !!command.muted });
+            // Safari sends no tabs.onUpdated for a mute change (the keys it sends were logged:
+            // none for muting), so the sidebar would keep the old icon until something else
+            // caused a snapshot.
+            scheduleSnapshot();
             break;
 
         case "fetchIcons":

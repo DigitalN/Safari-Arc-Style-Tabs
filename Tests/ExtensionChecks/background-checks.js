@@ -26,6 +26,7 @@ function check(condition, message) {
 // a snapshot build overlap with other events.
 function load({ queryDelay = 20, tabCount = 5 } = {}) {
     const sent = [];
+    const updates = [];
     const listeners = {};
     const event = (name) => ({ addListener: (fn) => (listeners[name] ||= []).push(fn) });
     const tabs = Array.from({ length: tabCount }, (_, i) => ({
@@ -41,6 +42,7 @@ function load({ queryDelay = 20, tabCount = 5 } = {}) {
         tabs: {
             query: async () => { await sleep(queryDelay); return tabs.map((tab) => ({ ...tab })); },
             executeScript: async () => {},
+            update: async (id, props) => { updates.push({ id, props }); return { ...tabs[id - 1], ...props }; },
             onCreated: event("created"), onActivated: event("activated"), onMoved: event("moved"),
             onAttached: event("attached"), onDetached: event("detached"), onUpdated: event("updated"),
             onRemoved: event("removed"), onReplaced: event("replaced"),
@@ -65,7 +67,9 @@ function load({ queryDelay = 20, tabCount = 5 } = {}) {
     vm.runInContext(source.replace('"use strict";', ""), context);
     const fire = (name, ...args) => (listeners[name] || []).forEach((fn) => fn(...args));
     const ofType = (type) => sent.filter((entry) => entry.message.type === type).map((entry) => entry.message);
-    return { sent, tabs, fire, ofType };
+    // Carries out a command from the app, as the port or a reply would deliver it.
+    const run = (command) => context.runCommand({ instance: "test-instance", ...command });
+    return { sent, tabs, updates, fire, ofType, run };
 }
 
 // Waits for the first startup snapshot and forgets what was sent so far.
@@ -234,6 +238,32 @@ async function settled(page) {
         await sleep(700);
         const count = page.ofType("snapshot").length;
         check(count > 0 && count <= 6, `40 title updates over ~0.4 s sent ${count} snapshots`);
+    }
+
+    // --- #21 item 2: Safari sends no tabs.onUpdated for a mute, so the app is sent a snapshot ---
+    {
+        const page = load();
+        await settled(page);
+        await page.run({ action: "mute", tabId: 2, muted: true });
+        await sleep(200);
+        check(page.updates.length === 1 && page.updates[0].props.muted === true, "the mute command mutes the tab");
+        check(page.ofType("snapshot").length >= 1, "and a snapshot follows it, without Safari reporting any update");
+
+        page.sent.length = 0;
+        await page.run({ action: "mute", tabId: 2, muted: false });
+        await sleep(200);
+        check(page.ofType("snapshot").length >= 1, "and one follows an unmute");
+    }
+
+    {
+        // The commands Safari reports on its own aren't given a second snapshot.
+        const page = load();
+        await settled(page);
+        page.updates.length = 0;
+        await page.run({ action: "activate", tabId: 2 });
+        await sleep(100);
+        check(page.updates.length === 1 && page.updates[0].props.active === true, "the activate command switches the tab");
+        check(page.ofType("snapshot").length === 0, "and sends no snapshot of its own: Safari reports the switch");
     }
 
     if (failures === 0) {

@@ -565,6 +565,20 @@ withPresser(method: "push") { store, presses, commands in
     check(commands().isEmpty, "the active tab isn't activated by the extension either")
 }
 
+// MARK: - Fixes found alongside (#21)
+
+do {
+    // Item 2: the icon changes at once, and the snapshot that follows settles it.
+    let (store, commands) = makeStore()
+    let tab = store.tab(for: TabKey(instance: instance, tabId: 2))!
+    store.setMuted(true, tab: tab, instance: instance)
+    check(store.tab(for: TabKey(instance: instance, tabId: 2))?.muted == true, "muting shows the muted icon at once")
+    check(commands().contains { $0["action"] as? String == "mute" && $0["muted"] as? Bool == true }, "and tells the extension")
+    let muted = store.tab(for: TabKey(instance: instance, tabId: 2))!
+    store.setMuted(false, tab: muted, instance: instance)
+    check(store.tab(for: TabKey(instance: instance, tabId: 2))?.muted == false, "unmuting shows it at once too")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

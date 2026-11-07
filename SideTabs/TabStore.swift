@@ -689,6 +689,13 @@ final class TabStore {
     }
 
     func setMuted(_ muted: Bool, tab: BrowserTab, instance: String) {
+        // Safari doesn't report a mute change, so the icon changes here at once; the extension
+        // sends a snapshot after the command, which settles it either way.
+        mutateWindow(instance: instance, windowId: tab.windowId) { window in
+            if let index = window.tabs.firstIndex(where: { $0.id == tab.id }) {
+                window.tabs[index].muted = muted
+            }
+        }
         send(["action": "mute", "tabId": tab.id, "muted": muted], to: instance)
     }
 
