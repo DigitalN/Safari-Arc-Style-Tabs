@@ -9,8 +9,11 @@ struct TabRow: View {
     @Environment(SidebarDrag.self) private var drag
     @State private var hovering = false
     @State private var rowTop: CGFloat = 0
-    /// Set once a press has been acted on, so the drag gesture's repeated updates don't repeat it.
-    @State private var pressHandled = false
+    /// True while a press is in progress, so the drag gesture's repeated updates don't repeat
+    /// it. A gesture state rather than `@State`: SwiftUI resets it when a press ends *or is
+    /// cancelled*, and doesn't call `onEnded` for a cancelled one, so a single cancelled press
+    /// can't leave the row ignoring every press after it.
+    @GestureState private var pressInProgress = false
     /// The pointer is over the mute or close button, whose presses belong to the button.
     @State private var overControl = false
 
@@ -90,17 +93,11 @@ struct TabRow: View {
         // every single click for the double-click interval, so the click count is read here.
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    guard !pressHandled else { return }
-                    pressHandled = true
-                    guard !isRenaming, !overControl else { return }
-                    if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
-                        store.beginRename(.tab(key))
-                    } else {
-                        store.activate(tab, instance: instance)
-                    }
+                .updating($pressInProgress) { _, inProgress, _ in
+                    guard !inProgress else { return }
+                    inProgress = true
+                    press()
                 }
-                .onEnded { _ in pressHandled = false }
         )
         .sidebarDraggable(
             .tab(tab, instance: instance),
@@ -115,6 +112,17 @@ struct TabRow: View {
         .help(tooltip)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(tab.active ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// The first event of a press. Runs while the mouse-down is being dispatched, which is
+    /// when `NSApp.currentEvent` still has the click count.
+    private func press() {
+        guard !isRenaming, !overControl else { return }
+        if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
+            store.beginRename(.tab(key))
+        } else {
+            store.activate(tab, instance: instance)
+        }
     }
 
     private var tooltip: String {

@@ -21,3 +21,9 @@ echo "== TabStore"
 swiftc -o "$WORK/store-checks" \
     Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift Shared/Bridge.swift
 HOME="$WORK" "$WORK/store-checks"
+
+# A quick compile check of the app's Swift sources (no signing, no packaging). The full
+# build is scripts/build.sh.
+echo "== app sources"
+swiftc -typecheck -swift-version 5 -default-isolation MainActor -target arm64-apple-macosx26.0 -parse-as-library \
+    SideTabs/*.swift SideTabs/Views/*.swift Shared/Bridge.swift
