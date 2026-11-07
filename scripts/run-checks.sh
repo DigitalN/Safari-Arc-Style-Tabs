@@ -27,6 +27,10 @@ swiftc -o "$WORK/click-checks" \
     Tests/ClickActionsChecks/main.swift SideTabs/ClickActions.swift SideTabs/AccessibilityQuery.swift Shared/Bridge.swift
 "$WORK/click-checks"
 
+echo "== tab bar matcher"
+swiftc -o "$WORK/matcher-checks" Tests/TabBarMatcherChecks/main.swift SideTabs/TabBarMatcher.swift
+"$WORK/matcher-checks"
+
 # A quick compile check of the app's Swift sources (no signing, no packaging). The full
 # build is scripts/build.sh.
 echo "== app sources"
