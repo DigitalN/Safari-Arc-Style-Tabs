@@ -23,6 +23,19 @@ Builds go to `~/Library/Developer/Xcode/DerivedData/SideTabs-CLI`, not the repos
 Folders synced by iCloud Drive (such as `~/Documents`) add Finder metadata to app
 bundles, and codesign rejects bundles that have it.
 
+## Checks
+
+```bash
+scripts/run-checks.sh
+```
+
+Runs what can be checked without Safari: `background.js` against a stand-in `browser`
+(`Tests/ExtensionChecks`), the Swift logic compiled with small test programs (`TabStore`'s
+handling of messages, which tab-bar button a tab matches, which queued Accessibility
+requests are still wanted), and a compile check of the app's sources. It doesn't touch the
+installed app, Safari, or your saved bookmarks and names. Anything that needs the real
+Safari (clicks, windows, timing) still has to be tried by hand.
+
 ## Release checklist
 
 Go through all of it for every release. Releases are public, and installed copies update

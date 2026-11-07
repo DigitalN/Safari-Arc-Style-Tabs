@@ -38,6 +38,24 @@ nonisolated final class AXQuery: @unchecked Sendable {
         return value
     }
 
+    /// Several attributes in one round trip. An attribute the element doesn't have comes back nil.
+    func copyMultiple(_ element: AXUIElement, _ attributes: [String]) -> [CFTypeRef?]? {
+        AXUIElementSetMessagingTimeout(element, timeout)
+        var values: CFArray?
+        let error = AXUIElementCopyMultipleAttributeValues(element, attributes as CFArray, [], &values)
+        guard error == .success, let values else {
+            note(error)
+            return nil
+        }
+        return (values as [AnyObject]).map { value in
+            // A value that couldn't be read is an AXValue of the "error" kind, not a missing item.
+            if CFGetTypeID(value) == AXValueGetTypeID(), AXValueGetType(value as! AXValue) == .axError {
+                return nil
+            }
+            return value
+        }
+    }
+
     func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
         guard let value = copy(element, attribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return (value as! AXUIElement)

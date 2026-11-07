@@ -15,12 +15,13 @@ echo "== background.js"
 node --check WebExtension/background.js
 node Tests/ExtensionChecks/background-checks.js
 
-# TabStore reads and may write ~/Library/Application Support/Side Tabs; point HOME at an
-# empty folder so the checks can't touch the real file.
+# The store checks give each TabStore a state file in a temporary folder, so nothing here
+# reads or writes the real one in ~/Library/Application Support/Side Tabs.
 echo "== TabStore"
 swiftc -o "$WORK/store-checks" \
-    Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift Shared/Bridge.swift
-HOME="$WORK" "$WORK/store-checks"
+    Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift SideTabs/TabBarMatcher.swift \
+    SideTabs/TabSwitchMethod.swift Shared/Bridge.swift
+"$WORK/store-checks"
 
 echo "== click actions"
 swiftc -o "$WORK/click-checks" \

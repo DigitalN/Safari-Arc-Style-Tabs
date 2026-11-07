@@ -52,6 +52,8 @@ final class SafariTracker {
     private let clickActions = ClickActions()
     /// Reads Safari's windows off the main thread.
     private let windowReader = SafariWindowReader()
+    /// Switches tabs by pressing their buttons in Safari's tab bar, off the main thread.
+    private let tabBar = TabBarPresser()
     private var workspaceTokens: [NSObjectProtocol] = []
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "tracker")
 
@@ -438,6 +440,18 @@ final class SafariTracker {
                     self.waitForSafari(attempts: 10) { _ in completion?() }
                 }
             }
+        }
+    }
+
+    /// Presses the button for a tab in the docked window's tab bar. `completion` runs on the main
+    /// thread, and says whether that worked or the extension has to switch the tab instead.
+    func pressTab(_ target: TabBarTarget, then completion: @escaping (TabBarPressOutcome) -> Void) {
+        guard isTrusted, let window else {
+            completion(.fallback("there is no docked Safari window"))
+            return
+        }
+        tabBar.press(target, in: window) { outcome in
+            DispatchQueue.main.async { completion(outcome) }
         }
     }
 

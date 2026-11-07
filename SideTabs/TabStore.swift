@@ -13,11 +13,14 @@ final class TabStore {
 
     /// A tab switch the sidebar asked for that Safari hasn't confirmed yet.
     private struct PendingActivation {
+        let id: Int
         let key: TabKey
         /// When the click started (the mouse-down, if there was one), to time the switch.
         let clickAt: Date
         /// When the switch was requested, to tell whether it's still worth waiting for.
         let requestedAt: Date
+        /// How the switch was asked for, for the log.
+        var path = "push"
 
         /// A switch that's gone unconfirmed this long was lost, or Safari went somewhere else
         /// first. Reports from Safari are no longer held back on its account.
@@ -51,6 +54,9 @@ final class TabStore {
     @ObservationIgnored var onOpenAddressBar: (() -> Void)?
     /// When the pointer last went down on the sidebar, so a switch is timed from the click.
     @ObservationIgnored var lastPointerDown: (() -> Date)?
+    /// Switches a tab by pressing its button in Safari's tab bar (see TabBarPresser). The
+    /// completion runs on the main thread and says whether it worked or the extension has to do it.
+    @ObservationIgnored var pressTab: ((TabBarTarget, @escaping (TabBarPressOutcome) -> Void) -> Void)?
 
     /// Names whose tab ids are gone (Safari restarted), keyed by URL so they can be
     /// given back to the restored tabs.
@@ -59,12 +65,17 @@ final class TabStore {
     @ObservationIgnored private var saveWork: DispatchWorkItem?
     /// The last tab switch the sidebar asked for, until Safari confirms it or it goes stale.
     @ObservationIgnored private var pendingActivation: PendingActivation?
+    @ObservationIgnored private var activationCount = 0
     /// The newest `activated` report applied for each extension instance, so an older one that
     /// arrives late is ignored, and a snapshot older than it doesn't undo it.
     @ObservationIgnored private var lastActivation: [String: (seq: Int, windowId: Int, tabId: Int)] = [:]
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "store")
 
-    init() {
+    /// Where bookmarks and tab names are kept. Only the checks in Tests/ pass anything else.
+    @ObservationIgnored private let stateURL: URL
+
+    init(stateURL: URL = TabStore.defaultStateURL) {
+        self.stateURL = stateURL
         load()
     }
 
@@ -206,7 +217,7 @@ final class TabStore {
     private func confirmActivation(_ pending: PendingActivation) {
         pendingActivation = nil
         let milliseconds = Int(Date().timeIntervalSince(pending.clickAt) * 1000)
-        log.notice("tab switch confirmed by Safari \(milliseconds) ms after the click")
+        log.notice("tab switch confirmed by Safari \(milliseconds) ms after the click (via \(pending.path, privacy: .public))")
     }
 
     /// Safari quit: forget its tabs but remember names by URL for next launch.
@@ -435,16 +446,90 @@ final class TabStore {
     func activate(_ tab: BrowserTab, instance: String) {
         let now = Date()
         let pointerDown = lastPointerDown?() ?? .distantPast
-        pendingActivation = PendingActivation(
+        activationCount += 1
+        let request = PendingActivation(
+            id: activationCount,
             key: TabKey(instance: instance, tabId: tab.id),
             clickAt: now.timeIntervalSince(pointerDown) < 1.5 ? pointerDown : now,
             requestedAt: now
         )
+        pendingActivation = request
+        let plan = switchPlan(for: tab, instance: instance)
         mutateWindow(instance: instance, windowId: tab.windowId) { window in
             for index in window.tabs.indices {
                 window.tabs[index].active = window.tabs[index].id == tab.id
             }
         }
+
+        switch plan {
+        case .push(let why):
+            log.notice("tab switch via push: \(why, privacy: .public)")
+            sendActivation(of: tab, instance: instance)
+        case .press(let target):
+            // The press is made off the main thread; the extension's command is the fallback.
+            guard let pressTab else {
+                log.notice("tab switch via push: no way to press the tab bar")
+                sendActivation(of: tab, instance: instance)
+                return
+            }
+            pendingActivation?.path = "accessibility"
+            pressTab(target) { [weak self] outcome in
+                self?.pressFinished(outcome, request: request, tab: tab, instance: instance)
+            }
+        }
+    }
+
+    /// How a click switches the tab: by pressing its button in Safari's tab bar, or by the
+    /// extension. The extension is used whenever the button can't be told for certain.
+    private enum SwitchPlan {
+        case press(TabBarTarget)
+        case push(why: String)
+    }
+
+    private func switchPlan(for tab: BrowserTab, instance: String) -> SwitchPlan {
+        // [TEMP-tabSwitchMethod]
+        guard TabSwitchMethod.current == .accessibility else {
+            return .push(why: "the tabSwitchMethod setting says push")
+        }
+        // The tab bar is the docked window's, which is the window the sidebar lists.
+        guard let selection = currentWindow, selection.instance == instance, selection.window.id == tab.windowId else {
+            return .push(why: "the tab is in a window other than the one the sidebar shows")
+        }
+        let tabs = selection.window.tabs
+        guard let position = tabs.firstIndex(where: { $0.id == tab.id }) else {
+            return .push(why: "the tab isn't in its window's list")
+        }
+        return .press(TabBarTarget(title: tab.title, position: position, windowTitles: tabs.map(\.title)))
+    }
+
+    private func pressFinished(_ outcome: TabBarPressOutcome, request: PendingActivation, tab: BrowserTab, instance: String) {
+        switch outcome {
+        case .superseded:
+            break
+        case .pressed(let milliseconds):
+            log.notice("tab switch via accessibility: pressed the tab bar's button \(milliseconds) ms after the click")
+            // A press Safari acknowledged but then didn't act on would leave the click lost. If
+            // the switch isn't confirmed in time, have the extension make it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + PendingActivation.lifetime) { [weak self] in
+                guard let self, self.pendingActivation?.id == request.id else { return }
+                self.log.notice("tab switch via push: the press wasn't confirmed within a second")
+                self.pendingActivation?.path = "accessibility, then push"
+                self.sendActivation(of: tab, instance: instance)
+            }
+        case .fallback(let reason):
+            // Only if this is still the click being waited for. If a newer click replaced it, or
+            // Safari has confirmed it meanwhile, a late command would only pull Safari the wrong way.
+            guard pendingActivation?.id == request.id else {
+                log.notice("tab switch via accessibility fell back (\(reason, privacy: .public)), but the switch was confirmed or replaced by a newer click meanwhile")
+                return
+            }
+            log.notice("tab switch via push: accessibility fell back (\(reason, privacy: .public))")
+            pendingActivation?.path = "push after accessibility fell back"
+            sendActivation(of: tab, instance: instance)
+        }
+    }
+
+    private func sendActivation(of tab: BrowserTab, instance: String) {
         send(["action": "activate", "tabId": tab.id], to: instance)
     }
 
@@ -656,13 +741,13 @@ final class TabStore {
         var orphanNames: [String: String]
     }
 
-    private static var stateURL: URL {
+    static var defaultStateURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appending(path: "Side Tabs", directoryHint: .isDirectory).appending(path: "state.json")
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: Self.stateURL),
+        guard let data = try? Data(contentsOf: stateURL),
               let state = try? JSONDecoder().decode(SavedState.self, from: data) else { return }
         bookmarks = state.bookmarks
         orphanNames = state.orphanNames
@@ -686,7 +771,7 @@ final class TabStore {
             orphanNames: orphanNames
         )
         do {
-            let url = Self.stateURL
+            let url = stateURL
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

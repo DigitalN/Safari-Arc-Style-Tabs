@@ -24,6 +24,11 @@ func snapshotObject(seq: Int, active: Int, tabs: [Int] = [1, 2, 3, 4]) -> [Strin
      "windows": [["id": 1, "focused": true, "incognito": false, "tabs": tabs.map { tab($0, active: $0 == active) }]]]
 }
 
+/// Lets time pass with the main run loop going, since the store schedules work on it.
+func wait(_ seconds: TimeInterval) {
+    RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+}
+
 func send(_ store: TabStore, _ object: [String: Any]) {
     let data = try! JSONSerialization.data(withJSONObject: object)
     _ = store.handleMessage(type: object["type"] as! String, payload: data, object: object)
@@ -39,8 +44,13 @@ func highlighted(_ store: TabStore) -> Int? {
     store.snapshots[instance]?.windows.first?.tabs.first(where: \.active)?.id
 }
 
+/// Every store here keeps its bookmarks and names in a folder of its own, never the Mac's real one.
+let stateFolder = FileManager.default.temporaryDirectory.appending(path: "side-tabs-store-checks-\(UUID().uuidString)")
+var storeCount = 0
+
 func makeStore(active: Int = 1) -> (TabStore, sent: () -> [[String: Any]]) {
-    let store = TabStore()
+    storeCount += 1
+    let store = TabStore(stateURL: stateFolder.appending(path: "state-\(storeCount).json"))
     var commands: [[String: Any]] = []
     store.sendCommand = { commands.append($0) }
     send(store, snapshotObject(seq: 1, active: active))
@@ -61,7 +71,7 @@ do {
     check(highlighted(store) == 3, "click highlights the tab at once")
     activated(store, tab: 2)
     check(highlighted(store) == 3, "a report right after a click on another tab is held back (the first click's report)")
-    Thread.sleep(forTimeInterval: 1.1)
+    wait(1.1)
     activated(store, tab: 2)
     check(highlighted(store) == 2, "once the click is stale, Safari's report moves the highlight")
     activated(store, tab: 4)
@@ -72,7 +82,7 @@ do {
     // Stale pending is also dropped by a snapshot, so a late report isn't held back by it.
     let (store, _) = makeStore()
     click(store, tab: 3)
-    Thread.sleep(forTimeInterval: 1.1)
+    wait(1.1)
     send(store, snapshotObject(seq: 2, active: 1))
     check(highlighted(store) == 1, "a snapshot after a lost switch shows where Safari is")
     activated(store, tab: 2)
@@ -132,6 +142,112 @@ do {
     activated(store, tab: 3)
     check(highlighted(store) == 3, "and so is the next one")
 }
+
+// MARK: - Switching through the tab bar, with the extension as fallback (#18)
+
+/// Runs `body` with a store whose tab-bar presses are answered by the test, and the commands sent
+/// to the extension collected.
+func withPresser(
+    method: String? = nil,
+    activeTab: Int = 1,
+    _ body: (TabStore, _ presses: () -> [(target: TabBarTarget, finish: (TabBarPressOutcome) -> Void)], _ commands: () -> [[String: Any]]) -> Void
+) {
+    // In memory only, so nothing is written to the Mac's preferences.
+    if let method {
+        UserDefaults.standard.setVolatileDomain(["tabSwitchMethod": method], forName: UserDefaults.argumentDomain)
+    }
+    defer { UserDefaults.standard.removeVolatileDomain(forName: UserDefaults.argumentDomain) }
+    let (store, commands) = makeStore(active: activeTab)
+    var presses: [(target: TabBarTarget, finish: (TabBarPressOutcome) -> Void)] = []
+    store.pressTab = { target, finish in presses.append((target, finish)) }
+    body(store, { presses }, commands)
+}
+
+func activations(_ commands: [[String: Any]]) -> [Int] {
+    commands.filter { $0["action"] as? String == "activate" }.compactMap { $0["tabId"] as? Int }
+}
+
+withPresser { store, presses, commands in
+    click(store, tab: 3)
+    check(presses().count == 1, "by default a click asks for the tab bar's button")
+    check(activations(commands()).isEmpty, "and doesn't send the extension's command yet")
+    let target = presses().first?.target
+    check(target?.title == "Tab 3" && target?.position == 2, "the target is the clicked tab and where it sits")
+    check(target?.windowTitles.compactMap { $0 } == ["Tab 1", "Tab 2", "Tab 3", "Tab 4"], "with the titles of its window's tabs")
+    check(highlighted(store) == 3, "the highlight still moves at once")
+}
+
+withPresser { store, presses, commands in
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    check(activations(commands()).isEmpty, "a press that worked sends nothing")
+    activated(store, tab: 3, seq: 2)
+    wait(1.2)
+    check(activations(commands()).isEmpty, "and nothing follows once Safari confirms the switch")
+}
+
+withPresser { store, presses, commands in
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    wait(1.2)
+    check(activations(commands()) == [3], "a press Safari never confirms is followed by the extension's command")
+}
+
+withPresser { store, presses, commands in
+    click(store, tab: 3)
+    presses()[0].finish(.fallback("the window has no tab bar"))
+    check(activations(commands()) == [3], "when the press can't be made, the extension's command is sent")
+    check(highlighted(store) == 3, "and the highlight stays")
+}
+
+withPresser { store, presses, commands in
+    click(store, tab: 2)
+    click(store, tab: 4)
+    presses()[0].finish(.fallback("the buttons don't line up"))
+    check(activations(commands()).isEmpty, "a fallback for a click that a newer click replaced sends nothing")
+    presses()[1].finish(.fallback("the buttons don't line up"))
+    check(activations(commands()) == [4], "the newer click's own fallback does")
+}
+
+withPresser { store, presses, commands in
+    click(store, tab: 3)
+    presses()[0].finish(.superseded)
+    check(activations(commands()).isEmpty, "a press that a newer one replaced before it ran sends nothing")
+}
+
+withPresser { store, presses, commands in
+    click(store, tab: 3)
+    activated(store, tab: 3, seq: 2)
+    presses()[0].finish(.fallback("Safari didn't answer in time"))
+    check(activations(commands()).isEmpty, "a fallback that arrives after Safari confirmed the switch sends nothing")
+}
+
+withPresser(method: "push") { store, presses, commands in
+    click(store, tab: 3)
+    check(presses().isEmpty, "with the setting on push, the tab bar isn't tried")
+    check(activations(commands()) == [3], "and the extension's command goes out at once")
+}
+
+withPresser(method: "accessibility") { store, presses, commands in
+    click(store, tab: 3)
+    check(presses().count == 1 && activations(commands()).isEmpty, "the setting can also say accessibility")
+}
+
+do {
+    // A tab in a window other than the one the sidebar shows can't be pressed in the docked tab bar.
+    var object = snapshotObject(seq: 5, active: 1)
+    var windows = object["windows"] as! [[String: Any]]
+    windows.append(["id": 2, "focused": false, "incognito": false, "tabs": [tab(10, active: true, windowId: 2), tab(11, windowId: 2)]])
+    object["windows"] = windows
+    withPresser { store, presses, commands in
+        send(store, object)
+        click(store, tab: 11)
+        check(presses().isEmpty, "a tab in another window isn't pressed")
+        check(activations(commands()) == [11], "it goes through the extension")
+    }
+}
+
+try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {
     print("store checks passed")

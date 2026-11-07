@@ -78,6 +78,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
         store.onOpenAddressBar = { [weak self] in self?.dock?.openSafariAddressBar() }
         store.lastPointerDown = { [weak panel] in panel?.lastMouseDown ?? .distantPast }
+        store.pressTab = { [weak self] target, completion in
+            guard let self else {
+                completion(.fallback("the app is shutting down"))
+                return
+            }
+            tracker.pressTab(target, then: completion)
+        }
 
         dock.start()
         store.requestSnapshot()
