@@ -11,6 +11,21 @@ final class TabStore {
         let window: BrowserWindow
     }
 
+    /// A tab switch the sidebar asked for that Safari hasn't confirmed yet.
+    private struct PendingActivation {
+        let key: TabKey
+        /// When the click started (the mouse-down, if there was one), to time the switch.
+        let clickAt: Date
+        /// When the switch was requested, to tell whether it's still worth waiting for.
+        let requestedAt: Date
+
+        /// A switch that's gone unconfirmed this long was lost, or Safari went somewhere else
+        /// first. Reports from Safari are no longer held back on its account.
+        static let lifetime: TimeInterval = 1
+
+        var isFresh: Bool { Date().timeIntervalSince(requestedAt) < Self.lifetime }
+    }
+
     private(set) var snapshots: [String: Snapshot] = [:]
     private(set) var lastMessageAt: Date?
     private(set) var bookmarks: [Bookmark] = []
@@ -42,9 +57,8 @@ final class TabStore {
     @ObservationIgnored private var orphanNames: [String: String] = [:]
     @ObservationIgnored private var pendingBookmarkOpens: [String: (bookmark: UUID, at: Date)] = [:]
     @ObservationIgnored private var saveWork: DispatchWorkItem?
-    /// When the last tab switch started (the click, if there was one), to log how long Safari
-    /// took to confirm it.
-    @ObservationIgnored private var pendingActivation: (key: TabKey, at: Date)?
+    /// The last tab switch the sidebar asked for, until Safari confirms it or it goes stale.
+    @ObservationIgnored private var pendingActivation: PendingActivation?
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "store")
 
     init() {
@@ -116,25 +130,42 @@ final class TabStore {
         reconcileNames(with: snapshot)
         pruneBookmarkLinks()
 
-        if let pending = pendingActivation, pending.key.instance == snapshot.instance,
-           snapshot.windows.contains(where: { $0.tabs.contains { $0.id == pending.key.tabId && $0.active } }) {
-            confirmActivation(pending)
+        if let pending = pendingActivation {
+            if pending.key.instance == snapshot.instance,
+               snapshot.windows.contains(where: { $0.tabs.contains { $0.id == pending.key.tabId && $0.active } }) {
+                confirmActivation(pending)
+            } else if !pending.isFresh {
+                dropStalePending()
+            }
         }
     }
 
     /// Moves the highlight to the tab Safari says it switched to, without waiting for a snapshot.
     private func applyActivation(instance: String, windowId: Int, tabId: Int) {
+        let pending = pendingActivation
         // After a quick second click, the report for the first switch arrives while the highlight
-        // is already on the second tab; moving it back would only make it jump.
-        let supersededByClick = pendingActivation.map { pending in
-            pending.key.instance == instance && pending.key.tabId != tabId && tab(for: pending.key)?.windowId == windowId
+        // is already on the second tab; moving it back would only make it jump. That only holds
+        // while the second click is recent: if its switch never came, Safari went somewhere
+        // else (its own tab bar, ⌘1–9, a closed tab) and the highlight has to follow it.
+        let supersededByClick = pending.map { pending in
+            pending.isFresh && pending.key.instance == instance && pending.key.tabId != tabId
+                && tab(for: pending.key)?.windowId == windowId
         } ?? false
         if !supersededByClick {
             moveHighlight(instance: instance, windowId: windowId, tabId: tabId)
         }
-        if let pending = pendingActivation, pending.key == TabKey(instance: instance, tabId: tabId) {
-            confirmActivation(pending)
+        if let pending {
+            if pending.key == TabKey(instance: instance, tabId: tabId) {
+                confirmActivation(pending)
+            } else if !pending.isFresh {
+                dropStalePending()
+            }
         }
+    }
+
+    private func dropStalePending() {
+        pendingActivation = nil
+        log.notice("tab switch was never confirmed; no longer waiting for it")
     }
 
     private func moveHighlight(instance: String, windowId: Int, tabId: Int) {
@@ -146,9 +177,9 @@ final class TabStore {
         }
     }
 
-    private func confirmActivation(_ pending: (key: TabKey, at: Date)) {
+    private func confirmActivation(_ pending: PendingActivation) {
         pendingActivation = nil
-        let milliseconds = Int(Date().timeIntervalSince(pending.at) * 1000)
+        let milliseconds = Int(Date().timeIntervalSince(pending.clickAt) * 1000)
         log.notice("tab switch confirmed by Safari \(milliseconds) ms after the click")
     }
 
@@ -377,7 +408,11 @@ final class TabStore {
     func activate(_ tab: BrowserTab, instance: String) {
         let now = Date()
         let pointerDown = lastPointerDown?() ?? .distantPast
-        pendingActivation = (TabKey(instance: instance, tabId: tab.id), now.timeIntervalSince(pointerDown) < 1.5 ? pointerDown : now)
+        pendingActivation = PendingActivation(
+            key: TabKey(instance: instance, tabId: tab.id),
+            clickAt: now.timeIntervalSince(pointerDown) < 1.5 ? pointerDown : now,
+            requestedAt: now
+        )
         mutateWindow(instance: instance, windowId: tab.windowId) { window in
             for index in window.tabs.indices {
                 window.tabs[index].active = window.tabs[index].id == tab.id
