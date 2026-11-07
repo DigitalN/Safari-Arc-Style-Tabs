@@ -1,0 +1,25 @@
+{"role":"AXWindow","subrole":"AXStandardWindow","children":[
+  {"role":"AXSplitGroup","children":[
+    {"role":"AXSplitter"},
+    {"role":"AXTabGroup","children":[
+      {"role":"AXGroup","identifier":"BrowserView?tab=1","children":[
+        {"role":"AXWebArea"}
+      ]}
+    ]}
+  ]},
+  {"role":"AXToolbar","children":[
+    {"role":"AXButton","description":"Toggle sidebar","actions":["AXPress"]},
+    {"role":"AXMenuButton","identifier":"TabGroupPickerButton?Profile","actions":["AXPress"]},
+    {"role":"AXButton","description":"Side Tabs","actions":["AXPress"]},
+    {"role":"AXGroup","children":[
+      {"role":"AXTextField","description":"smart search field"}
+    ]},
+    {"role":"AXButton","description":"Downloads","actions":["AXPress"]},
+    {"role":"AXButton","description":"Share","actions":["AXPress"]},
+    {"role":"AXButton","description":"New Tab","actions":["AXPress"]},
+    {"role":"AXButton","description":"Tab Overview","actions":["AXPress"]}
+  ]},
+  {"role":"AXButton","subrole":"AXCloseButton","actions":["AXPress"]},
+  {"role":"AXButton","subrole":"AXFullScreenButton","actions":["AXPress"]},
+  {"role":"AXButton","subrole":"AXMinimizeButton","actions":["AXPress"]}
+]}

@@ -78,6 +78,18 @@ nonisolated final class AXQuery: @unchecked Sendable {
         copy(element, attribute) as? Bool
     }
 
+    /// The actions the element can perform (`AXPress`, ...). Empty if it has none or can't be read.
+    func actionNames(_ element: AXUIElement) -> [String] {
+        AXUIElementSetMessagingTimeout(element, timeout)
+        var names: CFArray?
+        let error = AXUIElementCopyActionNames(element, &names)
+        guard error == .success else {
+            note(error)
+            return []
+        }
+        return (names as? [String]) ?? []
+    }
+
     @discardableResult
     func set(_ element: AXUIElement, _ attribute: String, _ value: CFTypeRef) -> AXError {
         AXUIElementSetMessagingTimeout(element, timeout)

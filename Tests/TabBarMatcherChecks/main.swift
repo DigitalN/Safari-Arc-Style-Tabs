@@ -2,9 +2,10 @@ import Foundation
 
 // Checks for which tab-bar button the matcher picks (#18), against fixture tab bars.
 //
-// The fixtures model the AXTabGroup of a Safari window: one radio button per tab, titled with the
-// page title, left to right. They are not dumps from a live Safari. When the live run logs a tab
-// bar that doesn't match (the app logs the buttons it saw on every fallback), add it here.
+// The fixtures model the buttons of a Safari window's tab bar: one radio button per tab, titled with
+// the page title, left to right. They are not dumps from a live Safari. When the live run logs a tab
+// bar that doesn't match (the app logs the buttons it saw on every fallback), add it here. (Finding
+// the bar in the window, from recorded trees, is checked in TabBarFinderChecks.)
 
 var failures = 0
 func check(_ condition: Bool, _ message: String, line: Int = #line) {

@@ -21,16 +21,11 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "tracker")
 
     // Only used on `queue`.
-    private var cachedTabGroup: (window: AXUIElement, group: AXUIElement)?
+    private var cachedTabBar: (window: AXUIElement, bar: AXUIElement)?
     // [TEMP-tabSwitchMethod] The fallback diagnostics (this, the `diagnostic` closures `attempt`
     // returns, `describe` and `describeChildren`) write the window's tab titles to the system log,
     // public. They are for measuring the tab bar press and go with the switch, not before.
     private var lastDiagnostic = ""
-
-    private struct Button {
-        let element: AXUIElement
-        let item: TabBarItem
-    }
 
     /// Tries to press the button for `target` in `window`'s tab bar. `completion` runs on a
     /// background queue.
@@ -72,19 +67,19 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
         }
 
         if let outcome = stop() { return (outcome, nil) }
-        guard let group = tabGroup(in: window) else {
+        guard let bar = tabBar(in: window) else {
             if let outcome = stop() { return (outcome, nil) }
             return (.fallback("the window has no tab bar"), { [self] in describeChildren(of: window) })
         }
         if let outcome = stop() { return (outcome, nil) }
-        let buttons = buttons(in: group)
+        let buttons = TabBarFinder.buttons(in: bar)
         if let outcome = stop() { return (outcome, nil) }
 
-        switch TabBarMatcher.match(target, items: buttons.map(\.item)) {
+        switch TabBarFinder.choose(target, among: buttons) {
         case .fallback(let reason):
             return (.fallback(reason), { Self.describe(buttons, for: target) })
-        case .press(let index):
-            let error = query.perform(buttons[index].element, kAXPressAction)
+        case .press(let button):
+            let error = query.perform(button.element, kAXPressAction)
             guard error == .success else {
                 let reason = query.timedOut ? "Safari didn't answer the press in time" : "the press failed (error \(error.rawValue))"
                 return (.fallback(reason), { Self.describe(buttons, for: target) })
@@ -93,77 +88,21 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
         }
     }
 
-    // MARK: - Finding the buttons
+    // MARK: - Finding the tab bar
 
     /// The window's tab bar. It stays the same element while it exists, so the last one found is
     /// tried first.
-    private func tabGroup(in window: AXUIElement) -> AXUIElement? {
-        if let cached = cachedTabGroup {
-            if CFEqual(cached.window, window), query.string(cached.group, kAXRoleAttribute) == kAXTabGroupRole {
-                return cached.group
+    private func tabBar(in window: AXUIElement) -> AXTabBarNode? {
+        if let cached = cachedTabBar {
+            if CFEqual(cached.window, window), let node = AXTabBarNode(cached.bar, query: query),
+               TabBarFinder.isTabBar(identifier: node.identifier, subrole: node.subrole) {
+                return node
             }
-            cachedTabGroup = nil
+            cachedTabBar = nil
         }
-        guard let group = findTabGroup(in: window, depth: 3) else { return nil }
-        cachedTabGroup = (window, group)
-        return group
-    }
-
-    /// Looks among the window's children, and inside its toolbars and groups (Safari's compact tab
-    /// layout puts the tabs in the toolbar), but never into the page.
-    private func findTabGroup(in container: AXUIElement, depth: Int) -> AXUIElement? {
-        var inner: [AXUIElement] = []
-        for child in query.elements(container, kAXChildrenAttribute) {
-            guard let role = query.string(child, kAXRoleAttribute) else { continue }
-            if role == kAXTabGroupRole {
-                return child
-            }
-            if role == kAXToolbarRole || role == kAXGroupRole {
-                inner.append(child)
-            }
-            if query.timedOut { return nil }
-        }
-        guard depth > 1 else { return nil }
-        for child in inner {
-            if let found = findTabGroup(in: child, depth: depth - 1) {
-                return found
-            }
-        }
-        return nil
-    }
-
-    /// The tab buttons of a tab bar, with their titles and where they are. Safari draws the tabs
-    /// as radio buttons; the bar's "+" is a plain button and isn't one of them.
-    private func buttons(in group: AXUIElement) -> [Button] {
-        var candidates = query.elements(group, kAXChildrenAttribute)
-        var buttons = read(candidates)
-        if buttons.isEmpty {
-            candidates = query.elements(group, kAXTabsAttribute)
-            buttons = read(candidates)
-        }
-        return buttons
-    }
-
-    private func read(_ elements: [AXUIElement]) -> [Button] {
-        let attributes = [kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXPositionAttribute]
-        var buttons: [Button] = []
-        for element in elements {
-            guard let values = query.copyMultiple(element, attributes), values.count == attributes.count else {
-                if query.timedOut { return [] }
-                continue
-            }
-            guard values[0] as? String == kAXRadioButtonRole else { continue }
-            let title = (values[1] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? values[2] as? String
-            var x: CGFloat?
-            if let value = values[3], CFGetTypeID(value) == AXValueGetTypeID() {
-                var point = CGPoint.zero
-                if AXValueGetValue(value as! AXValue, .cgPoint, &point) {
-                    x = point.x
-                }
-            }
-            buttons.append(Button(element: element, item: TabBarItem(title: title, x: x)))
-        }
-        return buttons
+        guard let root = AXTabBarNode(window, query: query), let bar = TabBarFinder.tabBar(in: root) else { return nil }
+        cachedTabBar = (window, bar.element)
+        return bar
     }
 
     // MARK: - Explaining a fallback
@@ -174,7 +113,7 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
     /// [TEMP-tabSwitchMethod] Puts up to eight of the window's tab titles in the log. Browsing
     /// titles shouldn't stay in the system log once the measurements are done: delete this and
     /// `describeChildren` with the rest of the marked code.
-    private static func describe(_ buttons: [Button], for target: TabBarTarget) -> String {
+    private static func describe(_ buttons: [TabBarButton<AXTabBarNode>], for target: TabBarTarget) -> String {
         func quoted(_ title: String?) -> String {
             let text = TabBarMatcher.normalized(title)
             return "“" + (text.count > 28 ? String(text.prefix(28)) + "…" : text) + "”"
@@ -186,8 +125,64 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
     }
 
     // [TEMP-tabSwitchMethod] Part of the same diagnostics (it names no titles, but is only used by them).
+    /// What the search looked through, so a layout it doesn't know can be told from a window that
+    /// really has no tab bar: each element as `role/subrole#identifier`, with `>` marks for its depth.
     private func describeChildren(of window: AXUIElement) -> String {
-        let roles = query.elements(window, kAXChildrenAttribute).map { query.string($0, kAXRoleAttribute) ?? "?" }
-        return "no tab bar among the window's children: \(roles.joined(separator: ", "))"
+        var lines: [String] = []
+        func visit(_ element: AXUIElement, depth: Int) {
+            guard lines.count < 40, depth <= TabBarFinder.searchDepth else { return }
+            for child in query.elements(element, kAXChildrenAttribute) {
+                guard let node = AXTabBarNode(child, query: query) else { continue }
+                let subrole = node.subrole.map { "/" + $0 } ?? ""
+                // Up to the first "=": identifiers carry values such as the profile's name.
+                let identifier = node.identifier.map { "#" + String($0.prefix(while: { $0 != "=" }).prefix(32)) } ?? ""
+                lines.append(String(repeating: ">", count: depth) + (node.role ?? "?") + subrole + identifier)
+                if let role = node.role, ["AXToolbar", "AXGroup", "AXSplitGroup"].contains(role) {
+                    visit(child, depth: depth + 1)
+                }
+            }
+        }
+        visit(window, depth: 1)
+        return "no tab bar found: \(lines.joined(separator: " "))"
+    }
+}
+
+/// An element of Safari's Accessibility tree, read through `AXQuery`. Every element is read with
+/// one round trip to Safari.
+nonisolated struct AXTabBarNode: TabBarNode {
+    let element: AXUIElement
+    private let query: AXQuery
+    let role: String?
+    let subrole: String?
+    let identifier: String?
+    let title: String?
+    let descriptionText: String?
+    let x: CGFloat?
+
+    /// nil if Safari doesn't answer for the element (it went away, or it's too slow).
+    init?(_ element: AXUIElement, query: AXQuery) {
+        let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXIdentifierAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXPositionAttribute]
+        guard let values = query.copyMultiple(element, attributes), values.count == attributes.count else { return nil }
+        self.element = element
+        self.query = query
+        role = values[0] as? String
+        subrole = values[1] as? String
+        identifier = values[2] as? String
+        title = values[3] as? String
+        descriptionText = values[4] as? String
+        var x: CGFloat?
+        if let value = values[5], CFGetTypeID(value) == AXValueGetTypeID() {
+            var point = CGPoint.zero
+            if AXValueGetValue(value as! AXValue, .cgPoint, &point) {
+                x = point.x
+            }
+        }
+        self.x = x
+    }
+
+    var actions: [String] { query.actionNames(element) }
+
+    func children() -> [AXTabBarNode] {
+        query.elements(element, kAXChildrenAttribute).compactMap { AXTabBarNode($0, query: query) }
     }
 }

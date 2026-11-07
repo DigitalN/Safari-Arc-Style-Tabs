@@ -32,6 +32,11 @@ echo "== tab bar matcher"
 swiftc -o "$WORK/matcher-checks" Tests/TabBarMatcherChecks/main.swift SideTabs/TabBarMatcher.swift
 "$WORK/matcher-checks"
 
+echo "== tab bar finder"
+swiftc -o "$WORK/finder-checks" \
+    Tests/TabBarFinderChecks/main.swift SideTabs/TabBarFinder.swift SideTabs/TabBarMatcher.swift
+"$WORK/finder-checks"
+
 echo "== row press"
 swiftc -o "$WORK/row-press-checks" Tests/RowPressChecks/main.swift SideTabs/RowPress.swift
 "$WORK/row-press-checks"
