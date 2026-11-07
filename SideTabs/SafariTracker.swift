@@ -42,6 +42,12 @@ final class SafariTracker {
     private var observer: AXObserver?
     /// Safari's File → Open Location… menu item, found once per Safari launch.
     private var openLocationItem: AXUIElement?
+    /// The window Safari last reported as focused, kept up to date by its notifications and
+    /// the periodic refresh, so a click doesn't have to ask Safari on every mouse-down.
+    private var focusedWindow: AXUIElement?
+    /// Accessibility calls made while handling a click run here, so a busy Safari (each call
+    /// waits for Safari's main thread, up to several seconds) never holds up the sidebar.
+    private let clickQueue = DispatchQueue(label: "com.digitaln.sidetabs.accessibility-click", qos: .userInteractive)
     private var workspaceTokens: [NSObjectProtocol] = []
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "tracker")
     private var lastWindowDescription = ""
@@ -178,6 +184,7 @@ final class SafariTracker {
         observer = nil
         appElement = nil
         window = nil
+        focusedWindow = nil
         openLocationItem = nil
     }
 
@@ -221,6 +228,7 @@ final class SafariTracker {
     private func chooseWindow() -> AXUIElement? {
         guard let appElement else { return nil }
         let focused = element(appElement, kAXFocusedWindowAttribute)
+        focusedWindow = focused
         if let focused, isBrowserWindow(focused) {
             return focused
         }
@@ -422,19 +430,34 @@ final class SafariTracker {
     /// Tabs never is (its sidebar doesn't take focus). So ask through Accessibility first,
     /// then the usual way, and if Safari still isn't in front shortly after, have
     /// LaunchServices open it, which brings an already-running app forward.
+    ///
+    /// The Accessibility calls wait on Safari, so they run off the main thread.
     func focusSafari(then completion: (() -> Void)? = nil) {
         guard let app, !app.isTerminated else { return }
-        if let window {
-            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        let window = window
+        let appElement = appElement
+        clickQueue.async { [weak self] in
+            if let window {
+                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.isSafariFrontmost {
+                    completion?()
+                    return
+                }
+                self.clickQueue.async {
+                    if let appElement {
+                        AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                    }
+                    DispatchQueue.main.async { self.activate(app, then: completion) }
+                }
+            }
         }
-        if isSafariFrontmost {
-            completion?()
-            return
-        }
-        if let appElement {
-            AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-        }
+    }
+
+    private func activate(_ app: NSRunningApplication, then completion: (() -> Void)?) {
         app.activate(from: .current, options: [])
 
         waitForSafari(attempts: 6) { [weak self] inFront in
@@ -458,13 +481,19 @@ final class SafariTracker {
 
     /// When Safari is in front but another of its windows has focus (Settings, a second
     /// window), makes the window the sidebar is docked to the focused one.
+    ///
+    /// Safari's notifications keep `focusedWindow` current, so the usual click, with the
+    /// docked window already focused, makes no Accessibility call at all. Otherwise the
+    /// raise is sent off the main thread.
     func raiseDockedWindowIfNeeded() {
-        guard let appElement, let window else { return }
-        if let focused = element(appElement, kAXFocusedWindowAttribute), CFEqual(focused, window) {
+        guard let window else { return }
+        if let focusedWindow, CFEqual(focusedWindow, window) {
             return
         }
-        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        clickQueue.async {
+            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        }
     }
 
     /// Polls every 25 ms until Safari is the frontmost app or the attempts run out.
