@@ -116,6 +116,7 @@ struct TabRow: View {
         .help(tooltip)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(tab.active ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { store.activate(tab, instance: instance) }
     }
 
     /// Whether a press at `point` (window coordinates) landed on the mute or close button.
