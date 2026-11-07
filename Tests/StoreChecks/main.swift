@@ -567,6 +567,58 @@ withPresser(method: "push") { store, presses, commands in
 
 // MARK: - Fixes found alongside (#21)
 
+/// A snapshot of windows whose active tabs have these titles; `focused` is the window id Safari says has focus.
+func windowsSnapshot(seq: Int, focused: Int, _ windows: [(id: Int, activeTitle: String, incognito: Bool)]) -> [String: Any] {
+    ["type": "snapshot", "instance": instance, "seq": seq, "focusedWindowId": focused, "lastFocusedWindowId": focused,
+     "focusChangedAt": 1.0,
+     "windows": windows.map { window -> [String: Any] in
+        ["id": window.id, "focused": window.id == focused, "incognito": window.incognito,
+         "tabs": [["id": window.id * 100, "windowId": window.id, "index": 0, "title": window.activeTitle,
+                   "url": "https://example.com/\(window.id)", "active": true, "pinned": false, "audible": false,
+                   "muted": false, "loading": false] as [String: Any]]]
+     }]
+}
+
+do {
+    // Item 3: Safari titles a window in a profile "<profile> — <page title>".
+    let (store, commands) = makeStore(active: 2)
+    store.dockedWindowTitle = "Tab 2"
+    check(snapshotRequests(commands()) == 0, "a window titled like its page is known")
+    store.dockedWindowTitle = "Personal — Tab 2"
+    check(snapshotRequests(commands()) == 0, "so is one titled with its profile's name in front")
+    store.dockedWindowTitle = "Personal — Something else"
+    check(snapshotRequests(commands()) == 1, "a title that fits no window still asks for a snapshot")
+}
+
+do {
+    // The same page title in two windows, in a profile window and one without: the docked window's title picks.
+    let (store, _) = makeStore()
+    send(store, windowsSnapshot(seq: 5, focused: 2, [(1, "Docs — Intro", false), (2, "Intro", false)]))
+    check(store.currentWindow?.window.id == 2, "the focused window is shown to begin with")
+    store.dockedWindowTitle = "Docs — Intro"
+    check(store.currentWindow?.window.id == 1, "a page title that itself contains \" — \" matches its window exactly, not the one it ends with")
+    store.dockedWindowTitle = "Personal — Docs — Intro"
+    check(store.currentWindow?.window.id == 1, "with a profile name in front, the window whose title is longest and fits is the one")
+    store.dockedWindowTitle = "Personal — Intro"
+    check(store.currentWindow?.window.id == 2, "and \"Intro\" in that profile is the other window")
+}
+
+do {
+    // A title that only ends the same way isn't a match without the separator.
+    let (store, commands) = makeStore()
+    send(store, windowsSnapshot(seq: 5, focused: 1, [(1, "Home", false)]))
+    store.dockedWindowTitle = "My Home"
+    check(snapshotRequests(commands()) == 1, "\"My Home\" is not the window titled \"Home\"")
+}
+
+do {
+    // Private windows keep their rule: the page title is somewhere in the title.
+    let (store, commands) = makeStore()
+    send(store, windowsSnapshot(seq: 5, focused: 1, [(1, "Apple", true)]))
+    store.dockedWindowTitle = "Apple, Private Browsing"
+    check(snapshotRequests(commands()) == 0, "a private window's title only has to contain the page title")
+}
+
 do {
     // Item 2: the icon changes at once, and the snapshot that follows settles it.
     let (store, commands) = makeStore()

@@ -320,18 +320,12 @@ final class TabStore {
     /// Window, relaunch), so when the docked window matches nothing we know, ask again.
     private func requestSnapshotIfUnknown(title: String?) {
         guard let title, !title.isEmpty else { return }
-        let known = snapshots.values.contains { snapshot in
-            snapshot.windows.contains { isDockedWindow($0, title: title) }
-        }
-        guard !known, Date().timeIntervalSince(lastSnapshotRequest) > 0.5 else { return }
+        guard dockedWindows(title: title).isEmpty, Date().timeIntervalSince(lastSnapshotRequest) > 0.5 else { return }
         requestSnapshot()
         // Titles can lag behind while a page loads; check once more shortly after.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self, self.dockedWindowTitle == title else { return }
-            let stillUnknown = !self.snapshots.values.contains { snapshot in
-                snapshot.windows.contains { self.isDockedWindow($0, title: title) }
-            }
-            if stillUnknown {
+            if self.dockedWindows(title: title).isEmpty {
                 self.requestSnapshot()
             }
         }
@@ -369,13 +363,9 @@ final class TabStore {
             best = WindowSelection(instance: snapshot.instance, window: snapshot.windows[0])
         }
 
-        if let title = dockedWindowTitle, !title.isEmpty, let current = best, !isDockedWindow(current.window, title: title) {
-            let matches = snapshots.values.flatMap { snapshot in
-                snapshot.windows
-                    .filter { isDockedWindow($0, title: title) }
-                    .map { WindowSelection(instance: snapshot.instance, window: $0) }
-            }
-            if matches.count == 1 {
+        if let title = dockedWindowTitle, !title.isEmpty, let current = best {
+            let matches = dockedWindows(title: title)
+            if matches.count == 1, matches[0] != current {
                 return matches[0]
             }
         }
@@ -386,12 +376,28 @@ final class TabStore {
         window.tabs.first(where: \.active)?.title
     }
 
-    /// Whether `title`, the title Safari gives the docked window, is this window's. Safari
-    /// titles a window after its current page, plus a note in private windows (“Apple, Private
+    /// The windows that `title`, the title Safari gives the docked window, can belong to. Safari
+    /// titles a window after its current page; in a profile the page title follows the profile's
+    /// name and an em dash ("Personal — Apple"); and a private window adds a note (“Apple, Private
     /// Browsing”, worded for the user's language), so there the page title only has to be in it.
-    private func isDockedWindow(_ window: BrowserWindow, title: String) -> Bool {
-        guard let active = activeTitle(of: window), !active.isEmpty else { return false }
-        return active == title || window.incognito && title.contains(active)
+    ///
+    /// The profile's name isn't known here, so a title fits a window when it ends with the
+    /// window's page title after a " — ". A page title can contain " — " itself, and then a
+    /// shorter page title in another window fits as well ("Docs — Intro" ends with " — Intro"),
+    /// so of the windows that fit, only those with the longest page title are returned. That one is
+    /// the right window; the shorter one would need the profile to be called "Docs".
+    private func dockedWindows(title: String) -> [WindowSelection] {
+        var matches: [(selection: WindowSelection, length: Int)] = []
+        for snapshot in snapshots.values {
+            for window in snapshot.windows {
+                guard let active = activeTitle(of: window), !active.isEmpty else { continue }
+                if active == title || title.hasSuffix(" — " + active) || window.incognito && title.contains(active) {
+                    matches.append((WindowSelection(instance: snapshot.instance, window: window), active.count))
+                }
+            }
+        }
+        let longest = matches.map(\.length).max()
+        return matches.filter { $0.length == longest }.map(\.selection)
     }
 
     // MARK: - Tab names
