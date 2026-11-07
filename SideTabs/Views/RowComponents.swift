@@ -74,12 +74,21 @@ struct RowBackground: View {
     }
 }
 
+extension View {
+    /// Reports this view's frame in the window's coordinates, whenever it changes.
+    func onWindowFrame(_ action: @escaping (CGRect) -> Void) -> some View {
+        onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .global)
+        } action: { frame in
+            action(frame)
+        }
+    }
+}
+
 struct SidebarIconButton: View {
     let systemImage: String
     let help: String
     var size: CGFloat = 11
-    /// Lets the row around the button tell a press on the button from a press on the row.
-    var onHover: ((Bool) -> Void)? = nil
     let action: () -> Void
     @State private var hovering = false
 
@@ -93,10 +102,7 @@ struct SidebarIconButton: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
-        .background(MouseTracking(onHover: {
-            hovering = $0
-            onHover?($0)
-        }))
+        .background(MouseTracking(onHover: { hovering = $0 }))
         .help(help)
         .accessibilityLabel(help)
     }

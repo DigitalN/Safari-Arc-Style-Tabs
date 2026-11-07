@@ -14,12 +14,15 @@ struct TabRow: View {
     /// cancelled*, and doesn't call `onEnded` for a cancelled one, so a single cancelled press
     /// can't leave the row ignoring every press after it.
     @GestureState private var pressInProgress = false
-    /// The pointer is over the mute or close button, whose presses belong to the button.
-    @State private var overControl = false
+    /// Where the mute and close buttons are, in the window's coordinates. Presses on them
+    /// belong to the button, not the row. Only trusted while the button is showing.
+    @State private var muteFrame = CGRect.zero
+    @State private var closeFrame = CGRect.zero
 
     private var key: TabKey { TabKey(instance: instance, tabId: tab.id) }
     private var isSlot: Bool { drag.isSlot(tab: tab) }
     private var isRenaming: Bool { store.renaming == .tab(key) }
+    private var showsMute: Bool { tab.audible || tab.muted }
     private var showsClose: Bool {
         !isRenaming && (settings.closeButtonMode == .always || hovering || tab.active)
     }
@@ -50,22 +53,23 @@ struct TabRow: View {
 
             Spacer(minLength: 0)
 
-            if tab.audible || tab.muted {
+            if showsMute {
                 SidebarIconButton(
                     systemImage: tab.muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
                     help: tab.muted ? "Unmute Tab" : "Mute Tab",
-                    size: 10,
-                    onHover: { overControl = $0 }
+                    size: 10
                 ) {
                     store.setMuted(!tab.muted, tab: tab, instance: instance)
                 }
+                .onWindowFrame { muteFrame = $0 }
             }
 
             ZStack {
                 if showsClose {
-                    SidebarIconButton(systemImage: "xmark", help: "Close Tab", size: 9, onHover: { overControl = $0 }) {
+                    SidebarIconButton(systemImage: "xmark", help: "Close Tab", size: 9) {
                         store.close([tab], instance: instance)
                     }
+                    .onWindowFrame { closeFrame = $0 }
                 } else if tab.pinned {
                     Image(systemName: "pin.fill")
                         .font(.system(size: 9))
@@ -92,11 +96,11 @@ struct TabRow: View {
         // double-click renames instead. A separate double-tap gesture would make SwiftUI hold
         // every single click for the double-click interval, so the click count is read here.
         .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .updating($pressInProgress) { _, inProgress, _ in
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .updating($pressInProgress) { value, inProgress, _ in
                     guard !inProgress else { return }
                     inProgress = true
-                    press()
+                    press(at: value.startLocation)
                 }
         )
         .sidebarDraggable(
@@ -114,10 +118,18 @@ struct TabRow: View {
         .accessibilityAddTraits(tab.active ? [.isButton, .isSelected] : .isButton)
     }
 
+    /// Whether a press at `point` (window coordinates) landed on the mute or close button.
+    /// Decided from where the press landed, not from hover state: a button that disappears
+    /// under the pointer never reports the pointer leaving, which would leave the row
+    /// ignoring every press.
+    private func isOnControl(_ point: CGPoint) -> Bool {
+        (showsMute && muteFrame.containsCircle(point)) || (showsClose && closeFrame.containsCircle(point))
+    }
+
     /// The first event of a press. Runs while the mouse-down is being dispatched, which is
     /// when `NSApp.currentEvent` still has the click count.
-    private func press() {
-        guard !isRenaming, !overControl else { return }
+    private func press(at point: CGPoint) {
+        guard !isRenaming, !isOnControl(point) else { return }
         if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
             store.beginRename(.tab(key))
         } else {
@@ -154,6 +166,14 @@ struct TabRow: View {
         Button("Close Tab") { store.close([tab], instance: instance) }
         Button("Close Other Tabs") { store.closeOtherTabs(than: tab, instance: instance) }
         Button("Close Tabs Below") { store.closeTabsBelow(tab, instance: instance) }
+    }
+}
+
+private extension CGRect {
+    /// Whether `point` is inside the circle that fills this (square) rect, which is the shape
+    /// of the row's icon buttons.
+    func containsCircle(_ point: CGPoint) -> Bool {
+        !isEmpty && hypot(point.x - midX, point.y - midY) <= min(width, height) / 2
     }
 }
 
