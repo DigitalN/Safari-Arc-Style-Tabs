@@ -13,6 +13,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 echo "== background.js"
 node --check WebExtension/background.js
+node Tests/ExtensionChecks/background-checks.js
 
 # TabStore reads and may write ~/Library/Application Support/Side Tabs; point HOME at an
 # empty folder so the checks can't touch the real file.

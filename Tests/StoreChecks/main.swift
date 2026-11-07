@@ -90,6 +90,49 @@ do {
     check(highlighted(store) == 3, "report for the second click confirms it")
 }
 
+// MARK: - Reports that arrive out of order (#17 item 2)
+
+do {
+    // An `activated` report numbered below a snapshot already applied is older than it.
+    let (store, _) = makeStore()
+    send(store, snapshotObject(seq: 5, active: 3))
+    activated(store, tab: 2, seq: 4)
+    check(highlighted(store) == 3, "a report older than the last snapshot is ignored")
+    activated(store, tab: 4, seq: 6)
+    check(highlighted(store) == 4, "a report newer than the last snapshot is applied")
+}
+
+do {
+    // Two reports swapped on the way.
+    let (store, _) = makeStore()
+    activated(store, tab: 4, seq: 7)
+    activated(store, tab: 2, seq: 6)
+    check(highlighted(store) == 4, "an older report arriving after a newer one is ignored")
+    activated(store, tab: 4, seq: 7)
+    check(highlighted(store) == 4, "a repeated report changes nothing")
+}
+
+do {
+    // The report overtakes the snapshot that was started before it.
+    let (store, _) = makeStore()
+    activated(store, tab: 4, seq: 8)
+    send(store, snapshotObject(seq: 7, active: 2))
+    check(highlighted(store) == 4, "a snapshot started before a report doesn't move the highlight back")
+    send(store, snapshotObject(seq: 9, active: 1))
+    check(highlighted(store) == 1, "a snapshot started after the report is believed")
+    activated(store, tab: 3, seq: 10)
+    check(highlighted(store) == 3, "and reports after it apply again")
+}
+
+do {
+    // An older extension page that sends no number still works.
+    let (store, _) = makeStore()
+    activated(store, tab: 2)
+    check(highlighted(store) == 2, "a report without a seq is applied")
+    activated(store, tab: 3)
+    check(highlighted(store) == 3, "and so is the next one")
+}
+
 if failures == 0 {
     print("store checks passed")
 } else {

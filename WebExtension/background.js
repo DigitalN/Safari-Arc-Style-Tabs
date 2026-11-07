@@ -17,7 +17,11 @@ const HEARTBEAT_MS = 5000;
 // app can keep profiles apart and notice when Safari restarts.
 const instance = (crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+// Counts snapshots and `activated` reports together, so the app can tell which of two
+// messages is newer even when they arrive out of order: each one is a separate native
+// message, and nothing orders them on the way.
 let seq = 0;
+// The last snapshot the app confirmed receiving.
 let sentSeq = 0;
 let focusedWindowId = WINDOW_ID_NONE;
 let lastFocusedWindowId = null;
@@ -46,6 +50,10 @@ function serializeTab(tab) {
 }
 
 async function buildSnapshot() {
+    // The number is taken before asking Safari anything. Every report numbered lower
+    // happened before the queries below, so the snapshot includes it; a higher-numbered one
+    // may or may not be in it, and the app applies it after the snapshot.
+    const snapshotSeq = ++seq;
     // Query tabs directly rather than windows.getAll({ populate: true }), which can
     // return windows without their tabs while Safari is still restoring them.
     const [windows, tabs] = await Promise.all([browser.windows.getAll(), browser.tabs.query({})]);
@@ -67,7 +75,7 @@ async function buildSnapshot() {
     return {
         type: "snapshot",
         instance,
-        seq: ++seq,
+        seq: snapshotSeq,
         focusedWindowId,
         lastFocusedWindowId,
         focusChangedAt,
@@ -310,7 +318,7 @@ browser.tabs.onCreated.addListener(() => scheduleSnapshot());
 browser.tabs.onActivated.addListener((info) => {
     // Building a snapshot takes a while with many tabs; the app only needs this much to
     // move the highlight and know the switch happened.
-    postToApp({ type: "activated", instance, windowId: info.windowId, tabId: info.tabId });
+    postToApp({ type: "activated", instance, seq: ++seq, windowId: info.windowId, tabId: info.tabId });
     scheduleSnapshot(0);
 });
 browser.tabs.onMoved.addListener(() => scheduleSnapshot());

@@ -59,6 +59,9 @@ final class TabStore {
     @ObservationIgnored private var saveWork: DispatchWorkItem?
     /// The last tab switch the sidebar asked for, until Safari confirms it or it goes stale.
     @ObservationIgnored private var pendingActivation: PendingActivation?
+    /// The newest `activated` report applied for each extension instance, so an older one that
+    /// arrives late is ignored, and a snapshot older than it doesn't undo it.
+    @ObservationIgnored private var lastActivation: [String: (seq: Int, windowId: Int, tabId: Int)] = [:]
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "store")
 
     init() {
@@ -84,7 +87,7 @@ final class TabStore {
             if let instance = object["instance"] as? String,
                let windowId = object["windowId"] as? Int,
                let tabId = object["tabId"] as? Int {
-                applyActivation(instance: instance, windowId: windowId, tabId: tabId)
+                applyActivation(instance: instance, windowId: windowId, tabId: tabId, seq: object["seq"] as? Int)
             }
             return [:]
 
@@ -130,6 +133,12 @@ final class TabStore {
         reconcileNames(with: snapshot)
         pruneBookmarkLinks()
 
+        // A report sent after this snapshot was started can have arrived first. The snapshot
+        // may not know about it yet, so it must not move the highlight back.
+        if let last = lastActivation[snapshot.instance], last.seq > snapshot.seq {
+            moveHighlight(instance: snapshot.instance, windowId: last.windowId, tabId: last.tabId)
+        }
+
         if let pending = pendingActivation {
             if pending.key.instance == snapshot.instance,
                snapshot.windows.contains(where: { $0.tabs.contains { $0.id == pending.key.tabId && $0.active } }) {
@@ -141,7 +150,18 @@ final class TabStore {
     }
 
     /// Moves the highlight to the tab Safari says it switched to, without waiting for a snapshot.
-    private func applyActivation(instance: String, windowId: Int, tabId: Int) {
+    /// `seq` numbers the report together with the instance's snapshots; without one (an older
+    /// extension still running) the report is taken as the newest.
+    private func applyActivation(instance: String, windowId: Int, tabId: Int, seq: Int?) {
+        if let seq {
+            // Reports are separate messages and can arrive out of order. One older than a
+            // snapshot or report already applied describes a tab Safari has since left.
+            if seq <= (snapshots[instance]?.seq ?? -1) || seq <= (lastActivation[instance]?.seq ?? -1) {
+                log.info("ignoring an older tab switch report (\(seq)) from \(instance.prefix(8), privacy: .public)")
+                return
+            }
+            lastActivation[instance] = (seq, windowId, tabId)
+        }
         let pending = pendingActivation
         // After a quick second click, the report for the first switch arrives while the highlight
         // is already on the second tab; moving it back would only make it jump. That only holds
@@ -186,6 +206,7 @@ final class TabStore {
     /// Safari quit: forget its tabs but remember names by URL for next launch.
     func safariDidTerminate() {
         snapshots.removeAll()
+        lastActivation.removeAll()
         orphanNamesOfDeadInstances()
         bookmarkLinks.removeAll()
         pendingBookmarkOpens.removeAll()
