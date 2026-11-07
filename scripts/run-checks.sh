@@ -22,6 +22,11 @@ swiftc -o "$WORK/store-checks" \
     Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift Shared/Bridge.swift
 HOME="$WORK" "$WORK/store-checks"
 
+echo "== click actions"
+swiftc -o "$WORK/click-checks" \
+    Tests/ClickActionsChecks/main.swift SideTabs/ClickActions.swift SideTabs/AccessibilityQuery.swift Shared/Bridge.swift
+"$WORK/click-checks"
+
 # A quick compile check of the app's Swift sources (no signing, no packaging). The full
 # build is scripts/build.sh.
 echo "== app sources"

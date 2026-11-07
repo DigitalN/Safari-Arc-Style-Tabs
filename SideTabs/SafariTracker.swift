@@ -40,14 +40,11 @@ final class SafariTracker {
 
     private var appElement: AXUIElement?
     private var observer: AXObserver?
-    /// Safari's File → Open Location… menu item, found once per Safari launch.
-    private var openLocationItem: AXUIElement?
     /// The window Safari last reported as focused, kept up to date by its notifications and
     /// the periodic refresh, so a click doesn't have to ask Safari on every mouse-down.
     private var focusedWindow: AXUIElement?
-    /// Accessibility calls made while handling a click run here, so a busy Safari (each call
-    /// waits for Safari's main thread, up to several seconds) never holds up the sidebar.
-    private let clickQueue = DispatchQueue(label: "com.digitaln.sidetabs.accessibility-click", qos: .userInteractive)
+    /// The Accessibility requests a click makes of Safari, which run off the main thread.
+    private let clickActions = ClickActions()
     private var workspaceTokens: [NSObjectProtocol] = []
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "tracker")
     private var lastWindowDescription = ""
@@ -185,7 +182,7 @@ final class SafariTracker {
         appElement = nil
         window = nil
         focusedWindow = nil
-        openLocationItem = nil
+        clickActions.forgetMenuItem()
     }
 
     private func handle(_ name: String, element: AXUIElement) {
@@ -377,88 +374,31 @@ final class SafariTracker {
         return Int(id)
     }
 
-    /// Puts the cursor in Safari's own address bar, like pressing ⌘L. Presses the menu
-    /// item whose shortcut is ⌘L (so it works in any language and keyboard layout), or
-    /// sends the keystroke if that item can't be found.
+    /// Puts the cursor in Safari's own address bar, like pressing ⌘L, once Safari is in front.
     func openLocation() {
         focusSafari { [weak self] in
-            self?.pressOpenLocation()
+            guard let self, let appElement, let pid = app?.processIdentifier else { return }
+            // Part of the click that brought Safari forward, so it runs after that click's
+            // raise, and is dropped if the user has clicked something else since.
+            clickActions.pressOpenLocation(application: appElement, processIdentifier: pid, ticket: clickActions.currentTicket())
         }
-    }
-
-    private func pressOpenLocation() {
-        if openLocationItem == nil {
-            openLocationItem = findMenuItem(commandKey: "L")
-        }
-        if let item = openLocationItem, AXUIElementPerformAction(item, kAXPressAction as CFString) == .success {
-            return
-        }
-        openLocationItem = nil
-        log.notice("Open Location menu item not found; sending ⌘L instead")
-        guard let pid = app?.processIdentifier else { return }
-        let source = CGEventSource(stateID: .hidSystemState)
-        for keyDown in [true, false] {
-            let event = CGEvent(keyboardEventSource: source, virtualKey: 0x25, keyDown: keyDown) // L
-            event?.flags = .maskCommand
-            event?.postToPid(pid)
-        }
-    }
-
-    /// A menu item whose shortcut is ⌘ plus `commandKey`. Starts with the File menu,
-    /// where Open Location lives, to keep the search short.
-    private func findMenuItem(commandKey: String) -> AXUIElement? {
-        guard let appElement, let menuBar = element(appElement, kAXMenuBarAttribute) else { return nil }
-        var menus = elements(menuBar, kAXChildrenAttribute)
-        if menus.count > 2 {
-            menus.insert(menus.remove(at: 2), at: 0)
-        }
-        for menuBarItem in menus {
-            for menu in elements(menuBarItem, kAXChildrenAttribute) {
-                for item in elements(menu, kAXChildrenAttribute) {
-                    guard string(item, kAXMenuItemCmdCharAttribute) == commandKey,
-                          (copy(item, kAXMenuItemCmdModifiersAttribute) as? Int) == 0 else { continue }
-                    return item
-                }
-            }
-        }
-        return nil
     }
 
     /// Brings Safari and the docked window to the front.
     ///
     /// macOS ignores ordinary activation requests from apps that aren't in front, and Side
-    /// Tabs never is (its sidebar doesn't take focus). So ask through Accessibility first,
-    /// then the usual way, and if Safari still isn't in front shortly after, have
-    /// LaunchServices open it, which brings an already-running app forward.
+    /// Tabs never is (its sidebar doesn't take focus). So the usual request, which costs
+    /// nothing, goes out at once on the main thread, together with the Accessibility ones
+    /// (raise the window, make Safari frontmost). If Safari still isn't in front shortly
+    /// after, LaunchServices is asked to open it, which brings an already-running app forward.
     ///
-    /// The Accessibility calls wait on Safari, so they run off the main thread.
+    /// The Accessibility calls wait on Safari, so they run off the main thread, with a short
+    /// timeout, and are skipped if the user has clicked again or the request has gone stale.
     func focusSafari(then completion: (() -> Void)? = nil) {
         guard let app, !app.isTerminated else { return }
-        let window = window
-        let appElement = appElement
-        clickQueue.async { [weak self] in
-            if let window {
-                AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if self.isSafariFrontmost {
-                    completion?()
-                    return
-                }
-                self.clickQueue.async {
-                    if let appElement {
-                        AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-                    }
-                    DispatchQueue.main.async { self.activate(app, then: completion) }
-                }
-            }
-        }
-    }
-
-    private func activate(_ app: NSRunningApplication, then completion: (() -> Void)?) {
+        let ticket = clickActions.newTicket()
         app.activate(from: .current, options: [])
+        clickActions.bringForward(window: window, application: appElement, ticket: ticket)
 
         waitForSafari(attempts: 6) { [weak self] inFront in
             guard let self else { return }
@@ -466,8 +406,9 @@ final class SafariTracker {
                 completion?()
                 return
             }
+            // By now the user may have gone elsewhere; don't pull Safari forward over it.
+            guard !ticket.isStale, let url = app.bundleURL else { return }
             self.log.notice("Safari didn't come forward; asking LaunchServices")
-            guard let url = app.bundleURL else { return }
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = true
             configuration.addsToRecentItems = false
@@ -490,10 +431,7 @@ final class SafariTracker {
         if let focusedWindow, CFEqual(focusedWindow, window) {
             return
         }
-        clickQueue.async {
-            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-        }
+        clickActions.bringForward(window: window, application: nil, ticket: clickActions.newTicket())
     }
 
     /// Polls every 25 ms until Safari is the frontmost app or the attempts run out.
