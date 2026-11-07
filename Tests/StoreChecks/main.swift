@@ -486,6 +486,59 @@ do {
     check(highlighted(store) == 2, "and the snapshot after it agrees")
 }
 
+withPresser { store, presses, commands in
+    // Item 5: two tabs clicked in turn, every report arriving late (under load, the extension's
+    // page runs its listener seconds after Safari switched). A report that belongs to an earlier
+    // click mustn't confirm a later click on the same tab, or move the highlight off the newest.
+    click(store, tab: 3)    // A
+    click(store, tab: 2)    // B
+    click(store, tab: 3)    // A again
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())    // the first click on A
+    click(store, tab: 2)    // B again
+    check(highlighted(store) == 2, "the newest click holds the highlight")
+    activated(store, tab: 2, seq: 3, at: nowMilliseconds())    // the first click on B
+    check(highlighted(store) == 2, "a late report for an earlier click on the newest tab doesn't confirm it")
+    activated(store, tab: 3, seq: 4, at: nowMilliseconds())    // the second click on A
+    check(highlighted(store) == 2, "a late report for an earlier click on the other tab doesn't move the highlight (no \"Safari switched to another tab\")")
+    activated(store, tab: 2, seq: 5, at: nowMilliseconds())    // the second click on B
+    check(highlighted(store) == 2, "the newest click's own report confirms it")
+    presses()[3].finish(.pressed(milliseconds: 4))
+    wait(1.2)
+    check(activations(commands()).isEmpty && snapshotRequests(commands()) == 0, "and nothing is sent once everything is confirmed")
+}
+
+withPresser { store, presses, commands in
+    // Item 5, the case from the issue: the first click on A's report arrives and is taken for the
+    // second click's own; the second click's report then arrives after the click on B.
+    click(store, tab: 3)    // A
+    click(store, tab: 2)    // B
+    click(store, tab: 3)    // A again
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())    // belongs to the first click on A
+    click(store, tab: 2)    // B again
+    activated(store, tab: 3, seq: 3, at: nowMilliseconds())    // belongs to the second click on A
+    check(highlighted(store) == 2, "the second click on A's report, arriving after the click on B, isn't Safari moving on")
+}
+
+withPresser { store, presses, commands in
+    // Reports for tabs the sidebar asked for are matched one to one with its clicks, so a second
+    // report for a tab it asked for once really is Safari moving on.
+    click(store, tab: 3)
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    click(store, tab: 2)
+    activated(store, tab: 3, seq: 3, at: nowMilliseconds())
+    check(highlighted(store) == 3, "a report for a tab clicked once, already answered, is Safari going there itself")
+}
+
+withPresser { store, presses, commands in
+    // The wait for a click is one second, but the click is remembered much longer: the extension
+    // can be that late.
+    click(store, tab: 3)
+    wait(1.2)
+    click(store, tab: 2)
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    check(highlighted(store) == 2, "a report that fits a click made a second ago is still its answer, not Safari moving on")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {
