@@ -21,12 +21,29 @@ final class TabStore {
         let requestedAt: Date
         /// How the switch was asked for, for the log.
         var path = "push"
+        /// Tabs that earlier clicks, replaced by this one within a second, asked to switch to.
+        /// Safari's reports of those switches can still be on their way.
+        var replaced: [TabKey] = []
 
         /// A switch that's gone unconfirmed this long was lost, or Safari went somewhere else
         /// first. Reports from Safari are no longer held back on its account.
         static let lifetime: TimeInterval = 1
 
         var isFresh: Bool { Date().timeIntervalSince(requestedAt) < Self.lifetime }
+
+        /// How long after this click the extension's page may still run the listener for a switch
+        /// an earlier click caused. The stamp on a report is when the page ran the event, which
+        /// can be a little after Safari switched.
+        static let reportLag: TimeInterval = 0.5
+
+        /// `requestedAt` as the extension's clock reads it (`Date.now()`: whole milliseconds since
+        /// 1970, the same clock on this Mac). Nothing Safari did before this can be this click's doing.
+        var requestedAtMilliseconds: Double { (requestedAt.timeIntervalSince1970 * 1000).rounded(.down) }
+
+        /// Whether a report for `key`, stamped `at`, is the switch of a click this one replaced.
+        func isEarlierClick(_ key: TabKey, stampedAt at: Double) -> Bool {
+            replaced.contains(key) && at < requestedAtMilliseconds + Self.reportLag * 1000
+        }
     }
 
     private(set) var snapshots: [String: Snapshot] = [:]
@@ -98,7 +115,7 @@ final class TabStore {
             if let instance = object["instance"] as? String,
                let windowId = object["windowId"] as? Int,
                let tabId = object["tabId"] as? Int {
-                applyActivation(instance: instance, windowId: windowId, tabId: tabId, seq: object["seq"] as? Int)
+                applyActivation(instance: instance, windowId: windowId, tabId: tabId, seq: object["seq"] as? Int, at: object["at"] as? Double)
             }
             return [:]
 
@@ -168,8 +185,9 @@ final class TabStore {
 
     /// Moves the highlight to the tab Safari says it switched to, without waiting for a snapshot.
     /// `seq` numbers the report together with the instance's snapshots; without one (an older
-    /// extension still running) the report is taken as the newest.
-    private func applyActivation(instance: String, windowId: Int, tabId: Int, seq: Int?) {
+    /// extension still running) the report is taken as the newest. `at` is when the extension
+    /// saw the switch (`Date.now()`), which says whether it came before or after the last click.
+    private func applyActivation(instance: String, windowId: Int, tabId: Int, seq: Int?, at: Double?) {
         if let seq {
             // Reports are separate messages and can arrive out of order. One older than a
             // snapshot or report already applied describes a tab Safari has since left.
@@ -177,23 +195,47 @@ final class TabStore {
                 log.info("ignoring an older tab switch report (\(seq)) from \(instance.prefix(8), privacy: .public)")
                 return
             }
+        }
+        let reported = TabKey(instance: instance, tabId: tabId)
+        // What the report means for the switch the sidebar is waiting for:
+        var heldBack = false    // it describes a state the click has already replaced
+        var confirms = false    // it is the click's own switch
+        var movedOnAfter: Int?  // Safari went somewhere else after the click (this many ms after it)
+        if let pending = pendingActivation {
+            // A switch Safari made before the click asked for its own isn't the click's doing.
+            let beforeClick = at.map { $0 < pending.requestedAtMilliseconds } ?? false
+            if reported == pending.key {
+                confirms = !beforeClick
+            } else if pending.isFresh, pending.key.instance == instance, tab(for: pending.key)?.windowId == windowId {
+                // Another tab in the window the click is switching. After a quick second click, the
+                // report for the first switch arrives while the highlight is already on the second
+                // tab; moving it back would only make it jump. Without a stamp, or with one from
+                // before the click, that is what this is. The stamp is when the extension's page
+                // ran the event, which can be after the second click for a switch made just before
+                // it, so a report just after the click for an earlier click's tab counts as well.
+                // Anything else after the click is Safari going somewhere on its own (its own tab
+                // bar, ⌘1–9, a closed tab).
+                if let at, !beforeClick, !pending.isEarlierClick(reported, stampedAt: at) {
+                    movedOnAfter = Int(at - pending.requestedAtMilliseconds)
+                } else {
+                    heldBack = true
+                }
+            }
+        }
+        if let seq {
             lastActivation[instance] = (seq, windowId, tabId)
         }
-        let pending = pendingActivation
-        // After a quick second click, the report for the first switch arrives while the highlight
-        // is already on the second tab; moving it back would only make it jump. That only holds
-        // while the second click is recent: if its switch never came, Safari went somewhere
-        // else (its own tab bar, ⌘1–9, a closed tab) and the highlight has to follow it.
-        let supersededByClick = pending.map { pending in
-            pending.isFresh && pending.key.instance == instance && pending.key.tabId != tabId
-                && tab(for: pending.key)?.windowId == windowId
-        } ?? false
-        if !supersededByClick {
+        if !heldBack {
             moveHighlight(instance: instance, windowId: windowId, tabId: tabId)
         }
-        if let pending {
-            if pending.key == TabKey(instance: instance, tabId: tabId) {
+        if let pending = pendingActivation {
+            if confirms {
                 confirmActivation(pending)
+            } else if let movedOnAfter {
+                // The tab being waited for is no longer the one to switch to: its one-second
+                // command would pull Safari back over what was chosen since.
+                pendingActivation = nil
+                log.notice("Safari switched to another tab \(movedOnAfter) ms after the click; no longer waiting for the clicked tab")
             } else if !pending.isFresh {
                 dropStalePending()
             }
@@ -447,11 +489,15 @@ final class TabStore {
         let now = Date()
         let pointerDown = lastPointerDown?() ?? .distantPast
         activationCount += 1
+        // An earlier click's switch may still be on its way, and Safari's report of it mustn't
+        // be taken for Safari moving on after this click.
+        let earlier = pendingActivation.flatMap { $0.isFresh ? Array(($0.replaced + [$0.key]).suffix(8)) : nil } ?? []
         let request = PendingActivation(
             id: activationCount,
             key: TabKey(instance: instance, tabId: tab.id),
             clickAt: now.timeIntervalSince(pointerDown) < 1.5 ? pointerDown : now,
-            requestedAt: now
+            requestedAt: now,
+            replaced: earlier
         )
         pendingActivation = request
         let plan = switchPlan(for: tab, instance: instance)
@@ -517,10 +563,11 @@ final class TabStore {
                 self.sendActivation(of: tab, instance: instance)
             }
         case .fallback(let reason):
-            // Only if this is still the click being waited for. If a newer click replaced it, or
-            // Safari has confirmed it meanwhile, a late command would only pull Safari the wrong way.
+            // Only if this is still the click being waited for. If a newer click replaced it, Safari
+            // confirmed it, or Safari went to another tab meanwhile, a late command would only pull
+            // Safari the wrong way.
             guard pendingActivation?.id == request.id else {
-                log.notice("tab switch via accessibility fell back (\(reason, privacy: .public)), but the switch was confirmed or replaced by a newer click meanwhile")
+                log.notice("tab switch via accessibility fell back (\(reason, privacy: .public)), but the switch was confirmed, replaced by a newer click, or overtaken by Safari meanwhile")
                 return
             }
             log.notice("tab switch via push: accessibility fell back (\(reason, privacy: .public))")

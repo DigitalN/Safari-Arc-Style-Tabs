@@ -336,8 +336,10 @@ function originOf(url) {
 browser.tabs.onCreated.addListener(() => scheduleSnapshot());
 browser.tabs.onActivated.addListener((info) => {
     // Building a snapshot takes a while with many tabs; the app only needs this much to
-    // move the highlight and know the switch happened.
-    postToApp({ type: "activated", instance, seq: ++seq, windowId: info.windowId, tabId: info.tabId });
+    // move the highlight and know the switch happened. `at` is when the switch was seen, on the
+    // same clock the app reads (Date.now()), so the app can tell a switch from before a sidebar
+    // click from one after it. `seq` only orders Safari's own messages among themselves.
+    postToApp({ type: "activated", instance, seq: ++seq, at: Date.now(), windowId: info.windowId, tabId: info.tabId });
     scheduleSnapshot(0);
 });
 browser.tabs.onMoved.addListener(() => scheduleSnapshot());

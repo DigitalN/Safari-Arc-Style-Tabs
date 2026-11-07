@@ -124,6 +124,27 @@ async function settled(page) {
         check(snapshots.every((snapshot, i) => i === 0 || snapshot.seq > snapshots[i - 1].seq), "snapshots are numbered in build order");
     }
 
+    // --- #19 item 1: each `activated` report says when the switch was seen, on the clock the app reads ---
+    {
+        const page = load();
+        await settled(page);
+
+        const before = Date.now();
+        page.fire("activated", { tabId: 3, windowId: 1 });
+        await sleep(30);
+        const middle = Date.now();
+        page.fire("activated", { tabId: 4, windowId: 1 });
+        const after = Date.now();
+        await sleep(200);
+        const reports = page.ofType("activated");
+        check(reports.length === 2, "both activations are reported");
+        check(reports.every((report) => Number.isInteger(report.at)), "activated reports carry a timestamp (Date.now())");
+        if (reports.length === 2 && reports.every((report) => Number.isInteger(report.at))) {
+            check(reports[0].at >= before && reports[0].at <= middle, "a report is stamped when the switch was seen");
+            check(reports[1].at >= middle && reports[1].at <= after, "and the next one is stamped when that happened");
+        }
+    }
+
     // --- #17 item 8: changes the sidebar shows reach it, whatever key Safari reports them under ---
     {
         const page = load();

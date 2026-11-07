@@ -34,9 +34,15 @@ func send(_ store: TabStore, _ object: [String: Any]) {
     _ = store.handleMessage(type: object["type"] as! String, payload: data, object: object)
 }
 
-func activated(_ store: TabStore, tab id: Int, seq: Int? = nil) {
+/// The clock the extension stamps its messages with (`Date.now()`): milliseconds since 1970.
+func nowMilliseconds() -> Double {
+    (Date().timeIntervalSince1970 * 1000).rounded(.down)
+}
+
+func activated(_ store: TabStore, tab id: Int, seq: Int? = nil, at: Double? = nil) {
     var object: [String: Any] = ["type": "activated", "instance": instance, "windowId": 1, "tabId": id]
     if let seq { object["seq"] = seq }
+    if let at { object["at"] = at }
     send(store, object)
 }
 
@@ -245,6 +251,81 @@ do {
         check(presses().isEmpty, "a tab in another window isn't pressed")
         check(activations(commands()) == [11], "it goes through the extension")
     }
+}
+
+// MARK: - Reports from before and after the click (#19 item 1)
+//
+// The extension stamps each `activated` report with the time it ran (`at`). Anything before the
+// click asked for its switch can't be the click's doing; anything after is Safari moving on.
+
+withPresser { store, presses, commands in
+    // The failure in the issue: the press took, Safari is slow to confirm, and meanwhile the user
+    // picks another tab in Safari. The one-second command must not drag Safari back to tab 3.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    wait(0.3)
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    check(highlighted(store) == 2, "a switch Safari made after the click moves the highlight there")
+    wait(1.2)
+    check(activations(commands()).isEmpty, "and the click's one-second command is cancelled, so it can't undo that switch")
+    activated(store, tab: 4, seq: 3, at: nowMilliseconds())
+    check(highlighted(store) == 4, "later reports follow Safari too")
+}
+
+withPresser { store, presses, commands in
+    // The same, without the tab-bar press: the extension's command is already out and nothing is waiting.
+    click(store, tab: 3)
+    presses()[0].finish(.fallback("the window has no tab bar"))
+    activated(store, tab: 1, seq: 2, at: nowMilliseconds())
+    check(highlighted(store) == 1, "after the extension's command is sent, Safari moving on still moves the highlight")
+}
+
+withPresser { store, presses, commands in
+    // A report from before the click describes a switch the click didn't make, even for the very
+    // tab that was clicked: it doesn't answer the click, so the one-second command stays.
+    let earlier = nowMilliseconds() - 50
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: earlier)
+    check(highlighted(store) == 3, "a report from before the click for the clicked tab leaves the highlight there")
+    wait(1.2)
+    check(activations(commands()) == [3], "but doesn't count as Safari confirming the click")
+}
+
+withPresser { store, presses, commands in
+    // ...and a report from before the click for another tab doesn't undo the click's highlight.
+    let earlier = nowMilliseconds() - 50
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 2, seq: 2, at: earlier)
+    check(highlighted(store) == 3, "a report from before the click for another tab doesn't move the highlight back")
+    wait(1.2)
+    check(activations(commands()) == [3], "and the click is still being waited for")
+}
+
+withPresser { store, presses, commands in
+    // Two quick clicks. The report for the first can reach the app after the second click even
+    // though the extension stamped it a moment after it, because the stamp is when its page ran
+    // the event, not when Safari switched. The first click's tab is still its own switch.
+    click(store, tab: 2)
+    click(store, tab: 4)
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    check(highlighted(store) == 4, "a late report for an earlier click's tab doesn't move the highlight back")
+    presses()[1].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 4, seq: 3, at: nowMilliseconds())
+    wait(1.2)
+    check(activations(commands()).isEmpty, "and the second click is confirmed by its own report")
+}
+
+withPresser { store, presses, commands in
+    // Reports without a stamp (an extension page from before this change) keep working as before.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 2, seq: 2)
+    check(highlighted(store) == 3, "an unstamped report for another tab is taken as an earlier click's")
+    activated(store, tab: 3, seq: 3)
+    wait(1.2)
+    check(activations(commands()).isEmpty, "an unstamped report for the clicked tab confirms it")
 }
 
 try? FileManager.default.removeItem(at: stateFolder)
