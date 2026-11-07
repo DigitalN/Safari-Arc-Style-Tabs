@@ -437,6 +437,55 @@ withPresser { store, presses, commands in
     check(highlighted(store) == 3, "a late report for the clicked tab keeps the highlight there")
 }
 
+do {
+    // Item 4: a snapshot that started after the click but before Safari switched shows the old tab.
+    let (store, _) = makeStore()
+    click(store, tab: 3)
+    send(store, snapshotObject(seq: 2, active: 1, startedAt: nowMilliseconds()))
+    check(highlighted(store) == 3, "a snapshot started after the click that still shows the old tab doesn't move the highlight")
+    send(store, snapshotObject(seq: 3, active: 1, startedAt: nowMilliseconds()))
+    check(highlighted(store) == 3, "nor does the next one while the click is waiting")
+    activated(store, tab: 3, seq: 4, at: nowMilliseconds())
+    check(highlighted(store) == 3, "and Safari's report for the clicked tab settles it")
+    send(store, snapshotObject(seq: 5, active: 3, startedAt: nowMilliseconds()))
+    check(highlighted(store) == 3, "with nothing left to hold back")
+}
+
+do {
+    // The same without Accessibility: a click while another app is in front makes Safari take
+    // focus, which sends a snapshot at once.
+    let (store, commands) = makeStore()
+    click(store, tab: 2)
+    send(store, snapshotObject(seq: 2, active: 1, startedAt: nowMilliseconds()))
+    check(highlighted(store) == 2, "a snapshot sent by Safari coming forward doesn't blink the highlight back")
+    wait(1.2)
+    check(snapshotRequests(commands()) == 1, "if Safari never confirms, it is asked where it is")
+    send(store, snapshotObject(seq: 3, active: 1, startedAt: nowMilliseconds()))
+    check(highlighted(store) == 1, "and the answer is believed")
+}
+
+do {
+    // A snapshot may not hold the highlight on a tab that is gone.
+    let (store, _) = makeStore()
+    click(store, tab: 3)
+    send(store, snapshotObject(seq: 2, active: 1, tabs: [1, 2, 4], startedAt: nowMilliseconds()))
+    check(highlighted(store) == 1, "a snapshot without the clicked tab (closed meanwhile) is believed")
+    activated(store, tab: 2, seq: 3, at: nowMilliseconds())
+    check(highlighted(store) == 2, "and the closed tab's click isn't waited for any longer")
+}
+
+do {
+    // Safari moving on after the click still wins: its report arrives ahead of the snapshot, and
+    // ends the wait.
+    let (store, _) = makeStore()
+    click(store, tab: 3)
+    wait(0.1)
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    check(highlighted(store) == 2, "Safari's own report of another tab moves the highlight")
+    send(store, snapshotObject(seq: 3, active: 2, startedAt: nowMilliseconds()))
+    check(highlighted(store) == 2, "and the snapshot after it agrees")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

@@ -177,18 +177,24 @@ final class TabStore {
             moveHighlight(instance: snapshot.instance, windowId: last.windowId, tabId: last.tabId)
         }
 
-        if let pending = pendingActivation {
-            let startedBeforeClick = snapshot.startedAt.map { $0 < pending.requestedAtMilliseconds } ?? false
-            if pending.key.instance == snapshot.instance, pending.isFresh, startedBeforeClick {
-                // Started before the click asked for its switch, so it shows the state the click is
-                // about to change, and Safari may not have seen the click when it was asked. It
-                // mustn't move the highlight back to the old tab, and isn't Safari's answer: the
-                // click's report is.
+        if let pending = pendingActivation, pending.key.instance == snapshot.instance {
+            let showsClicked = snapshot.windows.contains { $0.tabs.contains { $0.id == pending.key.tabId && $0.active } }
+            let startedAfterClick = snapshot.startedAt.map { $0 >= pending.requestedAtMilliseconds }
+            if pending.isFresh, let startedAfterClick, !(showsClicked && startedAfterClick) {
+                // The click's switch is on its way, and the snapshot doesn't have it: one started
+                // before the click shows the state the click is about to change, and one started
+                // after it can still be ahead of Safari's switch (a press takes effect a few
+                // milliseconds on, an extension command a hundred or more). Either way it mustn't
+                // move the highlight back to the old tab, and it isn't Safari's answer: the click's
+                // report is, and it also says when Safari goes somewhere else. If that never comes,
+                // Safari is asked again once the wait is over.
                 if let windowId = tab(for: pending.key)?.windowId {
                     moveHighlight(instance: snapshot.instance, windowId: windowId, tabId: pending.key.tabId)
+                } else {
+                    pendingActivation = nil
+                    log.notice("the clicked tab is gone; no longer waiting for it")
                 }
-            } else if pending.key.instance == snapshot.instance,
-                      snapshot.windows.contains(where: { $0.tabs.contains { $0.id == pending.key.tabId && $0.active } }) {
+            } else if showsClicked {
                 confirmActivation(pending)
             } else if !pending.isFresh {
                 dropStalePending()
