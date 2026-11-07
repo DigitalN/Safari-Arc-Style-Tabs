@@ -539,6 +539,32 @@ withPresser { store, presses, commands in
     check(highlighted(store) == 2, "a report that fits a click made a second ago is still its answer, not Safari moving on")
 }
 
+withPresser { store, presses, commands in
+    // Item 6: Safari's own tab bar does nothing for the tab that's already selected, and neither does this.
+    click(store, tab: 1)
+    check(presses().isEmpty, "clicking the active tab doesn't press its button")
+    check(commands().isEmpty, "or send anything")
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    check(highlighted(store) == 2, "nothing is waited for, so Safari's next switch moves the highlight")
+    wait(1.2)
+    check(commands().isEmpty, "and nothing follows a second later")
+}
+
+withPresser { store, presses, commands in
+    // ...but the active tab is whichever the sidebar shows: a click on the one just left is a switch.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    click(store, tab: 3)
+    check(presses().count == 1, "a second click on the tab just clicked is the active tab too")
+    click(store, tab: 1)
+    check(presses().count == 2, "a click on any other tab, the first one included, is a switch")
+}
+
+withPresser(method: "push") { store, presses, commands in
+    click(store, tab: 1)
+    check(commands().isEmpty, "the active tab isn't activated by the extension either")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

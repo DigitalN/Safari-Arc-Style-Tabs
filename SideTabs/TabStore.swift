@@ -525,19 +525,26 @@ final class TabStore {
     }
 
     func activate(_ tab: BrowserTab, instance: String) {
+        let key = TabKey(instance: instance, tabId: tab.id)
+        // Safari's own tab bar does nothing when you click the tab that's already selected, and
+        // neither does this: no press (the active tab's button holds the address field), nothing
+        // to wait for, and nothing to ask Safari about a second later.
+        if self.tab(for: key)?.active ?? tab.active {
+            return
+        }
         let now = Date()
         let pointerDown = lastPointerDown?() ?? .distantPast
         activationCount += 1
         let request = PendingActivation(
             id: activationCount,
-            key: TabKey(instance: instance, tabId: tab.id),
+            key: key,
             clickAt: now.timeIntervalSince(pointerDown) < 1.5 ? pointerDown : now,
             requestedAt: now
         )
         // Safari's report of this switch, when it comes, answers this click and no other; reports
         // of earlier clicks can still be on their way (see SwitchAsk).
         switchAsks.removeAll { !$0.isRecent }
-        switchAsks.append(SwitchAsk(id: request.id, key: request.key, requestedAt: now))
+        switchAsks.append(SwitchAsk(id: request.id, key: key, requestedAt: now))
         if switchAsks.count > 16 {
             switchAsks.removeFirst(switchAsks.count - 16)
         }
