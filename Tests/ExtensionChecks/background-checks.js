@@ -145,6 +145,33 @@ async function settled(page) {
         }
     }
 
+    // --- #19 item 2: each snapshot says when its build started, before it asked Safari anything ---
+    {
+        const page = load({ queryDelay: 80 });
+        await settled(page);
+
+        const before = Date.now();
+        page.fire("windows.focus", 1);               // starts a snapshot build (80 ms query)
+        await sleep(20);
+        page.fire("activated", { tabId: 2, windowId: 1 });
+        await sleep(400);
+        const entry = page.sent.find((item) => item.message.type === "snapshot");
+        const report = page.ofType("activated")[0];
+        check(!!entry && !!report, "a snapshot and a report were sent");
+        if (entry && report) {
+            const snapshot = entry.message;
+            check(Number.isInteger(snapshot.startedAt), "snapshots carry the time their build started (Date.now())");
+            if (Number.isInteger(snapshot.startedAt)) {
+                check(snapshot.startedAt >= before, "it is a current time");
+                check(entry.at - snapshot.startedAt >= 60,
+                    `it is when the build started, not when it finished: the queries took 80 ms (sent ${entry.at - snapshot.startedAt} ms later)`);
+                check(snapshot.startedAt < report.at, "a snapshot started before an activation is stamped before it");
+                const next = page.ofType("snapshot").find((item) => item.seq > report.seq);
+                check(!next || next.startedAt >= report.at, "and the one the activation asks for is stamped after it");
+            }
+        }
+    }
+
     // --- #17 item 8: changes the sidebar shows reach it, whatever key Safari reports them under ---
     {
         const page = load();

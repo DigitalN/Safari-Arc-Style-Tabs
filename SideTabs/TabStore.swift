@@ -85,7 +85,9 @@ final class TabStore {
     @ObservationIgnored private var activationCount = 0
     /// The newest `activated` report applied for each extension instance, so an older one that
     /// arrives late is ignored, and a snapshot older than it doesn't undo it.
-    @ObservationIgnored private var lastActivation: [String: (seq: Int, windowId: Int, tabId: Int)] = [:]
+    /// `heldBack` is set for a report that didn't move the highlight because a click was waiting
+    /// for another tab, which a snapshot started before it mustn't do either.
+    @ObservationIgnored private var lastActivation: [String: (seq: Int, windowId: Int, tabId: Int, heldBack: Bool)] = [:]
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "store")
 
     /// Where bookmarks and tab names are kept. Only the checks in Tests/ pass anything else.
@@ -168,14 +170,24 @@ final class TabStore {
         pruneBookmarkLinks()
 
         // A report sent after this snapshot was started can have arrived first. The snapshot
-        // may not know about it yet, so it must not move the highlight back.
-        if let last = lastActivation[snapshot.instance], last.seq > snapshot.seq {
+        // may not know about it yet, so it must not move the highlight back. (Not one that was
+        // held back for a click waiting on another tab: the highlight stays where the click put it.)
+        if let last = lastActivation[snapshot.instance], last.seq > snapshot.seq, !last.heldBack {
             moveHighlight(instance: snapshot.instance, windowId: last.windowId, tabId: last.tabId)
         }
 
         if let pending = pendingActivation {
-            if pending.key.instance == snapshot.instance,
-               snapshot.windows.contains(where: { $0.tabs.contains { $0.id == pending.key.tabId && $0.active } }) {
+            let startedBeforeClick = snapshot.startedAt.map { $0 < pending.requestedAtMilliseconds } ?? false
+            if pending.key.instance == snapshot.instance, pending.isFresh, startedBeforeClick {
+                // Started before the click asked for its switch, so it shows the state the click is
+                // about to change, and Safari may not have seen the click when it was asked. It
+                // mustn't move the highlight back to the old tab, and isn't Safari's answer: the
+                // click's report is.
+                if let windowId = tab(for: pending.key)?.windowId {
+                    moveHighlight(instance: snapshot.instance, windowId: windowId, tabId: pending.key.tabId)
+                }
+            } else if pending.key.instance == snapshot.instance,
+                      snapshot.windows.contains(where: { $0.tabs.contains { $0.id == pending.key.tabId && $0.active } }) {
                 confirmActivation(pending)
             } else if !pending.isFresh {
                 dropStalePending()
@@ -223,7 +235,7 @@ final class TabStore {
             }
         }
         if let seq {
-            lastActivation[instance] = (seq, windowId, tabId)
+            lastActivation[instance] = (seq, windowId, tabId, heldBack)
         }
         if !heldBack {
             moveHighlight(instance: instance, windowId: windowId, tabId: tabId)

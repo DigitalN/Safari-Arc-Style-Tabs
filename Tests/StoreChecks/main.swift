@@ -18,10 +18,12 @@ func tab(_ id: Int, active: Bool = false, windowId: Int = 1) -> [String: Any] {
      "active": active, "pinned": false, "audible": false, "muted": false, "loading": false]
 }
 
-func snapshotObject(seq: Int, active: Int, tabs: [Int] = [1, 2, 3, 4]) -> [String: Any] {
-    ["type": "snapshot", "instance": instance, "seq": seq, "focusedWindowId": 1, "lastFocusedWindowId": 1,
+func snapshotObject(seq: Int, active: Int, tabs: [Int] = [1, 2, 3, 4], startedAt: Double? = nil) -> [String: Any] {
+    var object: [String: Any] = ["type": "snapshot", "instance": instance, "seq": seq, "focusedWindowId": 1, "lastFocusedWindowId": 1,
      "focusChangedAt": 1.0,
      "windows": [["id": 1, "focused": true, "incognito": false, "tabs": tabs.map { tab($0, active: $0 == active) }]]]
+    if let startedAt { object["startedAt"] = startedAt }
+    return object
 }
 
 /// Lets time pass with the main run loop going, since the store schedules work on it.
@@ -326,6 +328,84 @@ withPresser { store, presses, commands in
     activated(store, tab: 3, seq: 3)
     wait(1.2)
     check(activations(commands()).isEmpty, "an unstamped report for the clicked tab confirms it")
+}
+
+// MARK: - Snapshots from before the click (#19 item 2)
+//
+// The extension stamps each snapshot with the time its build started (`startedAt`). One started
+// before the click asked for its switch shows the state the click is about to change.
+
+do {
+    // The blink in the issue: a snapshot started just before the click arrives just after it.
+    let (store, _) = makeStore()
+    let earlier = nowMilliseconds() - 50
+    click(store, tab: 3)
+    send(store, snapshotObject(seq: 2, active: 1, startedAt: earlier))
+    check(highlighted(store) == 3, "a snapshot started before the click doesn't move the highlight back to the old tab")
+    activated(store, tab: 3, seq: 3, at: nowMilliseconds())
+    check(highlighted(store) == 3, "and the report for the clicked tab confirms it")
+}
+
+withPresser { store, presses, commands in
+    // It also doesn't stand for Safari having made the switch.
+    let earlier = nowMilliseconds() - 50
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    send(store, snapshotObject(seq: 2, active: 3, startedAt: earlier))
+    check(highlighted(store) == 3, "a snapshot started before the click that shows the clicked tab leaves the highlight there")
+    wait(1.2)
+    check(activations(commands()) == [3], "but it isn't Safari's answer to the click, so the one-second command stays")
+}
+
+withPresser { store, presses, commands in
+    // A snapshot started after the click is believed, and one that shows the clicked tab confirms it.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    send(store, snapshotObject(seq: 2, active: 3, startedAt: nowMilliseconds()))
+    wait(1.2)
+    check(activations(commands()).isEmpty, "a snapshot started after the click that shows the clicked tab confirms it")
+}
+
+do {
+    // A snapshot older than the click only holds the highlight while the click is still being waited for.
+    let (store, _) = makeStore()
+    let earlier = nowMilliseconds() - 50
+    click(store, tab: 3)
+    wait(1.1)
+    send(store, snapshotObject(seq: 2, active: 1, startedAt: earlier))
+    check(highlighted(store) == 1, "once the click is stale, even an older snapshot shows where Safari is")
+}
+
+do {
+    // A snapshot without a stamp (an extension page from before this change) is applied as before.
+    let (store, _) = makeStore()
+    click(store, tab: 3)
+    send(store, snapshotObject(seq: 2, active: 1))
+    check(highlighted(store) == 1, "an unstamped snapshot is believed")
+}
+
+do {
+    // A snapshot for another window or profile has nothing to say about this click.
+    let (store, _) = makeStore()
+    let earlier = nowMilliseconds() - 50
+    click(store, tab: 3)
+    var other = snapshotObject(seq: 1, active: 2, startedAt: earlier)
+    other["instance"] = "other-instance"
+    send(store, other)
+    check(highlighted(store) == 3, "a snapshot of another extension instance doesn't touch this click's highlight")
+    check(store.snapshots["other-instance"]?.windows.first?.tabs.first(where: \.active)?.id == 2, "and is applied as it is")
+}
+
+do {
+    // A report held back because a click is waiting for another tab mustn't come back through a
+    // snapshot that was started before the report.
+    let (store, _) = makeStore()
+    click(store, tab: 2)
+    click(store, tab: 3)
+    activated(store, tab: 2, seq: 5, at: nowMilliseconds())
+    check(highlighted(store) == 3, "the earlier click's report is held back")
+    send(store, snapshotObject(seq: 4, active: 3, startedAt: nowMilliseconds()))
+    check(highlighted(store) == 3, "and a snapshot started before that report doesn't bring it back")
 }
 
 try? FileManager.default.removeItem(at: stateFolder)

@@ -71,6 +71,9 @@ async function buildSnapshot() {
     // happened before the queries below, so the snapshot includes it; a higher-numbered one
     // may or may not be in it, and the app applies it after the snapshot.
     const snapshotSeq = ++seq;
+    // And the time, on the clock the app reads (Date.now()): what Safari reports below describes
+    // a moment after this, so a sidebar click made after it may not be in the snapshot.
+    const startedAt = Date.now();
     // Query tabs directly rather than windows.getAll({ populate: true }), which can
     // return windows without their tabs while Safari is still restoring them.
     const [windows, tabs] = await Promise.all([browser.windows.getAll(), browser.tabs.query({})]);
@@ -95,6 +98,7 @@ async function buildSnapshot() {
         type: "snapshot",
         instance,
         seq: snapshotSeq,
+        startedAt,
         focusedWindowId,
         lastFocusedWindowId,
         focusChangedAt,
