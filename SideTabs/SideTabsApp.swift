@@ -135,7 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // After an update, the new copy docks right where this one is, so leave Safari's
         // window alone rather than widening it only to narrow it again a second later.
         if !relaunchingForUpdate {
-            dock?.restoreSafariFrame()
+            dock?.restoreSafariFrame(waiting: true)
         }
         store.save()
     }
