@@ -8,21 +8,28 @@ struct BookmarkRow: View {
     @Environment(SidebarDrag.self) private var drag
     @State private var hovering = false
     @State private var rowTop: CGFloat = 0
-    /// True while a press is in progress (see TabRow for why this is a gesture state).
-    @GestureState private var pressInProgress = false
-    /// Whether the press in progress already switched to the open tab. Every press sets it, so
-    /// a cancelled one leaves nothing behind for the next to depend on.
+    /// Whether the press in progress already switched to the open tab. Every press the row takes
+    /// sets it, so a cancelled one leaves nothing behind for the next to depend on.
     @State private var switchedOnPress = false
 
     private var isRenaming: Bool { store.renaming == .bookmark(bookmark.id) }
     private var isSlot: Bool { drag.isSlot(bookmark: bookmark) }
 
-    private func pressBegan() {
+    /// The first event of a press. Says whether the row took it.
+    private func pressBegan() -> Bool {
+        guard !isRenaming else { return false }
         let inNewTab = NSEvent.modifierFlags.contains(.command)
-        switchedOnPress = !isRenaming && !inNewTab && store.openTab(for: bookmark) != nil
+        switchedOnPress = !inNewTab && store.openTab(for: bookmark) != nil
         if switchedOnPress {
             store.open(bookmark)
         }
+        return true
+    }
+
+    /// The button went up without the press having turned into a drag.
+    private func released() {
+        guard !switchedOnPress, !isRenaming else { return }
+        store.open(bookmark, inNewTab: NSEvent.modifierFlags.contains(.command))
     }
 
     private func openFromAccessibility() {
@@ -68,29 +75,18 @@ struct BookmarkRow: View {
         .contentShape(Rectangle())
         // A pinned site that's already open is a tab switch, so it switches on mouse-down like
         // the tab rows. One that isn't open opens a tab on mouse-up instead: on mouse-down, starting
-        // a drag to reorder would create a tab.
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .updating($pressInProgress) { _, inProgress, _ in
-                    guard !inProgress else { return }
-                    inProgress = true
-                    pressBegan()
-                }
-                .onEnded { value in
-                    // Moving far enough to drag is the reorder gesture's, not a click.
-                    guard !switchedOnPress, !isRenaming, hypot(value.translation.width, value.translation.height) < 4 else { return }
-                    store.open(bookmark, inNewTab: NSEvent.modifierFlags.contains(.command))
-                }
-        )
-        .accessibilityAction { openFromAccessibility() }
-        .sidebarDraggable(
+        // a drag to reorder would create a tab, and a press that turned into a drag never opens one.
+        .sidebarRowGesture(
             .bookmark(bookmark),
             drag: drag,
             store: store,
             settings: settings,
             rowTop: rowTop,
-            enabled: !isRenaming
+            dragEnabled: !isRenaming,
+            onPress: { _ in pressBegan() },
+            onClick: released
         )
+        .accessibilityAction { openFromAccessibility() }
         .onSidebarTop { rowTop = $0 }
         .contextMenu {
             Button("Open") { store.open(bookmark) }

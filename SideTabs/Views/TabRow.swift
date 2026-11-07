@@ -9,13 +9,9 @@ struct TabRow: View {
     @Environment(SidebarDrag.self) private var drag
     @State private var hovering = false
     @State private var rowTop: CGFloat = 0
-    /// True while a press is in progress, so the drag gesture's repeated updates don't repeat
-    /// it. A gesture state rather than `@State`: SwiftUI resets it when a press ends *or is
-    /// cancelled*, and doesn't call `onEnded` for a cancelled one, so a single cancelled press
-    /// can't leave the row ignoring every press after it.
-    @GestureState private var pressInProgress = false
-    /// Where the mute and close buttons are, in the window's coordinates. Presses on them
-    /// belong to the button, not the row. Only trusted while the button is showing.
+    /// Where the mute and close buttons are, in sidebar coordinates (the space the row's gesture
+    /// reports presses in). Presses on them belong to the button, not the row. Only trusted while
+    /// the button is showing.
     @State private var muteFrame = CGRect.zero
     @State private var closeFrame = CGRect.zero
 
@@ -61,7 +57,7 @@ struct TabRow: View {
                 ) {
                     store.setMuted(!tab.muted, tab: tab, instance: instance)
                 }
-                .onWindowFrame { muteFrame = $0 }
+                .onSidebarFrame { muteFrame = $0 }
             }
 
             ZStack {
@@ -69,7 +65,7 @@ struct TabRow: View {
                     SidebarIconButton(systemImage: "xmark", help: "Close Tab", size: 9) {
                         store.close([tab], instance: instance)
                     }
-                    .onWindowFrame { closeFrame = $0 }
+                    .onSidebarFrame { closeFrame = $0 }
                 } else if tab.pinned {
                     Image(systemName: "pin.fill")
                         .font(.system(size: 9))
@@ -95,21 +91,15 @@ struct TabRow: View {
         // mouse-up would add the length of the click to every switch. The second press of a
         // double-click renames instead. A separate double-tap gesture would make SwiftUI hold
         // every single click for the double-click interval, so the click count is read here.
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                .updating($pressInProgress) { value, inProgress, _ in
-                    guard !inProgress else { return }
-                    inProgress = true
-                    press(at: value.startLocation)
-                }
-        )
-        .sidebarDraggable(
+        // The same gesture is the drag to reorder (see sidebarRowGesture).
+        .sidebarRowGesture(
             .tab(tab, instance: instance),
             drag: drag,
             store: store,
             settings: settings,
             rowTop: rowTop,
-            enabled: !isRenaming
+            dragEnabled: !isRenaming,
+            onPress: press(at:)
         )
         .onSidebarTop { rowTop = $0 }
         .contextMenu { contextMenu }
@@ -119,7 +109,7 @@ struct TabRow: View {
         .accessibilityAction { store.activate(tab, instance: instance) }
     }
 
-    /// Whether a press at `point` (window coordinates) landed on the mute or close button.
+    /// Whether a press at `point` (sidebar coordinates) landed on the mute or close button.
     /// Decided from where the press landed, not from hover state: a button that disappears
     /// under the pointer never reports the pointer leaving, which would leave the row
     /// ignoring every press.
@@ -128,14 +118,15 @@ struct TabRow: View {
     }
 
     /// The first event of a press. Runs while the mouse-down is being dispatched, which is
-    /// when `NSApp.currentEvent` still has the click count.
-    private func press(at point: CGPoint) {
-        guard !isRenaming, !isOnControl(point) else { return }
+    /// when `NSApp.currentEvent` still has the click count. Says whether the row took the press.
+    private func press(at point: CGPoint) -> Bool {
+        guard !isRenaming, !isOnControl(point) else { return false }
         if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
             store.beginRename(.tab(key))
         } else {
             store.activate(tab, instance: instance)
         }
+        return true
     }
 
     private var tooltip: String {
@@ -167,14 +158,6 @@ struct TabRow: View {
         Button("Close Tab") { store.close([tab], instance: instance) }
         Button("Close Other Tabs") { store.closeOtherTabs(than: tab, instance: instance) }
         Button("Close Tabs Below") { store.closeTabsBelow(tab, instance: instance) }
-    }
-}
-
-private extension CGRect {
-    /// Whether `point` is inside the circle that fills this (square) rect, which is the shape
-    /// of the row's icon buttons.
-    func containsCircle(_ point: CGPoint) -> Bool {
-        !isEmpty && hypot(point.x - midX, point.y - midY) <= min(width, height) / 2
     }
 }
 

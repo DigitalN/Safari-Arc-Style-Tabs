@@ -32,6 +32,19 @@ echo "== tab bar matcher"
 swiftc -o "$WORK/matcher-checks" Tests/TabBarMatcherChecks/main.swift SideTabs/TabBarMatcher.swift
 "$WORK/matcher-checks"
 
+echo "== row press"
+swiftc -o "$WORK/row-press-checks" Tests/RowPressChecks/main.swift SideTabs/RowPress.swift
+"$WORK/row-press-checks"
+
+# A row has one mouse gesture, the one sidebarRowGesture attaches. A press gesture of its own,
+# inside the reorder gesture, wins every press and the reorder never starts (#20).
+echo "== row gestures"
+if grep -n "DragGesture" SideTabs/Views/TabRow.swift SideTabs/Views/BookmarkRow.swift; then
+    echo "FAIL: rows must not attach a DragGesture of their own; use sidebarRowGesture (SidebarDrag.swift)"
+    exit 1
+fi
+echo "rows have no gesture of their own"
+
 # A quick compile check of the app's Swift sources (no signing, no packaging). The full
 # build is scripts/build.sh.
 echo "== app sources"
