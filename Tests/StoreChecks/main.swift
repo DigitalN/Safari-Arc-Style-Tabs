@@ -523,24 +523,62 @@ withPresser { store, presses, commands in
 }
 
 withPresser { store, presses, commands in
-    // Item 6: Safari's own tab bar does nothing for the tab that's already selected, and neither does this.
+    // Item 6, as decided by Safari (#22 item 1): the sidebar's highlight can be wrong, so a click
+    // on the tab it shows as active is asked of Safari too. Safari's own tab bar does nothing for
+    // the tab that's already selected, and neither does this.
     click(store, tab: 1)
-    check(presses().isEmpty, "clicking the active tab doesn't press its button")
-    check(commands().isEmpty, "or send anything")
+    check(presses().count == 1, "a click on the tab shown as active still asks the tab bar, because the highlight can be wrong")
+    check(commands().isEmpty, "and sends nothing yet")
+    presses()[0].finish(.alreadySelected)
+    check(commands().isEmpty, "Safari already shows the tab: nothing is sent")
+    check(highlighted(store) == 1, "and the highlight stays on it")
     activated(store, tab: 2, seq: 2, at: nowMilliseconds())
     check(highlighted(store) == 2, "nothing is waited for, so Safari's next switch moves the highlight")
     wait(1.2)
-    check(commands().isEmpty, "and nothing follows a second later")
+    check(commands().isEmpty, "and nothing follows a second later: no snapshot request, no command")
 }
 
 withPresser { store, presses, commands in
-    // ...but the active tab is whichever the sidebar shows: a click on the one just left is a switch.
-    click(store, tab: 3)
-    presses()[0].finish(.pressed(milliseconds: 4))
-    click(store, tab: 3)
-    check(presses().count == 1, "a second click on the tab just clicked is the active tab too")
+    // The case from the retest: the highlight went back to tab 1 while Safari showed tab 3. The
+    // click on tab 1 used to do nothing at all.
     click(store, tab: 1)
-    check(presses().count == 2, "a click on any other tab, the first one included, is a switch")
+    presses()[0].finish(.pressed(milliseconds: 4))
+    check(commands().isEmpty, "a click on the tab shown as active is pressed when Safari isn't on it")
+    activated(store, tab: 1, seq: 2, at: nowMilliseconds())
+    wait(1.2)
+    check(commands().isEmpty && highlighted(store) == 1, "and Safari's report settles it as for any click")
+}
+
+withPresser { store, presses, commands in
+    // The highlight is on tab 3, Safari is on tab 1, and tab 1 is clicked: that is a switch the sidebar
+    // didn't know it needed. If Safari says it's already there, the highlight just corrects itself.
+    send(store, snapshotObject(seq: 5, active: 3))
+    click(store, tab: 1)
+    check(highlighted(store) == 1, "the highlight moves to the clicked tab")
+    presses()[0].finish(.alreadySelected)
+    check(highlighted(store) == 1 && commands().isEmpty, "and stays there when Safari is already on it")
+    wait(1.2)
+    check(commands().isEmpty, "with no check a second later either")
+}
+
+withPresser { store, presses, commands in
+    // The press can't be made for a tab shown as active: the extension's command is the fallback, and
+    // for a tab Safari is already on it does no harm.
+    click(store, tab: 1)
+    presses()[0].finish(.fallback("the window has no tab bar"))
+    check(activations(commands()) == [1], "the fallback command is sent for the tab shown as active too")
+}
+
+withPresser { store, presses, commands in
+    // The answer for a click that a newer click replaced is dropped like any other late answer.
+    click(store, tab: 1)
+    click(store, tab: 3)
+    presses()[0].finish(.alreadySelected)
+    check(highlighted(store) == 3, "the older click's answer doesn't move the highlight back")
+    presses()[1].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    wait(1.2)
+    check(commands().isEmpty, "and the newer click is still confirmed by its own report")
 }
 
 // MARK: - Fixes found alongside (#21)

@@ -17,6 +17,8 @@ nonisolated protocol TabBarNode {
     var descriptionText: String? { get }
     /// Left edge on screen.
     var x: CGFloat? { get }
+    /// `AXValue`, which Safari 26 sets to 1 on the selected tab's button and 0 on the others.
+    var value: Int? { get }
     /// The element's actions. Only asked of the one button about to be pressed.
     var actions: [String] { get }
     /// Reading the children costs a round trip to Safari, so the search reads only where it must.
@@ -31,6 +33,8 @@ nonisolated struct TabBarButton<Node: TabBarNode> {
 
 nonisolated enum TabBarChoice<Node: TabBarNode> {
     case press(Node)
+    /// The button is the selected tab's: Safari already shows the tab.
+    case alreadySelected
     /// Not pressing; use the extension. Says why.
     case fallback(String)
 }
@@ -97,25 +101,31 @@ nonisolated enum TabBarFinder {
 
     // MARK: - Choosing the button
 
-    /// The tab bar's tab buttons with their titles and where they are. Safari draws the tabs as
-    /// radio buttons; the bar's other controls aren't radio buttons.
+    /// The tab bar's tab buttons with their titles, where they are, and which is selected. Safari
+    /// draws the tabs as radio buttons; the bar's other controls aren't radio buttons.
     static func buttons<Node: TabBarNode>(in bar: Node) -> [TabBarButton<Node>] {
         bar.children().compactMap { node in
             guard node.role == "AXRadioButton" else { return nil }
             // A tab's title, or its description when Safari leaves the title empty.
             let title = node.title.flatMap { $0.isEmpty ? nil : $0 } ?? node.descriptionText
-            return TabBarButton(node: node, item: TabBarItem(title: title, x: node.x))
+            // Selected is 1 and not selected is 0; any other number isn't understood, so it says nothing.
+            let isSelected = node.value.flatMap { $0 == 1 ? true : $0 == 0 ? false : nil }
+            return TabBarButton(node: node, item: TabBarItem(title: title, x: node.x, isSelected: isSelected))
         }
     }
 
     /// The button to press for `target`, or why not. Never guesses (see TabBarMatcher), and never
     /// picks a button that can't be pressed: Safari sometimes shows a tab's button without its
-    /// title or actions for a moment after a window opens.
+    /// title or actions for a moment after a window opens. A button Safari marks as selected isn't
+    /// pressed: the tab is already showing, whatever the sidebar thought.
     static func choose<Node: TabBarNode>(_ target: TabBarTarget, among buttons: [TabBarButton<Node>]) -> TabBarChoice<Node> {
         switch TabBarMatcher.match(target, items: buttons.map(\.item)) {
         case .fallback(let reason):
             return .fallback(reason)
         case .press(let index):
+            if buttons[index].item.isSelected == true {
+                return .alreadySelected
+            }
             let node = buttons[index].node
             guard node.actions.contains(pressAction) else {
                 return .fallback("the tab's button has no press action")

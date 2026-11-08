@@ -8,6 +8,9 @@ nonisolated struct TabBarItem: Equatable {
     var title: String?
     /// The button's left edge on screen, if Safari said where it is.
     var x: CGFloat?
+    /// Whether Safari marks the button as the selected tab (`AXValue` 1; the others have 0). Nil if
+    /// Safari doesn't say.
+    var isSelected: Bool?
 }
 
 /// The tab the sidebar wants to switch to, with what the sidebar knows about its window.
@@ -100,6 +103,9 @@ nonisolated enum TabBarMatcher {
 nonisolated enum TabBarPressOutcome: Equatable {
     /// The button was pressed. Safari reports the switch the usual way.
     case pressed(milliseconds: Int)
+    /// Safari already shows the tab, so the button wasn't pressed (Safari's own tab bar does nothing
+    /// for the selected tab either). No report of a switch will come.
+    case alreadySelected
     /// Nothing was pressed; use the extension. Says why.
     case fallback(String)
     /// A later click replaced this one before it ran, so there is nothing left to do for it.

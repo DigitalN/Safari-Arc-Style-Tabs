@@ -532,12 +532,11 @@ final class TabStore {
 
     func activate(_ tab: BrowserTab, instance: String) {
         let key = TabKey(instance: instance, tabId: tab.id)
-        // Safari's own tab bar does nothing when you click the tab that's already selected, and
-        // neither does this: no press (the active tab's button holds the address field), nothing
-        // to wait for, and nothing to ask Safari about a second later.
-        if self.tab(for: key)?.active ?? tab.active {
-            return
-        }
+        // A click on the tab the sidebar shows as active is not skipped: the highlight can be wrong
+        // (a report that never arrived, a window Safari restored without telling the extension), and
+        // then the tab to switch to is the one it shows. Safari says whether it already shows the
+        // tab: the press path reads the tab bar's selected button first and presses nothing if
+        // it's this one (see `pressFinished`).
         let now = Date()
         let pointerDown = lastPointerDown?() ?? .distantPast
         activationCount += 1
@@ -616,6 +615,15 @@ final class TabStore {
         switch outcome {
         case .superseded:
             break
+        case .alreadySelected:
+            // Safari's own tab bar does nothing for the tab that's already selected, and neither does
+            // this: no press, and no report of a switch will come, so nothing is waited for or checked
+            // a second later. The highlight is already on the tab.
+            switchAsks.removeAll { $0.id == request.id }
+            if pendingActivation?.id == request.id {
+                pendingActivation = nil
+            }
+            log.notice("tab switch via accessibility: Safari already shows the tab; nothing pressed")
         case .pressed(let milliseconds):
             // Safari did what the button does before it answered, so there is nothing more to
             // send. In particular no command for the extension to run a second later "just in

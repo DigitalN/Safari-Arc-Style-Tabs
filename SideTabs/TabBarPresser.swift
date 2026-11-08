@@ -62,6 +62,8 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
         switch TabBarFinder.choose(target, among: buttons) {
         case .fallback(let reason):
             return .fallback(reason)
+        case .alreadySelected:
+            return .alreadySelected
         case .press(let button):
             let error = query.perform(button.element, kAXPressAction)
             guard error == .success else {
@@ -100,10 +102,11 @@ nonisolated struct AXTabBarNode: TabBarNode {
     let title: String?
     let descriptionText: String?
     let x: CGFloat?
+    let value: Int?
 
     /// nil if Safari doesn't answer for the element (it went away, or it's too slow).
     init?(_ element: AXUIElement, query: AXQuery) {
-        let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXIdentifierAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXPositionAttribute]
+        let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXIdentifierAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXPositionAttribute, kAXValueAttribute]
         guard let values = query.copyMultiple(element, attributes), values.count == attributes.count else { return nil }
         self.element = element
         self.query = query
@@ -120,6 +123,8 @@ nonisolated struct AXTabBarNode: TabBarNode {
             }
         }
         self.x = x
+        // A number on the tab buttons (1 selected, 0 not); other elements have text, or nothing.
+        value = (values[6] as? NSNumber)?.intValue
     }
 
     var actions: [String] { query.actionNames(element) }

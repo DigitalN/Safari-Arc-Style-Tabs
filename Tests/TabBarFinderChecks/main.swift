@@ -10,6 +10,10 @@ import Foundation
 //   constructed-*.json    Made up for a case nobody has recorded (the separate tab layout, a window
 //                         with no tab bar, labels that mustn't be trusted). Not Safari output.
 //
+// Every tab button carries `value`, Safari 26's `AXValue`: 1 on the selected tab's button, 0 on the
+// others (measured in #22; there is no AXSelected). The values in the files are written to match
+// that, with the button that holds the address field (the one with children) as the selected one.
+//
 // When the live app logs a window the finder gets wrong (the tab-bar diagnostics name the
 // elements it looked through), add that tree here.
 
@@ -32,11 +36,12 @@ struct RecordedNode: Decodable, TabBarNode {
     var title: String?
     var descriptionText: String?
     var x: CGFloat?
+    var value: Int?
     var actions: [String]
     var kids: [RecordedNode]
 
     enum CodingKeys: String, CodingKey {
-        case role, subrole, identifier, title, x, actions
+        case role, subrole, identifier, title, x, value, actions
         case descriptionText = "description"
         case kids = "children"
     }
@@ -49,6 +54,7 @@ struct RecordedNode: Decodable, TabBarNode {
         title = try values.decodeIfPresent(String.self, forKey: .title)
         descriptionText = try values.decodeIfPresent(String.self, forKey: .descriptionText)
         x = try values.decodeIfPresent(CGFloat.self, forKey: .x)
+        value = try values.decodeIfPresent(Int.self, forKey: .value)
         actions = try values.decodeIfPresent([String].self, forKey: .actions) ?? []
         kids = try values.decodeIfPresent([RecordedNode].self, forKey: .kids) ?? []
     }
@@ -99,6 +105,8 @@ do {
             switch TabBarFinder.choose(target(number), among: buttons) {
             case .press(let node):
                 check(node.title == "Test tab \(number)", "tab \(number) is pressed on its own button, not \(node.title ?? "nil")")
+            case .alreadySelected:
+                check(number == 3, "only the third tab, which Safari shows, is left alone; tab \(number) should be pressed")
             case .fallback(let reason):
                 check(false, "tab \(number) should be pressed, fell back: \(reason)")
             }
@@ -138,6 +146,51 @@ do {
         } else {
             check(false, "tab 29 should still be pressed")
         }
+    }
+}
+
+// MARK: - The selected tab (#22 item 1)
+
+do {
+    // In the recorded window the third tab is the selected one: Safari already shows it, so it isn't pressed.
+    if let bar = found("compact-window") {
+        let buttons = TabBarFinder.buttons(in: bar)
+        check(buttons.map(\.item.isSelected) == (1...30).map { $0 == 3 }, "exactly the third button is read as selected")
+        if case .alreadySelected = TabBarFinder.choose(target(3), among: buttons) {} else {
+            check(false, "the selected tab's button must not be pressed")
+        }
+        if case .press(let node) = TabBarFinder.choose(target(4), among: buttons) {
+            check(node.title == "Test tab 4", "any other tab is pressed on its own button")
+        } else {
+            check(false, "a tab that isn't selected should be pressed")
+        }
+    }
+    // Full screen and the separate layout read it the same way.
+    if let bar = found("compact-fullscreen") {
+        check(TabBarFinder.buttons(in: bar).filter { $0.item.isSelected == true }.count == 1, "one selected button in full screen")
+    }
+    if let bar = found("constructed-separate") {
+        let buttons = TabBarFinder.buttons(in: bar)
+        if case .alreadySelected = TabBarFinder.choose(target(2, of: 5), among: buttons) {} else {
+            check(false, "the separate layout's selected tab is not pressed")
+        }
+    }
+    // A Safari that doesn't report AXValue: nothing says a tab is selected, so the tab is pressed as before.
+    if let bar = found("constructed-no-value") {
+        let buttons = TabBarFinder.buttons(in: bar)
+        check(buttons.allSatisfy { $0.item.isSelected == nil }, "a button without AXValue says nothing about being selected")
+        if case .press(let node) = TabBarFinder.choose(target(2, of: 5), among: buttons) {
+            check(node.title == "Test tab 2", "so even the tab that is selected is pressed on its own button")
+        } else {
+            check(false, "without AXValue the tab should be pressed")
+        }
+    }
+    // A number that isn't 0 or 1 isn't understood either, and says nothing.
+    let odd = #"{"role":"AXOpaqueProviderGroup","identifier":"TabBar?","children":[{"role":"AXRadioButton","value":2,"title":"A","actions":["AXPress"]},{"role":"AXRadioButton","value":0,"title":"B","actions":["AXPress"]}]}"#
+    if let bar = try? JSONDecoder().decode(RecordedNode.self, from: Data(odd.utf8)) {
+        check(TabBarFinder.buttons(in: bar).map(\.item.isSelected) == [nil, false], "a value other than 0 or 1 says nothing")
+    } else {
+        check(false, "the inline tree should decode")
     }
 }
 
