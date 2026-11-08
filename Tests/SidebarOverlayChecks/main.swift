@@ -52,13 +52,83 @@ for screen in [laptop, besideRight, above] {
 }
 
 do {
-    // The strip is the screen's left edge, as before: within 2 points of it, the screen's height.
+    // The strip is the screen's left edge, within 2 points of it, as before.
     let strip = OverlayLayout.fullScreen(screen: laptop, toolbarBottom: nil, mainHeight: laptop.height, width: 260).strip
     check(strip.contains(CGPoint(x: 0, y: 500)), "the pointer against the screen's left edge brings it out")
     check(strip.contains(CGPoint(x: 2, y: 500)), "so does 2 points in")
     check(!strip.contains(CGPoint(x: 2.5, y: 500)), "but not more")
-    check(strip.contains(CGPoint(x: 0, y: 0)) && strip.contains(CGPoint(x: 0, y: 982)), "from the bottom of the screen to the top")
-    check(!strip.contains(CGPoint(x: 0, y: 983)) && !strip.contains(CGPoint(x: 0, y: -1)), "and no further")
+    check(strip.contains(CGPoint(x: 0, y: 0)), "from the bottom of the screen")
+    check(!strip.contains(CGPoint(x: 0, y: -1)), "and no lower")
+}
+
+do {
+    // #30: a display to the left of the full-screen one. Every point on it is left of the full-screen
+    // display's edge; none of them may count as being at it, or the sidebar flickers out and away.
+    let layout = OverlayLayout.fullScreen(screen: besideRight, toolbarBottom: nil, mainHeight: laptop.height, width: 260)
+    check(layout.strip.contains(CGPoint(x: 1512, y: 300)), "the full-screen display's own left edge still brings it out")
+    check(layout.strip.contains(CGPoint(x: 1511, y: 300)), "allowing a point past it for rounding")
+    check(!layout.strip.contains(CGPoint(x: 1510.5, y: 300)), "but no further")
+    for point in [CGPoint(x: 1000, y: 300), CGPoint(x: 0, y: 300), CGPoint(x: 1500, y: 0), CGPoint(x: 1505, y: 500)] {
+        check(!layout.strip.contains(point), "the pointer on the display to the left at \(point) does nothing")
+    }
+    // The same with the laptop full screen and a display to its left.
+    let left = OverlayLayout.fullScreen(screen: laptop, toolbarBottom: nil, mainHeight: laptop.height, width: 260)
+    check(!left.strip.contains(CGPoint(x: -800, y: 400)) && !left.strip.contains(CGPoint(x: -2, y: 400)), "nor on one left of the laptop")
+}
+
+do {
+    // #30: the top-left corner. Pointing at the top slides Safari's toolbar down; the strip stops at
+    // the toolbar's bottom, beside the panel, so the corner doesn't bring the sidebar out.
+    let unknown = OverlayLayout.fullScreen(screen: laptop, toolbarBottom: nil, mainHeight: laptop.height, width: 260)
+    check(unknown.strip.maxY == 982 - 60, "without the toolbar's bottom, the strip stops 60 points below the top")
+    check(!unknown.strip.contains(CGPoint(x: 0, y: 982)) && !unknown.strip.contains(CGPoint(x: 0, y: 950)), "the corner does nothing")
+    check(unknown.strip.contains(CGPoint(x: 0, y: 922)), "just below the toolbar still does")
+    let tall = OverlayLayout.fullScreen(screen: laptop, toolbarBottom: 97.5, mainHeight: laptop.height, width: 260)
+    check(tall.strip.maxY == 982 - 97.5, "a taller toolbar keeps the strip lower: \(tall.strip.maxY)")
+    check(!tall.strip.contains(CGPoint(x: 0, y: 900)), "beside the toolbar does nothing")
+    // On a second display, measured from its own top.
+    let external = OverlayLayout.fullScreen(screen: besideRight, toolbarBottom: nil, mainHeight: laptop.height, width: 260)
+    check(external.strip.maxY == besideRight.maxY - 60, "on another display the strip stops below that display's toolbar")
+    // A toolbar reported lower than the screen goes: the panel keeps its minimum height, and the strip
+    // still runs beside it rather than being empty.
+    let short = CGRect(x: 0, y: 0, width: 1512, height: 300)
+    let odd = OverlayLayout.fullScreen(screen: short, toolbarBottom: laptop.height - 10, mainHeight: laptop.height, width: 260)
+    check(odd.strip.minY == 0 && odd.strip.maxY == odd.panel.maxY, "the strip is beside the panel: \(odd.strip), panel \(odd.panel)")
+    check(odd.strip.contains(CGPoint(x: 0, y: 100)), "and the edge beside it brings it out")
+}
+
+do {
+    // Just after the pointer brings the sidebar out it is still on the strip, so all of the strip has
+    // to be close enough to the panel to keep it out; otherwise it flickers in and out (#30).
+    for screen in [laptop, besideRight, above] {
+        let screenTop = laptop.height - screen.maxY
+        for toolbar: CGFloat? in [nil, screenTop + 52, screenTop + 97.5, screenTop + 900] {
+            let layout = OverlayLayout.fullScreen(screen: screen, toolbarBottom: toolbar, mainHeight: laptop.height, width: 260)
+            let kept = layout.panel.insetBy(dx: -OverlayReveal.margin, dy: -OverlayReveal.margin)
+            let corners = [
+                CGPoint(x: layout.strip.minX, y: layout.strip.minY), CGPoint(x: layout.strip.maxX, y: layout.strip.minY),
+                CGPoint(x: layout.strip.minX, y: layout.strip.maxY), CGPoint(x: layout.strip.maxX, y: layout.strip.maxY),
+            ]
+            check(corners.allSatisfy(kept.contains), "full screen \(screen), toolbar \(toolbar.map { "\($0)" } ?? "unknown"): all of the strip keeps the sidebar out")
+        }
+    }
+}
+
+do {
+    // Played through: the pointer on a display to the left, then in the top-left corner, of a
+    // full-screen Safari. Neither brings the sidebar out, so neither flickers.
+    let layout = OverlayLayout.fullScreen(screen: besideRight, toolbarBottom: nil, mainHeight: laptop.height, width: 260)
+    var reveal = OverlayReveal()
+    var actions: [OverlayReveal.Action] = []
+    for point in [CGPoint(x: 800, y: 300), CGPoint(x: 1505, y: 300), CGPoint(x: 1512, y: besideRight.maxY - 1)] {
+        for _ in 0..<5 {
+            actions.append(reveal.poll(pointer: point, strip: layout.strip, panel: layout.panel, safariInFront: true, holding: false))
+        }
+    }
+    check(actions.allSatisfy { $0 == .none }, "no flicker: \(actions)")
+    // And at the edge beside the panel, it comes out once and stays.
+    actions = (0..<5).map { _ in reveal.poll(pointer: CGPoint(x: 1512, y: 300), strip: layout.strip, panel: layout.panel, safariInFront: true, holding: false) }
+    check(actions == [.reveal, .none, .none, .none, .none], "out once, and it stays: \(actions)")
 }
 
 // MARK: - A window's layout
@@ -103,7 +173,7 @@ do {
     let moved = window.offsetBy(dx: 150, dy: 40)
     let before = OverlayLayout.window(frame: window, visible: visible, toolbarBottom: windowTopAX + 52, mainHeight: laptop.height, width: 260)
     let after = OverlayLayout.window(frame: moved, visible: visible, toolbarBottom: windowTopAX - 40 + 52, mainHeight: laptop.height, width: 260)
-    check(after.strip.minX == before.strip.minX! + 150 && after.strip.maxX == before.strip.maxX + 150, "the strip moves with the window")
+    check(after.strip.minX == before.strip.minX + 150 && after.strip.maxX == before.strip.maxX + 150, "the strip moves with the window")
     check(after.panel == before.panel.offsetBy(dx: 150, dy: 40), "and so does the panel: \(before.panel) → \(after.panel)")
     let narrower = CGRect(x: 500, y: 100, width: 800, height: 700)
     let resized = OverlayLayout.window(frame: narrower, visible: visible, toolbarBottom: windowTopAX + 52, mainHeight: laptop.height, width: 260)
@@ -158,8 +228,8 @@ do {
             let layout = OverlayLayout.window(frame: frame, visible: visible, toolbarBottom: topAX + 52, mainHeight: laptop.height, width: width)
             let kept = layout.panel.insetBy(dx: -OverlayReveal.margin, dy: -OverlayReveal.margin)
             let corners = [
-                CGPoint(x: layout.strip.minX!, y: layout.strip.minY), CGPoint(x: layout.strip.maxX, y: layout.strip.minY),
-                CGPoint(x: layout.strip.minX!, y: layout.strip.maxY), CGPoint(x: layout.strip.maxX, y: layout.strip.maxY),
+                CGPoint(x: layout.strip.minX, y: layout.strip.minY), CGPoint(x: layout.strip.maxX, y: layout.strip.minY),
+                CGPoint(x: layout.strip.minX, y: layout.strip.maxY), CGPoint(x: layout.strip.maxX, y: layout.strip.maxY),
             ]
             check(corners.allSatisfy(kept.contains), "window \(frame), width \(width): all of the strip keeps the sidebar out")
         }

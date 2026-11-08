@@ -31,19 +31,17 @@ nonisolated enum OverlayPlace: Equatable {
     case window
 }
 
-/// Where the pointer has to be to bring the sidebar out. Its edges count as inside.
+/// Where the pointer has to be to bring the sidebar out. Its edges count as inside. It runs beside
+/// the panel, up to the bottom of Safari's toolbar, or to the panel's top if the panel's minimum
+/// height takes it higher (a very short window, or a toolbar reported lower than the screen goes).
 nonisolated struct RevealStrip: Equatable {
-    /// Nil when the strip reaches as far left as the pointer can go.
-    var minX: CGFloat?
+    var minX: CGFloat
     var maxX: CGFloat
     var minY: CGFloat
     var maxY: CGFloat
 
     func contains(_ point: CGPoint) -> Bool {
-        if let minX, point.x < minX {
-            return false
-        }
-        return point.x <= maxX && point.y >= minY && point.y <= maxY
+        point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY
     }
 }
 
@@ -66,18 +64,25 @@ nonisolated struct OverlayLayout: Equatable {
     /// little wider than the screen's.
     static let stripOutside: CGFloat = 4
     static let stripInside: CGFloat = 4
+    /// How far the full-screen strip reaches past the screen's left edge, where the pointer stops
+    /// unless another display is there. Only enough to allow for rounding: beyond it is the other
+    /// display, whose every point is left of this screen's edge (#30).
+    static let screenStripOutside: CGFloat = 1
 
     /// Full screen: the panel runs down the screen's left side below Safari's toolbar, and the
-    /// strip is the screen's left edge, all the way up.
+    /// strip is the screen's left edge beside it. Not above that: pointing at the top of the screen
+    /// slides Safari's toolbar down, and a strip in that corner would bring the sidebar out where the
+    /// pointer isn't, so it would go away again at once, and come back (#30).
     ///
     /// `toolbarBottom` is where Safari's toolbar and tab bar end, in Accessibility coordinates
     /// (y down from the top of the main display), if Safari said. `mainHeight` is the main
     /// display's height, which converts between the two.
     static func fullScreen(screen: CGRect, toolbarBottom: CGFloat?, mainHeight: CGFloat, width: CGFloat) -> OverlayLayout {
         let top = belowToolbar(areaTop: screen.maxY, toolbarBottom: toolbarBottom, mainHeight: mainHeight)
+        let panel = panelFrame(left: screen.minX, bottom: screen.minY, top: top, width: width)
         return OverlayLayout(
-            panel: panelFrame(left: screen.minX, bottom: screen.minY, top: top, width: width),
-            strip: RevealStrip(minX: nil, maxX: screen.minX + 2, minY: screen.minY, maxY: screen.maxY)
+            panel: panel,
+            strip: RevealStrip(minX: screen.minX - screenStripOutside, maxX: screen.minX + 2, minY: screen.minY, maxY: max(top, panel.maxY))
         )
     }
 
@@ -90,9 +95,10 @@ nonisolated struct OverlayLayout: Equatable {
         let shown = frame.intersection(visible)
         let area = shown.isNull || shown.isEmpty ? frame : shown
         let top = min(belowToolbar(areaTop: frame.maxY, toolbarBottom: toolbarBottom, mainHeight: mainHeight), area.maxY)
+        let panel = panelFrame(left: area.minX, bottom: area.minY, top: top, width: width)
         return OverlayLayout(
-            panel: panelFrame(left: area.minX, bottom: area.minY, top: top, width: width),
-            strip: RevealStrip(minX: area.minX - stripOutside, maxX: area.minX + stripInside, minY: area.minY, maxY: top)
+            panel: panel,
+            strip: RevealStrip(minX: area.minX - stripOutside, maxX: area.minX + stripInside, minY: area.minY, maxY: max(top, panel.maxY))
         )
     }
 
