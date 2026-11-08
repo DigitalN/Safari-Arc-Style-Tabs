@@ -601,10 +601,6 @@ final class TabStore {
     }
 
     private func switchPlan(for tab: BrowserTab, instance: String) -> SwitchPlan {
-        // [TEMP-tabSwitchMethod]
-        guard TabSwitchMethod.current == .accessibility else {
-            return .push(why: "the tabSwitchMethod setting says push")
-        }
         // The tab bar is the docked window's, which is the window the sidebar lists.
         guard let selection = currentWindow, selection.instance == instance, selection.window.id == tab.windowId else {
             return .push(why: "the tab is in a window other than the one the sidebar shows")

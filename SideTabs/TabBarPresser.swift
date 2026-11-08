@@ -18,14 +18,9 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.digitaln.sidetabs.accessibility-tabbar", qos: .userInteractive)
     private let query = AXQuery(timeout: 0.15)
     private let latest = OSAllocatedUnfairLock(initialState: 0)
-    private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "tracker")
 
     // Only used on `queue`.
     private var cachedTabBar: (window: AXUIElement, bar: AXUIElement)?
-    // [TEMP-tabSwitchMethod] The fallback diagnostics (this, the `diagnostic` closures `attempt`
-    // returns, `describe` and `describeChildren`) write the window's tab titles to the system log,
-    // public. They are for measuring the tab bar press and go with the switch, not before.
-    private var lastDiagnostic = ""
 
     /// Tries to press the button for `target` in `window`'s tab bar. `completion` runs on a
     /// background queue.
@@ -37,17 +32,7 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
         }
         queue.async { [self] in
             let isStale = { [latest] in latest.withLock { $0 } != generation }
-            let (outcome, diagnostic) = attempt(target, in: window, issued: issued, isStale: isStale)
-            completion(outcome)
-            // After the answer is on its way: the explanation costs more Accessibility calls.
-            // [TEMP-tabSwitchMethod] Logs tab titles, public.
-            if let diagnostic, case .fallback = outcome {
-                let text = diagnostic()
-                if text != lastDiagnostic {
-                    lastDiagnostic = text
-                    log.notice("tab bar: \(text, privacy: .public)")
-                }
-            }
+            completion(attempt(target, in: window, issued: issued, isStale: isStale))
         }
     }
 
@@ -56,7 +41,7 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
         in window: AXUIElement,
         issued: Date,
         isStale: () -> Bool
-    ) -> (TabBarPressOutcome, diagnostic: (() -> String)?) {
+    ) -> TabBarPressOutcome {
         query.clearTimedOut()
         /// A reason to stop now, if there is one.
         func stop() -> TabBarPressOutcome? {
@@ -66,25 +51,23 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
             return nil
         }
 
-        if let outcome = stop() { return (outcome, nil) }
+        if let outcome = stop() { return outcome }
         guard let bar = tabBar(in: window) else {
-            if let outcome = stop() { return (outcome, nil) }
-            return (.fallback("the window has no tab bar"), { [self] in describeChildren(of: window) })
+            return stop() ?? .fallback("the window has no tab bar")
         }
-        if let outcome = stop() { return (outcome, nil) }
+        if let outcome = stop() { return outcome }
         let buttons = TabBarFinder.buttons(in: bar)
-        if let outcome = stop() { return (outcome, nil) }
+        if let outcome = stop() { return outcome }
 
         switch TabBarFinder.choose(target, among: buttons) {
         case .fallback(let reason):
-            return (.fallback(reason), { Self.describe(buttons, for: target) })
+            return .fallback(reason)
         case .press(let button):
             let error = query.perform(button.element, kAXPressAction)
             guard error == .success else {
-                let reason = query.timedOut ? "Safari didn't answer the press in time" : "the press failed (error \(error.rawValue))"
-                return (.fallback(reason), { Self.describe(buttons, for: target) })
+                return .fallback(query.timedOut ? "Safari didn't answer the press in time" : "the press failed (error \(error.rawValue))")
             }
-            return (.pressed(milliseconds: Int(Date().timeIntervalSince(issued) * 1000)), nil)
+            return .pressed(milliseconds: Int(Date().timeIntervalSince(issued) * 1000))
         }
     }
 
@@ -103,47 +86,6 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
         guard let root = AXTabBarNode(window, query: query), let bar = TabBarFinder.tabBar(in: root) else { return nil }
         cachedTabBar = (window, bar.element)
         return bar
-    }
-
-    // MARK: - Explaining a fallback
-
-    /// What the tab bar looked like, for the log, so a fallback that shouldn't have happened can
-    /// be understood without Safari in front of you.
-    ///
-    /// [TEMP-tabSwitchMethod] Puts up to eight of the window's tab titles in the log. Browsing
-    /// titles shouldn't stay in the system log once the measurements are done: delete this and
-    /// `describeChildren` with the rest of the marked code.
-    private static func describe(_ buttons: [TabBarButton<AXTabBarNode>], for target: TabBarTarget) -> String {
-        func quoted(_ title: String?) -> String {
-            let text = TabBarMatcher.normalized(title)
-            return "“" + (text.count > 28 ? String(text.prefix(28)) + "…" : text) + "”"
-        }
-        let order = TabBarMatcher.visualOrder(of: buttons.map(\.item))
-        let shown = order.prefix(8).map { quoted(buttons[$0].item.title) }.joined(separator: ", ")
-        let tabs = target.windowTitles.prefix(8).map(quoted).joined(separator: ", ")
-        return "\(buttons.count) buttons [\(shown)\(order.count > 8 ? ", …" : "")] for \(target.windowTitles.count) tabs [\(tabs)\(target.windowTitles.count > 8 ? ", …" : "")]; wanted \(quoted(target.title)) at \(target.position)"
-    }
-
-    // [TEMP-tabSwitchMethod] Part of the same diagnostics (it names no titles, but is only used by them).
-    /// What the search looked through, so a layout it doesn't know can be told from a window that
-    /// really has no tab bar: each element as `role/subrole#identifier`, with `>` marks for its depth.
-    private func describeChildren(of window: AXUIElement) -> String {
-        var lines: [String] = []
-        func visit(_ element: AXUIElement, depth: Int) {
-            guard lines.count < 40, depth <= TabBarFinder.searchDepth else { return }
-            for child in query.elements(element, kAXChildrenAttribute) {
-                guard let node = AXTabBarNode(child, query: query) else { continue }
-                let subrole = node.subrole.map { "/" + $0 } ?? ""
-                // Up to the first "=": identifiers carry values such as the profile's name.
-                let identifier = node.identifier.map { "#" + String($0.prefix(while: { $0 != "=" }).prefix(32)) } ?? ""
-                lines.append(String(repeating: ">", count: depth) + (node.role ?? "?") + subrole + identifier)
-                if let role = node.role, ["AXToolbar", "AXGroup", "AXSplitGroup"].contains(role) {
-                    visit(child, depth: depth + 1)
-                }
-            }
-        }
-        visit(window, depth: 1)
-        return "no tab bar found: \(lines.joined(separator: " "))"
     }
 }
 

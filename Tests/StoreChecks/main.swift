@@ -156,15 +156,9 @@ do {
 /// Runs `body` with a store whose tab-bar presses are answered by the test, and the commands sent
 /// to the extension collected.
 func withPresser(
-    method: String? = nil,
     activeTab: Int = 1,
     _ body: (TabStore, _ presses: () -> [(target: TabBarTarget, finish: (TabBarPressOutcome) -> Void)], _ commands: () -> [[String: Any]]) -> Void
 ) {
-    // In memory only, so nothing is written to the Mac's preferences.
-    if let method {
-        UserDefaults.standard.setVolatileDomain(["tabSwitchMethod": method], forName: UserDefaults.argumentDomain)
-    }
-    defer { UserDefaults.standard.removeVolatileDomain(forName: UserDefaults.argumentDomain) }
     let (store, commands) = makeStore(active: activeTab)
     var presses: [(target: TabBarTarget, finish: (TabBarPressOutcome) -> Void)] = []
     store.pressTab = { target, finish in presses.append((target, finish)) }
@@ -233,17 +227,6 @@ withPresser { store, presses, commands in
     activated(store, tab: 3, seq: 2)
     presses()[0].finish(.fallback("Safari didn't answer in time"))
     check(activations(commands()).isEmpty, "a fallback that arrives after Safari confirmed the switch sends nothing")
-}
-
-withPresser(method: "push") { store, presses, commands in
-    click(store, tab: 3)
-    check(presses().isEmpty, "with the setting on push, the tab bar isn't tried")
-    check(activations(commands()) == [3], "and the extension's command goes out at once")
-}
-
-withPresser(method: "accessibility") { store, presses, commands in
-    click(store, tab: 3)
-    check(presses().count == 1 && activations(commands()).isEmpty, "the setting can also say accessibility")
 }
 
 do {
@@ -558,11 +541,6 @@ withPresser { store, presses, commands in
     check(presses().count == 1, "a second click on the tab just clicked is the active tab too")
     click(store, tab: 1)
     check(presses().count == 2, "a click on any other tab, the first one included, is a switch")
-}
-
-withPresser(method: "push") { store, presses, commands in
-    click(store, tab: 1)
-    check(commands().isEmpty, "the active tab isn't activated by the extension either")
 }
 
 // MARK: - Fixes found alongside (#21)
