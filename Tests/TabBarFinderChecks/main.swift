@@ -14,8 +14,8 @@ import Foundation
 // others (measured in #22; there is no AXSelected). The values in the files are written to match
 // that, with the button that holds the address field (the one with children) as the selected one.
 //
-// When the live app logs a window the finder gets wrong (the tab-bar diagnostics name the
-// elements it looked through), add that tree here.
+// When a window turns out to have a tab bar the finder misses (the log says a switch fell back
+// because "the window has no tab bar"), add that window's tree here.
 
 var failures = 0
 func check(_ condition: Bool, _ message: String, line: Int = #line) {

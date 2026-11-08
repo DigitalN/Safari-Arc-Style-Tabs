@@ -3,9 +3,9 @@ import Foundation
 // Checks for which tab-bar button the matcher picks (#18), against fixture tab bars.
 //
 // The fixtures model the buttons of a Safari window's tab bar: one radio button per tab, titled with
-// the page title, left to right. They are not dumps from a live Safari. When the live run logs a tab
-// bar that doesn't match (the app logs the buttons it saw on every fallback), add it here. (Finding
-// the bar in the window, from recorded trees, is checked in TabBarFinderChecks.)
+// the page title, left to right. They are not dumps from a live Safari. When a live run falls back
+// on a tab bar that should have matched (the log gives the reason, never the titles), add its
+// layout here. (Finding the bar in the window, from recorded trees, is checked in TabBarFinderChecks.)
 
 var failures = 0
 func check(_ condition: Bool, _ message: String, line: Int = #line) {
@@ -144,6 +144,71 @@ do {
         ) == false, "a stale position still resolves by unique title")
     check(isFallback(TabBarMatcher.match(TabBarTarget(title: "A", position: 7, windowTitles: ["A", "A"]), items: bar(["A", "A"]))),
           "a stale position with twin titles falls back")
+}
+
+// MARK: - Which tab Safari has selected (#22 item 2)
+
+/// `bar(titles)` with the button at `selected` marked as the selected tab's, the others as not.
+func barSelecting(_ selected: Int?, _ titles: [String?]) -> [TabBarItem] {
+    var buttons = bar(titles)
+    for index in buttons.indices {
+        buttons[index].isSelected = selected.map { $0 == index }
+    }
+    return buttons
+}
+
+func isUnknown(_ selection: TabBarSelection) -> Bool {
+    if case .unknown = selection { return true }
+    return false
+}
+
+do {
+    for position in five.indices {
+        check(TabBarMatcher.selection(among: barSelecting(position, five), windowTitles: five) == .tab(position: position),
+              "the selected button is the tab at its place (\(position))")
+    }
+
+    // Listed in another order than drawn: the place is where it's drawn.
+    var shuffled = barSelecting(2, five)
+    shuffled.swapAt(0, 3)
+    shuffled.swapAt(1, 4)
+    check(TabBarMatcher.selection(among: shuffled, windowTitles: five) == .tab(position: 2), "by where it is drawn, not where it is listed")
+
+    check(isUnknown(TabBarMatcher.selection(among: barSelecting(nil, five), windowTitles: five)),
+          "buttons that say nothing about being selected say nothing")
+    var two = barSelecting(1, five)
+    two[3].isSelected = true
+    check(isUnknown(TabBarMatcher.selection(among: two, windowTitles: five)), "two selected buttons can't both be right")
+    var none = barSelecting(1, five)
+    none[1].isSelected = false
+    check(isUnknown(TabBarMatcher.selection(among: none, windowTitles: five)), "and none selected says nothing")
+    check(isUnknown(TabBarMatcher.selection(among: [], windowTitles: five)), "no buttons, no answer")
+}
+
+do {
+    // The sidebar's tabs and Safari's differ: not sure which is meant, so nothing is said.
+    check(isUnknown(TabBarMatcher.selection(among: barSelecting(1, five), windowTitles: Array(five.dropLast()))),
+          "more buttons than tabs: the sidebar hasn't heard of a tab, so the place means nothing")
+    check(isUnknown(TabBarMatcher.selection(among: barSelecting(1, Array(five.dropLast())), windowTitles: five)),
+          "fewer buttons than tabs: the same")
+    var renamed = five
+    renamed[1] = "Something else"
+    check(isUnknown(TabBarMatcher.selection(among: barSelecting(1, five), windowTitles: renamed)),
+          "the selected tab's title differs from the sidebar's: not sure it is that tab")
+    check(TabBarMatcher.selection(among: barSelecting(1, five), windowTitles: ["Inbox", "GitHub", "Docs", "Other", "Maps"]) == .tab(position: 1),
+          "a title that differs elsewhere in the bar doesn't matter when the selected tab's own title is unique")
+    check(isUnknown(TabBarMatcher.selection(among: barSelecting(1, five), windowTitles: [nil, nil, nil, nil, nil])),
+          "tabs without titles can't be recognised")
+}
+
+do {
+    // Twin titles: the neighbours have to agree, as for a press.
+    let twins: [String?] = ["A", "Same", "Same", "B"]
+    check(TabBarMatcher.selection(among: barSelecting(1, twins), windowTitles: twins) == .tab(position: 1),
+          "twins are told apart by their place when the neighbours agree")
+    check(TabBarMatcher.selection(among: barSelecting(2, twins), windowTitles: twins) == .tab(position: 2), "both of them")
+    check(isUnknown(TabBarMatcher.selection(among: barSelecting(1, ["A", "Same", "Same", "B"]), windowTitles: ["Z", "Same", "Same", "B"])),
+          "but not when a neighbour differs: the order may be a moment behind")
 }
 
 if failures == 0 {

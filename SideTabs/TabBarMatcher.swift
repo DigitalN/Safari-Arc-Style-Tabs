@@ -80,6 +80,37 @@ nonisolated enum TabBarMatcher {
         return .fallback("the buttons don't line up with the tabs, and the title isn't unique")
     }
 
+    /// Which of the window's tabs Safari has selected, from the tab bar's buttons. The selected button
+    /// is mapped to a tab by its place, and only when the buttons line up with the tabs the way
+    /// `match` requires for a press: as many buttons as tabs, and the selected button's title is its
+    /// tab's (with the neighbours agreeing when another tab has the same title). Otherwise the
+    /// sidebar's idea of the tabs and Safari's differ, and nothing is said.
+    static func selection(among items: [TabBarItem], windowTitles: [String?]) -> TabBarSelection {
+        let selected = items.indices.filter { items[$0].isSelected == true }
+        guard !items.isEmpty else {
+            return .unknown("no tab buttons (the tab bar is hidden)")
+        }
+        guard selected.count == 1 else {
+            return .unknown(selected.isEmpty ? "no tab button says it is selected" : "\(selected.count) tab buttons say they are selected")
+        }
+        guard items.count == windowTitles.count else {
+            return .unknown("\(items.count) buttons for \(windowTitles.count) tabs")
+        }
+        let order = visualOrder(of: items)
+        guard let position = order.firstIndex(of: selected[0]) else {
+            return .unknown("the selected button isn't in the tab bar")
+        }
+        let target = TabBarTarget(title: windowTitles[position], position: position, windowTitles: windowTitles)
+        switch match(target, items: items) {
+        case .press(let index) where index == selected[0]:
+            return .tab(position: position)
+        case .press:
+            return .unknown("the selected button isn't the one its tab's title and place point to")
+        case .fallback(let reason):
+            return .unknown(reason)
+        }
+    }
+
     /// Indices of `items` from left to right. Without positions for all of them, as given.
     static func visualOrder(of items: [TabBarItem]) -> [Int] {
         let indices = Array(items.indices)
@@ -109,5 +140,16 @@ nonisolated enum TabBarPressOutcome: Equatable {
     /// Nothing was pressed; use the extension. Says why.
     case fallback(String)
     /// A later click replaced this one before it ran, so there is nothing left to do for it.
+    case superseded
+}
+
+/// What Safari's tab bar says about which tab is selected, as the sidebar can use it.
+nonisolated enum TabBarSelection: Equatable {
+    /// The window's tab at this place (counting from 0 at the left) is the selected one.
+    case tab(position: Int)
+    /// The buttons can't be mapped to the sidebar's tabs for certain, or Safari didn't answer. Says why;
+    /// the reason names no titles.
+    case unknown(String)
+    /// A later request replaced this one before it ran.
     case superseded
 }

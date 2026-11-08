@@ -155,15 +155,26 @@ do {
 
 /// Runs `body` with a store whose tab-bar presses are answered by the test, and the commands sent
 /// to the extension collected.
+///
+/// With `reading: true`, reads of Safari's selected tab (`selectionReads`) are answered by the test too;
+/// without it the store can't ask, and takes the extension's messages as it always did.
 func withPresser(
     activeTab: Int = 1,
+    reading: Bool = false,
     _ body: (TabStore, _ presses: () -> [(target: TabBarTarget, finish: (TabBarPressOutcome) -> Void)], _ commands: () -> [[String: Any]]) -> Void
 ) {
     let (store, commands) = makeStore(active: activeTab)
     var presses: [(target: TabBarTarget, finish: (TabBarPressOutcome) -> Void)] = []
     store.pressTab = { target, finish in presses.append((target, finish)) }
+    selectionReads = []
+    if reading {
+        store.checkSelection = { titles, finish in selectionReads.append((titles, finish)) }
+    }
     body(store, { presses }, commands)
 }
+
+/// The reads of Safari's selected tab the store asked for, with the titles it gave and how to answer.
+nonisolated(unsafe) var selectionReads: [(titles: [String?], finish: (TabBarSelection) -> Void)] = []
 
 func activations(_ commands: [[String: Any]]) -> [Int] {
     commands.filter { $0["action"] as? String == "activate" }.compactMap { $0["tabId"] as? Int }
@@ -579,6 +590,177 @@ withPresser { store, presses, commands in
     activated(store, tab: 3, seq: 2, at: nowMilliseconds())
     wait(1.2)
     check(commands().isEmpty, "and the newer click is still confirmed by its own report")
+}
+
+// MARK: - Late messages after a click was confirmed (#22 item 2)
+//
+// Under extreme load the extension runs its listeners seconds late, so reports of old clicks arrive after
+// a newer click was confirmed, and look like Safari moving on by itself. Safari's tab bar, read through
+// Accessibility, stays fast: a message that would move the highlight off the clicked tab asks it.
+
+withPresser(reading: true) { store, presses, commands in
+    // The retest: click 3, then 2; 2 is confirmed; then the late report for the first click arrives.
+    click(store, tab: 3)
+    click(store, tab: 2)
+    presses()[1].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    check(highlighted(store) == 2, "the newer click is confirmed")
+    activated(store, tab: 3, seq: 3, at: nowMilliseconds())
+    check(highlighted(store) == 2, "the late report for the replaced click doesn't move the highlight, even with nothing pending")
+    check(selectionReads.count == 1, "but a click whose report was lost leaves its ask behind, so Safari is asked what it shows")
+    selectionReads[0].finish(.tab(position: 1))
+    check(highlighted(store) == 2, "Safari is on tab 2: the report was old")
+    wait(1.2)
+    check(commands().isEmpty, "and nothing is sent")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // A click on tab 3 whose report was lost (its ask is still remembered), and tab 3 later is where Safari goes by itself.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    click(store, tab: 2)
+    presses()[1].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    activated(store, tab: 3, seq: 3, at: nowMilliseconds())
+    check(highlighted(store) == 2, "it can't be told from the late report of the click on tab 3, so the highlight waits")
+    selectionReads[0].finish(.tab(position: 2))
+    check(highlighted(store) == 3, "until Safari says it is on tab 3")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // ...and when Safari can't say, such a report stays held back (it most likely answers an old click).
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    click(store, tab: 2)
+    presses()[1].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    activated(store, tab: 3, seq: 3, at: nowMilliseconds())
+    selectionReads[0].finish(.unknown("2 buttons for 4 tabs"))
+    check(highlighted(store) == 2, "an answer of \"can't tell\" leaves it held back")
+    send(store, snapshotObject(seq: 4, active: 3, startedAt: nowMilliseconds()))
+    selectionReads.last?.finish(.unknown("2 buttons for 4 tabs"))
+    check(highlighted(store) == 3, "and the next snapshot, started after the click, shows where Safari is")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // A report that answers no click the sidebar remembers (the ask expired), after the click was confirmed.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    activated(store, tab: 4, seq: 3, at: nowMilliseconds())
+    check(highlighted(store) == 3, "a report of a switch to another tab doesn't move the highlight at once")
+    check(selectionReads.count == 1, "it asks Safari's tab bar which tab is selected")
+    check(selectionReads.first?.titles.compactMap { $0 } == ["Tab 1", "Tab 2", "Tab 3", "Tab 4"], "with the titles of the window's tabs")
+    selectionReads[0].finish(.tab(position: 2))
+    check(highlighted(store) == 3, "Safari is on the clicked tab: the highlight stays, as the late report was old")
+    activated(store, tab: 4, seq: 4, at: nowMilliseconds())
+    selectionReads[1].finish(.tab(position: 3))
+    check(highlighted(store) == 4, "when Safari really did move on, the highlight follows its answer")
+    wait(1.2)
+    check(commands().isEmpty, "and nothing was sent")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // Safari can't say: the report is taken as it was before the check existed.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    activated(store, tab: 4, seq: 3, at: nowMilliseconds())
+    selectionReads[0].finish(.unknown("2 buttons for 4 tabs"))
+    check(highlighted(store) == 4, "when the tab bar can't be mapped to the tabs, the report moves the highlight after all")
+    send(store, snapshotObject(seq: 4, active: 2))
+    check(highlighted(store) == 2, "and the sidebar follows Safari from there")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // Only the newest word counts: a click or a report since the question makes its answer old.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    activated(store, tab: 4, seq: 3, at: nowMilliseconds())
+    click(store, tab: 2)
+    selectionReads[0].finish(.tab(position: 3))
+    check(highlighted(store) == 2, "an answer that comes after a newer click is dropped")
+    presses()[1].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 2, seq: 4, at: nowMilliseconds())
+
+    activated(store, tab: 4, seq: 5, at: nowMilliseconds())
+    let first = selectionReads.count - 1
+    activated(store, tab: 1, seq: 6, at: nowMilliseconds())
+    selectionReads[first].finish(.tab(position: 3))
+    check(highlighted(store) == 2, "and so is one that comes after a newer report")
+    selectionReads[first + 1].finish(.tab(position: 0))
+    check(highlighted(store) == 1, "the newest report's own answer is used")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // A report stamped before the sidebar put the window on its tab describes a state it has replaced.
+    let earlier = nowMilliseconds() - 50
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    activated(store, tab: 2, seq: 3, at: earlier)
+    check(highlighted(store) == 3, "a report from before the click doesn't move the highlight")
+    check(selectionReads.isEmpty, "and needs no question: it is older than what the sidebar knows")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // Item 1's pending click, answered by Safari instead of the extension: Safari moved on after the press.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    wait(0.1)
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    check(highlighted(store) == 3 && selectionReads.count == 1, "Safari seems to have moved on after the click: the tab bar is asked first")
+    selectionReads[0].finish(.tab(position: 1))
+    check(highlighted(store) == 2, "it says tab 2, and the highlight goes there")
+    wait(1.2)
+    check(commands().isEmpty, "the click isn't waited for any more: no snapshot request")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // ...or Safari is on the clicked tab after all, and the report was old.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    wait(0.1)
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    selectionReads[0].finish(.tab(position: 2))
+    check(highlighted(store) == 3, "the highlight stays on the clicked tab")
+    wait(1.2)
+    check(commands().isEmpty, "and Safari's answer was the confirmation, so nothing is asked a second later")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // The press fell back and the extension's command is on its way: Safari is still on the old tab,
+    // so the tab bar says that, and the highlight must not go back to it.
+    click(store, tab: 3)
+    presses()[0].finish(.fallback("the window has no tab bar"))
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    selectionReads[0].finish(.tab(position: 0))
+    check(highlighted(store) == 3, "while the extension's command is on its way, the old tab is not where the click is going")
+    activated(store, tab: 3, seq: 3, at: nowMilliseconds())
+    check(highlighted(store) == 3, "and the command's own report confirms it")
+    wait(1.2)
+    check(snapshotRequests(commands()) == 0, "with nothing asked a second later")
+}
+
+do {
+    // Another window than the one the sidebar shows can't be read from the docked window's tab bar.
+    var object = snapshotObject(seq: 5, active: 1)
+    var windows = object["windows"] as! [[String: Any]]
+    windows.append(["id": 2, "focused": false, "incognito": false, "tabs": [tab(10, active: true, windowId: 2), tab(11, windowId: 2), tab(12, windowId: 2)]])
+    object["windows"] = windows
+    withPresser(reading: true) { store, presses, commands in
+        send(store, object)
+        click(store, tab: 11)
+        func report(tab id: Int, seq: Int) {
+            send(store, ["type": "activated", "instance": instance, "windowId": 2, "tabId": id, "seq": seq, "at": nowMilliseconds()])
+        }
+        report(tab: 11, seq: 6)
+        report(tab: 12, seq: 7)
+        check(selectionReads.isEmpty, "nothing is read for a window the sidebar isn't docked to")
+        let other = store.snapshots[instance]?.windows.first(where: { $0.id == 2 })?.tabs.first(where: \.active)?.id
+        check(other == 12, "its report is taken as it always was")
+    }
 }
 
 // MARK: - Fixes found alongside (#21)

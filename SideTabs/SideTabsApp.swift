@@ -94,6 +94,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             tracker.pressTab(target, then: completion)
         }
+        store.checkSelection = { [weak self] windowTitles, completion in
+            guard let self else {
+                completion(.unknown("the app is shutting down"))
+                return
+            }
+            tracker.selectedTab(windowTitles: windowTitles, then: completion)
+        }
 
         dock.start()
         store.requestSnapshot()

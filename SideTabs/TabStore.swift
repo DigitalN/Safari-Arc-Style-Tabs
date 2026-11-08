@@ -45,13 +45,37 @@ final class TabStore {
         let requestedAt: Date
 
         /// How long after a click its report is still looked for. Longer than the extension has
-        /// been seen to take under heavy load (about a second, and "seconds" in the worst runs).
-        /// Past this the report would be taken for Safari moving on, which only costs a moment:
-        /// the snapshot that follows it says where Safari is.
-        static let lifetime: TimeInterval = 10
+        /// been seen to take under heavy load: its listeners ran up to 20 s late in the worst run.
+        /// Past this the report would be taken for Safari moving on by itself, which Safari's own
+        /// tab bar then settles (see `Anchor`).
+        static let lifetime: TimeInterval = 30
 
         var isRecent: Bool { Date().timeIntervalSince(requestedAt) < Self.lifetime }
         var requestedAtMilliseconds: Double { (requestedAt.timeIntervalSince1970 * 1000).rounded(.down) }
+    }
+
+    /// A window of one extension instance (a profile), as Safari numbers it.
+    private struct WindowID: Hashable {
+        let instance: String
+        let windowId: Int
+    }
+
+    /// The tab the sidebar last put a window on, and since when: the tab it clicked, or the one
+    /// Safari's own tab bar later said was selected. Remembered for a while after the click is
+    /// confirmed, because the extension's messages arrive that late and out of order: one that says
+    /// Safari is on another tab may only describe a state the click has already replaced. So while it is
+    /// recent, a message from the extension can't move the window's highlight off this tab; it makes the
+    /// sidebar ask Safari which tab is selected, and that answer decides (see `checkSelectedTab`).
+    private struct Anchor {
+        let tabId: Int
+        /// When Safari was last known to be on the tab: the click, or the moment it was asked.
+        /// Anything the extension started or saw before this is older than what the sidebar knows.
+        let at: Date
+        /// The click that put it there, or nil when it was Safari's own answer.
+        let clickId: Int?
+
+        var isRecent: Bool { Date().timeIntervalSince(at) < SwitchAsk.lifetime }
+        var atMilliseconds: Double { (at.timeIntervalSince1970 * 1000).rounded(.down) }
     }
 
     private(set) var snapshots: [String: Snapshot] = [:]
@@ -82,6 +106,9 @@ final class TabStore {
     /// Switches a tab by pressing its button in Safari's tab bar (see TabBarPresser). The
     /// completion runs on the main thread and says whether it worked or the extension has to do it.
     @ObservationIgnored var pressTab: ((TabBarTarget, @escaping (TabBarPressOutcome) -> Void) -> Void)?
+    /// Reads which tab Safari has selected in the window the sidebar is docked to (see
+    /// TabBarPresser), given the titles of that window's tabs. The completion runs on the main thread.
+    @ObservationIgnored var checkSelection: (([String?], @escaping (TabBarSelection) -> Void) -> Void)?
 
     /// Names whose tab ids are gone (Safari restarted), keyed by URL so they can be
     /// given back to the restored tabs.
@@ -93,6 +120,11 @@ final class TabStore {
     @ObservationIgnored private var activationCount = 0
     /// The tab switches the sidebar asked for lately, oldest first (see SwitchAsk).
     @ObservationIgnored private var switchAsks: [SwitchAsk] = []
+    /// Where the sidebar last put each window (see Anchor).
+    @ObservationIgnored private var anchors: [WindowID: Anchor] = [:]
+    /// Counts the clicks and the reports of tab switches, so an answer from Safari's tab bar can be told
+    /// to have come too late: if either has happened since it was asked for, something newer decides.
+    @ObservationIgnored private var eventCount = 0
     /// The newest `activated` report applied for each extension instance, so an older one that
     /// arrives late is ignored, and a snapshot older than it doesn't undo it.
     /// `heldBack` is set for a report that didn't move the highlight because a click was waiting
@@ -215,7 +247,13 @@ final class TabStore {
     /// `seq` numbers the report together with the instance's snapshots; without one (an older
     /// extension still running) the report is taken as the newest. `at` is when the extension
     /// saw the switch (`Date.now()`), which says whether it came before or after the last click.
+    ///
+    /// A report that would move the highlight off the tab the sidebar put the window on doesn't
+    /// do it by itself while that is recent: it asks Safari's tab bar which tab is selected, and
+    /// that answer decides (`checkSelectedTab`).
     private func applyActivation(instance: String, windowId: Int, tabId: Int, seq: Int?, at: Double?) {
+        // Any report is news for a check of Safari's tab bar that is on its way (see `eventCount`).
+        eventCount += 1
         if let seq {
             // Reports are separate messages and can arrive out of order. One older than a
             // snapshot or report already applied describes a tab Safari has since left.
@@ -225,10 +263,14 @@ final class TabStore {
             }
         }
         let reported = TabKey(instance: instance, tabId: tabId)
+        let window = WindowID(instance: instance, windowId: windowId)
+        let anchor = recentAnchor(of: window)
         // What the report means for the switch the sidebar is waiting for:
         var heldBack = false    // it describes a state the click has already replaced
         var confirms = false    // it is the click's own switch
         var movedOnAfter: Int?  // Safari went somewhere else after the click (this many ms after it)
+        var askSafari = false   // it would move the highlight off the tab the sidebar put the window on
+        var believeIfUnknown = true // ... and if Safari can't say, it is taken as it always was
         let pending = pendingActivation
         let waitingInWindow = pending.map { $0.isFresh && $0.key.instance == instance && tab(for: $0.key)?.windowId == windowId } ?? false
         // A stamped report that answers one of the sidebar's own clicks: the oldest click on this
@@ -237,46 +279,137 @@ final class TabStore {
             let ask = switchAsks.remove(at: index)
             if ask.id == pending?.id {
                 confirms = true
-            } else if waitingInWindow {
-                // The answer to an earlier click, after a newer one: the highlight is already on
-                // the newer one, and moving it back would only make it jump.
+            } else if let anchor, ask.id != anchor.clickId {
+                // Most likely the answer to an earlier click than the newest one in this window,
+                // whether or not that one has been confirmed since: the highlight is already on the
+                // newer one, and moving it back would only make it jump, or leave it on a tab Safari
+                // left. But a click whose report was lost leaves its ask behind, and a later move
+                // of Safari's own to that tab would look the same, so Safari is asked; if it can't say,
+                // the report is held back.
                 heldBack = true
+                askSafari = true
+                believeIfUnknown = false
             }
-        } else if let pending {
+        } else if let pending, reported == pending.key || waitingInWindow {
             // A switch Safari made before the click asked for its own isn't the click's doing.
             let beforeClick = at.map { $0 < pending.requestedAtMilliseconds } ?? false
             if reported == pending.key {
                 confirms = !beforeClick
-            } else if waitingInWindow {
-                // Another tab in the window the click is switching. Without a stamp, or with one
-                // from before the click, it is the report of an earlier click's switch (an
-                // extension that sends no stamps can't be told otherwise). With one from after
-                // the click that doesn't answer any click of the sidebar's, it is Safari going
-                // somewhere on its own (its own tab bar, ⌘1–9, a closed tab).
-                if let at, !beforeClick {
-                    movedOnAfter = Int(at - pending.requestedAtMilliseconds)
-                } else {
-                    heldBack = true
-                }
+            } else if let at, !beforeClick {
+                // Another tab in the window the click is switching. With a stamp from after the click
+                // that doesn't answer any click of the sidebar's, it is Safari going somewhere on its
+                // own (its own tab bar, ⌘1–9, a closed tab). Without a stamp, or with one from before
+                // the click, it is the report of an earlier click's switch (an extension that sends
+                // no stamps can't be told otherwise).
+                movedOnAfter = Int(at - pending.requestedAtMilliseconds)
+                askSafari = true
+            } else {
+                heldBack = true
+            }
+        } else if let anchor, anchor.tabId != tabId {
+            // Nothing is waiting for this report, but the sidebar put the window on another tab not
+            // long ago. A report stamped before that is older than what the sidebar knows; any other
+            // may be Safari moving on, or the late report of a click whose ask has expired.
+            if let at, at < anchor.atMilliseconds {
+                heldBack = true
+            } else {
+                askSafari = true
             }
         }
         if let seq {
-            lastActivation[instance] = (seq, windowId, tabId, heldBack)
+            lastActivation[instance] = (seq, windowId, tabId, heldBack || askSafari)
         }
-        if !heldBack {
+        if askSafari {
+            checkSelectedTab(in: window, because: "a report of a switch to another tab") { [self] in
+                // Safari can't say: the report is taken as it always was (or, if it most likely
+                // answers an earlier click, stays held back).
+                guard believeIfUnknown else { return }
+                if let seq, lastActivation[instance]?.seq == seq {
+                    lastActivation[instance]?.heldBack = false
+                }
+                if let movedOnAfter, let pending, pendingActivation?.id == pending.id {
+                    pendingActivation = nil
+                    log.notice("Safari switched to another tab \(movedOnAfter) ms after the click; no longer waiting for the clicked tab")
+                }
+                let believedAt = at.map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
+                anchors[window] = Anchor(tabId: tabId, at: believedAt, clickId: nil)
+                moveHighlight(instance: instance, windowId: windowId, tabId: tabId)
+            }
+        } else if !heldBack {
             moveHighlight(instance: instance, windowId: windowId, tabId: tabId)
         }
         if let pending {
             if confirms {
                 confirmActivation(pending)
-            } else if let movedOnAfter {
-                // The tab being waited for is no longer the one Safari is to be on.
-                pendingActivation = nil
-                log.notice("Safari switched to another tab \(movedOnAfter) ms after the click; no longer waiting for the clicked tab")
             } else if !pending.isFresh {
                 dropStalePending()
             }
         }
+    }
+
+    private func recentAnchor(of window: WindowID) -> Anchor? {
+        anchors[window].flatMap { $0.isRecent ? $0 : nil }
+    }
+
+    /// Asks Safari's tab bar which tab it has selected in `window`, and lets that decide where the
+    /// highlight is. Used when a message from the extension would move the highlight off the tab the
+    /// sidebar put the window on: the extension runs late under load, so what it says may be old, but
+    /// Accessibility answers in about ten milliseconds whatever the load.
+    ///
+    /// The read happens off the main thread. Its answer is dropped if a click or a report has arrived
+    /// since it was asked for, because that is newer than the answer. `whenUnknown` runs when Safari's
+    /// tab bar can't be asked or can't say (the buttons don't line up with the window's tabs, or Safari
+    /// didn't answer in time), so the message is taken the way it was before this check existed.
+    private func checkSelectedTab(in window: WindowID, because why: String, whenUnknown fallback: @escaping () -> Void) {
+        guard let checkSelection, let selection = currentWindow,
+              selection.instance == window.instance, selection.window.id == window.windowId else {
+            fallback()
+            return
+        }
+        let tabs = selection.window.tabs
+        let eventsBefore = eventCount
+        let asked = Date()
+        checkSelection(tabs.map(\.title)) { [weak self] answer in
+            guard let self else { return }
+            if answer == .superseded { return }
+            guard self.eventCount == eventsBefore else {
+                self.log.info("Safari's selected tab (\(why, privacy: .public)) was read, but a click or a report has come since; not using it")
+                return
+            }
+            switch answer {
+            case .tab(let position) where tabs.indices.contains(position):
+                self.log.notice("Safari's selected tab (\(why, privacy: .public)) is the one at position \(position)")
+                self.settle(on: tabs[position].id, in: window, asked: asked)
+            case .tab, .unknown:
+                var reason = "the position doesn't fit the window's tabs"
+                if case .unknown(let said) = answer { reason = said }
+                self.log.notice("Safari's selected tab (\(why, privacy: .public)) can't be told: \(reason, privacy: .public)")
+                fallback()
+            case .superseded:
+                break
+            }
+        }
+    }
+
+    /// Puts the highlight on the tab Safari's tab bar says is selected, and ends the wait for a click
+    /// that this settles: confirmed if Safari is on the clicked tab, otherwise Safari is somewhere
+    /// else and the click isn't waited for any more. The exception is a click whose command to the
+    /// extension is still on its way: Safari hasn't gone there yet, and the highlight stays.
+    private func settle(on tabId: Int, in window: WindowID, asked: Date) {
+        if let pending = pendingActivation, pending.key.instance == window.instance,
+           tab(for: pending.key)?.windowId == window.windowId {
+            if pending.key.tabId == tabId {
+                confirmActivation(pending)
+            } else if pending.isFresh && pending.path != "accessibility" {
+                return
+            } else {
+                pendingActivation = nil
+                log.notice("Safari is on another tab than the clicked one; no longer waiting for it")
+            }
+        }
+        let clickId = anchors[window]?.tabId == tabId ? anchors[window]?.clickId : nil
+        anchors[window] = Anchor(tabId: tabId, at: asked, clickId: clickId)
+        moveHighlight(instance: window.instance, windowId: window.windowId, tabId: tabId)
     }
 
     private func dropStalePending() {
@@ -304,6 +437,7 @@ final class TabStore {
         snapshots.removeAll()
         lastActivation.removeAll()
         switchAsks.removeAll()
+        anchors.removeAll()
         pendingActivation = nil
         orphanNamesOfDeadInstances()
         bookmarkLinks.removeAll()
@@ -553,6 +687,9 @@ final class TabStore {
         if switchAsks.count > 16 {
             switchAsks.removeFirst(switchAsks.count - 16)
         }
+        eventCount += 1
+        anchors = anchors.filter { $0.value.isRecent }
+        anchors[WindowID(instance: instance, windowId: tab.windowId)] = Anchor(tabId: tab.id, at: now, clickId: request.id)
         pendingActivation = request
         scheduleCheck(of: request)
         let plan = switchPlan(for: tab, instance: instance)

@@ -455,6 +455,18 @@ final class SafariTracker {
         }
     }
 
+    /// Reads which of the docked window's tabs Safari has selected, from its tab bar, given the titles
+    /// of the window's tabs as the sidebar has them. `completion` runs on the main thread.
+    func selectedTab(windowTitles: [String?], then completion: @escaping (TabBarSelection) -> Void) {
+        guard isTrusted, let window else {
+            completion(.unknown("there is no docked Safari window"))
+            return
+        }
+        tabBar.selectedTab(windowTitles: windowTitles, in: window) { selection in
+            DispatchQueue.main.async { completion(selection) }
+        }
+    }
+
     /// When Safari is in front but another of its windows has focus (Settings, a second
     /// window), makes the window the sidebar is docked to the focused one.
     ///

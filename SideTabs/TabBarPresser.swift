@@ -9,6 +9,10 @@ import os
 /// Everything happens off the main thread, with short timeouts, and never presses a button unless
 /// it's sure which tab it belongs to (see TabBarMatcher). Whenever it isn't, or the press fails,
 /// or Safari is too slow, the outcome says to fall back to the extension.
+///
+/// It also says which tab Safari has selected (`selectedTab`), which stays answerable when the
+/// extension is starved: reading the selected state of 28 buttons took 11 ms under the heaviest
+/// load the extension was tested with, where its own messages ran seconds late or were lost.
 nonisolated final class TabBarPresser: @unchecked Sendable {
     /// From the click to the press, all of it has to fit in this, or the extension is used
     /// instead: a busy Safari answers the extension no faster, but it shouldn't be asked twice
@@ -18,6 +22,8 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.digitaln.sidetabs.accessibility-tabbar", qos: .userInteractive)
     private let query = AXQuery(timeout: 0.15)
     private let latest = OSAllocatedUnfairLock(initialState: 0)
+    /// The newest request to read the selected tab. An older one still queued is not worth running.
+    private let latestSelection = OSAllocatedUnfairLock(initialState: 0)
 
     // Only used on `queue`.
     private var cachedTabBar: (window: AXUIElement, bar: AXUIElement)?
@@ -33,6 +39,41 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
         queue.async { [self] in
             let isStale = { [latest] in latest.withLock { $0 } != generation }
             completion(attempt(target, in: window, issued: issued, isStale: isStale))
+        }
+    }
+
+    /// Reads which of the window's tabs Safari has selected, given the titles of the window's tabs as
+    /// the sidebar has them. `completion` runs on a background queue.
+    ///
+    /// Shares the queue with presses, so it can't delay a press by more than one read, and it is
+    /// dropped (`superseded`) if a newer press or request was made before it ran: whatever it
+    /// would say is about to be old.
+    func selectedTab(
+        windowTitles: [String?],
+        in window: AXUIElement,
+        then completion: @escaping @Sendable (TabBarSelection) -> Void
+    ) {
+        let pressGeneration = latest.withLock { $0 }
+        let generation = latestSelection.withLock { value -> Int in
+            value += 1
+            return value
+        }
+        queue.async { [self] in
+            if latestSelection.withLock({ $0 }) != generation || latest.withLock({ $0 }) != pressGeneration {
+                completion(.superseded)
+                return
+            }
+            query.clearTimedOut()
+            guard let bar = tabBar(in: window) else {
+                completion(.unknown(query.timedOut ? "Safari didn't answer in time" : "the window has no tab bar"))
+                return
+            }
+            let buttons = TabBarFinder.buttons(in: bar)
+            if query.timedOut {
+                completion(.unknown("Safari didn't answer in time"))
+                return
+            }
+            completion(TabBarMatcher.selection(among: buttons.map(\.item), windowTitles: windowTitles))
         }
     }
 
