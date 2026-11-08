@@ -33,6 +33,8 @@ final class SafariTracker {
         case terminated
         /// A background read found a different window to dock to than the one known before.
         case windowChanged
+        /// The docked window's title changed (`reading` has the new one). Nothing else did.
+        case titleChanged
     }
 
     var onEvent: ((Event) -> Void)?
@@ -232,6 +234,12 @@ final class SafariTracker {
         case kAXWindowResizedNotification:
             if let window, CFEqual(window, element) {
                 refreshWindow(full: false) { [weak self] _ in self?.onEvent?(.resized) }
+            }
+        case _ where DockedWindowNotifications.isTitleChange(name):
+            // Reported by every window, but only the docked one matters, and only its title: the
+            // read is the same as for a move, and what follows is not a layout.
+            if let window, CFEqual(window, element) {
+                refreshWindow(full: false) { [weak self] _ in self?.onEvent?(.titleChanged) }
             }
         case kAXApplicationHiddenNotification, kAXApplicationShownNotification:
             onEvent?(.visibilityChanged)

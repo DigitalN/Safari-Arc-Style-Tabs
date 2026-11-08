@@ -51,12 +51,7 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
     private var lastWindowDescription = ""
     private var lastRejectedDescription = ""
 
-    static let windowNotifications = [
-        kAXWindowMovedNotification,
-        kAXWindowResizedNotification,
-        kAXUIElementDestroyedNotification,
-        kAXWindowMiniaturizedNotification,
-    ]
+    static let windowNotifications = DockedWindowNotifications.names
 
     // MARK: - Notifications
 

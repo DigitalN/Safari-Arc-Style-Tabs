@@ -911,6 +911,19 @@ do {
 }
 
 do {
+    // #22 item 4: a window opened while Safari wasn't the active app. The extension's focus report still
+    // names the other window, and the title the store held was the new window's before its page loaded.
+    // Once the store follows the window's title, the right window is listed.
+    let (store, commands) = makeStore()
+    send(store, windowsSnapshot(seq: 5, focused: 1, [(1, "Test tab 29", false), (2, "Test tab 30", false)]))
+    store.dockedWindowTitle = "Personal — Untitled"
+    check(store.currentWindow?.window.id == 1, "with a title that fits no window, the window the extension focused is listed")
+    check(snapshotRequests(commands()) == 1, "and Safari is asked for a snapshot")
+    store.dockedWindowTitle = "Personal — Test tab 30"
+    check(store.currentWindow?.window.id == 2, "as soon as the docked window's title is updated, its own window is listed")
+}
+
+do {
     // The same page title in two windows, in a profile window and one without: the docked window's title picks.
     let (store, _) = makeStore()
     send(store, windowsSnapshot(seq: 5, focused: 2, [(1, "Docs — Intro", false), (2, "Intro", false)]))

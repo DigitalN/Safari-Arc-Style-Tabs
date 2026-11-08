@@ -93,6 +93,12 @@ final class DockController {
             store.requestSnapshot()
         case .focusChanged, .visibilityChanged, .windowChanged:
             update(makeRoom: true)
+        case .titleChanged:
+            // Only the store's copy of the title, which picks the window to list. Nothing about where
+            // the window is has changed, so the layout isn't done again.
+            if let window = tracker.window {
+                store.dockedWindowTitle = tracker.title(of: window)
+            }
         case .terminated:
             store.safariDidTerminate()
             hide()
