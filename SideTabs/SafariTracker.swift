@@ -44,6 +44,9 @@ final class SafariTracker {
     private(set) var window: AXUIElement?
     /// What was last read from `window`: its frame, title and so on.
     private(set) var reading = WindowReading()
+    /// Also read where Safari's toolbar ends in normal windows, not only in full screen: the sidebar
+    /// that hides automatically comes out below it.
+    var readsToolbarInWindows = false
 
     private var appElement: AXUIElement?
     private var observer: AXObserver?
@@ -290,8 +293,9 @@ final class SafariTracker {
         let current = window
         let previous = reading
         let reader = windowReader
+        let toolbarInWindows = readsToolbarInWindows
         reader.queue.async { [weak self] in
-            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full)
+            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full, toolbarInWindows: toolbarInWindows)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self?.finish(request, outcome: outcome, epoch: epoch)
@@ -357,8 +361,9 @@ final class SafariTracker {
     func setFrame(_ frame: CGRect, of window: AXUIElement, then completion: ((CGRect?) -> Void)? = nil) {
         let previous = reading
         let reader = windowReader
+        let toolbarInWindows = readsToolbarInWindows
         reader.queue.async { [weak self] in
-            let reading = reader.setFrame(frame, of: window, previous: previous)
+            let reading = reader.setFrame(frame, of: window, previous: previous, toolbarInWindows: toolbarInWindows)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let self, let current = self.window, CFEqual(current, window) {

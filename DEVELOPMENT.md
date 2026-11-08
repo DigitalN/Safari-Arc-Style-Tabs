@@ -35,7 +35,9 @@ handling of messages, where Safari's tab bar is in a window's Accessibility tree
 of its buttons a tab matches and which one Safari has selected, checked against trees kept as data in
 `Tests/TabBarFinderChecks/trees`; what a press on a row turns into; which row is under a
 middle click; which queued
-Accessibility requests are still wanted; which notifications the docked window is watched for),
+Accessibility requests are still wanted; which notifications the docked window is watched for;
+where the sidebar slides out over the page in full screen or when it hides automatically, and what
+brings it out and puts it away),
 a check that no log line carries a window or tab title, and a compile check of the app's sources. It doesn't touch the
 installed app, Safari, or your saved bookmarks and names. Anything that needs the real
 Safari (clicks, windows, timing) still has to be tried by hand.
@@ -162,7 +164,9 @@ separate window that the app keeps attached to Safari's window:
   - `SafariTracker` follows Safari's front window through the Accessibility API and
     brings Safari forward.
   - `DockController` positions the panel directly behind Safari's window, narrows Safari
-    to fit, and handles full screen.
+    to fit, and handles full screen. In full screen, and in any window when *Hide sidebar
+    automatically* is on, the sidebar is an overlay that slides out from the left edge;
+    `SidebarOverlay` holds where it goes and when it comes out and goes away.
   - `TabStore` holds tabs, bookmarks and custom names.
   - `FaviconStore` asks the extension for icons and keeps them.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
