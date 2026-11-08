@@ -309,6 +309,19 @@ struct SettingsView: View {
                 Toggle("Show bookmarks", isOn: $settings.showBookmarks)
             }
 
+            Section("Tabs") {
+                Toggle(isOn: $settings.closesUnviewedTabs) {
+                    Text("Close tabs I haven't looked at")
+                    Text("Closed tabs are listed at the bottom left of the sidebar, where you can reopen them. Bookmarks, pinned tabs, tabs playing sound and private windows stay open.")
+                }
+                Picker("Close after", selection: $settings.unviewedTabInterval) {
+                    ForEach(CleanupInterval.allCases) { interval in
+                        Text(interval.label).tag(interval)
+                    }
+                }
+                .disabled(!settings.closesUnviewedTabs)
+            }
+
             Section("General") {
                 Toggle("Open at login", isOn: Binding(
                     get: { settings.launchAtLoginStatus() },

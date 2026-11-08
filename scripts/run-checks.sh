@@ -20,8 +20,16 @@ node Tests/ExtensionChecks/background-checks.js
 echo "== TabStore"
 swiftc -o "$WORK/store-checks" \
     Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift SideTabs/TabBarMatcher.swift \
-    Shared/Bridge.swift
+    Shared/Bridge.swift SideTabs/TabCleanup.swift
 "$WORK/store-checks"
+
+# Which tabs cleanup closes, the clocks it keeps, its list of closed tabs and reopening them (#27).
+# Like the store checks, every store here keeps its state in a temporary folder.
+echo "== tab cleanup"
+swiftc -o "$WORK/cleanup-checks" \
+    Tests/TabCleanupChecks/main.swift SideTabs/TabCleanup.swift SideTabs/TabStore.swift SideTabs/Models.swift \
+    SideTabs/TabBarMatcher.swift SideTabs/AppSettings.swift Shared/Bridge.swift
+"$WORK/cleanup-checks"
 
 echo "== click actions"
 swiftc -o "$WORK/click-checks" \
@@ -67,6 +75,14 @@ if grep -nE '(\blog\.(notice|info|error|debug|warning|fault)|\bnote)\(.*[Tt]itle
     exit 1
 fi
 echo "no titles in the log"
+# Nor a page's address, which is browsing history too. Cleanup's list of closed tabs holds both, and
+# they belong in state.json only (#27).
+if grep -nE '(\blog\.(notice|info|error|debug|warning|fault)|\bnote)\(.*\\\([^)]*\b(url|URL|urls|faviconURL|favIconUrl)\b' \
+    SideTabs/*.swift SideTabs/Views/*.swift; then
+    echo "FAIL: a log line carries a page's URL; leave it out"
+    exit 1
+fi
+echo "no URLs in the log"
 
 # A quick compile check of the app's Swift sources (no signing, no packaging). The full
 # build is scripts/build.sh.

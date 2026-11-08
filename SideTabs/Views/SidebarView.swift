@@ -7,6 +7,7 @@ struct SidebarView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(SidebarRows.self) private var rows
     @State private var drag = SidebarDrag()
+    @State private var showsClosedTabs = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,6 +45,9 @@ struct SidebarView: View {
                 }
                 .scrollIndicators(.automatic)
                 .onWindowFrame { rows.viewport = $0 }
+                // The tabs cleanup closed, listed in place of bookmarks and tabs while that's open.
+                .replaced(by: ClosedTabsList(isShown: $showsClosedTabs), when: showsClosedTabs && settings.closesUnviewedTabs)
+                BottomBar(showsClosedTabs: $showsClosedTabs)
             } else {
                 EmptySidebar()
             }

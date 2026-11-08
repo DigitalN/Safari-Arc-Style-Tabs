@@ -218,6 +218,9 @@ async function runCommand(command) {
             if (command.requestId) {
                 postToApp({ type: "created", instance, requestId: command.requestId, tabId: tab.id });
             }
+            // A closed tab reopened from cleanup's list in another window than the current one (its
+            // own profile's) brings that window forward, so it doesn't open out of sight.
+            if (command.focus) await browser.windows.update(tab.windowId, { focused: true });
             break;
         }
 
