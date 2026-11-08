@@ -61,3 +61,8 @@ menu bar icon.
 - **Tab names and icons are missing.** Allow the extension on every website (setup step 3).
 - **The sidebar says "Connecting to Safari…".** That's normal for a few seconds after
   Safari or Side Tabs starts.
+
+## License
+
+Free and open source under the [GNU GPL v3 or later](LICENSE): use it, change it and
+share it, but what you share stays open too. Keep the [NOTICE](docs/NOTICE) file with it.
