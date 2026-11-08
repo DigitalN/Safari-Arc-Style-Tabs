@@ -63,17 +63,21 @@ final class DockController {
         // Picks up Accessibility access being granted, Safari windows appearing, etc., and
         // puts the sidebar right after changes macOS didn't announce, including a switch to
         // another Safari window that the window notifications missed.
+        // The reads of Safari's windows happen off the main thread; this runs when they're in. If
+        // Safari is slow to answer, that is later, and the sidebar stays as it was meanwhile.
         healthTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 let wasAttached = self.tracker.isAttached
                 self.tracker.attachIfNeeded()
-                let windowChanged = self.tracker.refreshWindow()
-                if !wasAttached && self.tracker.isAttached || self.mode == .hidden || windowChanged {
-                    self.update(makeRoom: true)
-                } else if let problem = self.placementProblem() {
-                    self.log.notice("fixing: \(problem, privacy: .public)")
-                    self.update(makeRoom: NSEvent.pressedMouseButtons == 0)
+                self.tracker.refreshWindow { [weak self] windowChanged in
+                    guard let self else { return }
+                    if !wasAttached && self.tracker.isAttached || self.mode == .hidden || windowChanged {
+                        self.update(makeRoom: true)
+                    } else if let problem = self.placementProblem() {
+                        self.log.notice("fixing: \(problem, privacy: .public)")
+                        self.update(makeRoom: NSEvent.pressedMouseButtons == 0)
+                    }
                 }
             }
         }
@@ -87,8 +91,14 @@ final class DockController {
         case .launched:
             update(makeRoom: true)
             store.requestSnapshot()
-        case .focusChanged, .visibilityChanged:
+        case .focusChanged, .visibilityChanged, .windowChanged:
             update(makeRoom: true)
+        case .titleChanged:
+            // Only the store's copy of the title, which picks the window to list. Nothing about where
+            // the window is has changed, so the layout isn't done again.
+            if let window = tracker.window {
+                store.dockedWindowTitle = tracker.title(of: window)
+            }
         case .terminated:
             store.safariDidTerminate()
             hide()
@@ -158,7 +168,7 @@ final class DockController {
         }
 
         if tracker.isFullScreen(window) {
-            note("full screen overlay for “\(title ?? "untitled")”")
+            note("full screen overlay")
             showOverlay(on: screen(containing: axFrame), window: window)
             return
         }
@@ -174,7 +184,7 @@ final class DockController {
         orderPanel(below: window)
         mode = .docked
         appliedInset = settings.width
-        note("docked to “\(title ?? "untitled")”: Safari at \(axFrame.integral), panel at \(panel.frame), on screen: \(panel.isVisible && panel.isOnActiveSpace)")
+        note("docked: Safari at \(axFrame.integral), panel at \(panel.frame), on screen: \(panel.isVisible && panel.isOnActiveSpace)")
 
         if makeRoom {
             self.makeRoom(for: window)
@@ -291,9 +301,13 @@ final class DockController {
 
         let width = max(min(frame.width, visible.maxX - left), minimumSafariWidth)
         let target = CGRect(x: left, y: frame.minY, width: width, height: frame.height)
-        tracker.setFrame(target, of: window)
-        let result = String(describing: tracker.frame(of: window))
-        log.notice("made room: Safari \(String(describing: frame), privacy: .public) → \(result, privacy: .public)")
+        // The write waits on Safari, so it's made off the main thread; the sidebar follows once
+        // the window reports where it ended up.
+        tracker.setFrame(target, of: window) { [weak self] result in
+            guard let self else { return }
+            self.log.notice("made room: Safari \(String(describing: frame), privacy: .public) → \(String(describing: result), privacy: .public)")
+            self.update(makeRoom: false)
+        }
     }
 
     /// When the sidebar width changes and Safari was sitting right against it, move
@@ -307,19 +321,27 @@ final class DockController {
         guard abs(frame.minX - (visible.minX + previous)) < 2 else { return }
         let left = visible.minX + settings.width
         let width = max(frame.maxX - left, minimumSafariWidth)
-        tracker.setFrame(CGRect(x: left, y: frame.minY, width: width, height: frame.height), of: window)
+        tracker.setFrame(CGRect(x: left, y: frame.minY, width: width, height: frame.height), of: window) { [weak self] _ in
+            self?.update(makeRoom: false)
+        }
         appliedInset = settings.width
     }
 
-    /// Gives Safari its space back when the sidebar is hidden or the app quits.
-    func restoreSafariFrame() {
+    /// Gives Safari its space back when the sidebar is hidden or the app quits. When quitting,
+    /// `waiting` holds the app until Safari has been moved, since nothing runs afterwards.
+    func restoreSafariFrame(waiting: Bool = false) {
         guard let inset = appliedInset,
               let window = tracker.window,
               let frame = tracker.frame(of: window),
               !tracker.isFullScreen(window) else { return }
         let visible = screen(containing: frame).visibleFrame.flippedScreenCoordinates
         guard abs(frame.minX - (visible.minX + inset)) < 2 else { return }
-        tracker.setFrame(CGRect(x: visible.minX, y: frame.minY, width: frame.maxX - visible.minX, height: frame.height), of: window)
+        let target = CGRect(x: visible.minX, y: frame.minY, width: frame.maxX - visible.minX, height: frame.height)
+        if waiting {
+            tracker.setFrameAndWait(target, of: window)
+        } else {
+            tracker.setFrame(target, of: window)
+        }
     }
 
     private func screen(containing axFrame: CGRect) -> NSScreen {

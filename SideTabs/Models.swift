@@ -33,6 +33,9 @@ struct Snapshot: Codable {
     let focusedWindowId: Int?
     let lastFocusedWindowId: Int?
     let focusChangedAt: Double
+    /// When the extension started building this snapshot (`Date.now()`, milliseconds since 1970).
+    /// Nil from an extension page that doesn't send it.
+    let startedAt: Double?
     var windows: [BrowserWindow]
     var profile: String?
 }

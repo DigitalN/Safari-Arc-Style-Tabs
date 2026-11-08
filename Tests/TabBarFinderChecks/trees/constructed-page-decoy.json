@@ -1,0 +1,31 @@
+{"role":"AXWindow","subrole":"AXStandardWindow","children":[
+  {"role":"AXSplitGroup","children":[
+    {"role":"AXSplitter"},
+    {"role":"AXTabGroup","children":[
+      {"role":"AXGroup","identifier":"BrowserView?tab=1","children":[
+        {"role":"AXGroup","children":[
+          {"role":"AXGroup","children":[
+            {"role":"AXOpaqueProviderGroup","subrole":"AXOpaqueProviderList","description":"Tab bar, 3 tabs","identifier":"TabBar?isSeparate=false","children":[
+              {"role":"AXRadioButton","subrole":"AXTabButton","value":1,"identifier":"TabBarTab?isNarrow=true&tab=1","title":"Test tab 1","description":"Test tab 1","x":100,"actions":["AXPress","Name:close tab"],"children":[
+                {"role":"AXTextField","description":"smart search field"},
+                {"role":"AXImage"},
+                {"role":"AXButton","description":"Page Menu","actions":["AXPress"]}
+              ]},
+              {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=2","title":"Test tab 2","description":"Test tab 2","x":140,"actions":["AXPress","Name:close tab"]},
+              {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=3","title":"Test tab 3","description":"Test tab 3","x":180,"actions":["AXPress","Name:close tab"]}
+            ]}
+          ]}
+        ]}
+      ]}
+    ]}
+  ]},
+  {"role":"AXToolbar","children":[
+    {"role":"AXButton","description":"Toggle sidebar","actions":["AXPress"]},
+    {"role":"AXMenuButton","identifier":"TabGroupPickerButton?Profile","actions":["AXPress"]},
+    {"role":"AXButton","description":"Side Tabs","actions":["AXPress"]},
+    {"role":"AXButton","description":"Downloads","actions":["AXPress"]},
+    {"role":"AXButton","description":"Share","actions":["AXPress"]},
+    {"role":"AXButton","description":"New Tab","actions":["AXPress"]},
+    {"role":"AXButton","description":"Tab Overview","actions":["AXPress"]}
+  ]}
+]}

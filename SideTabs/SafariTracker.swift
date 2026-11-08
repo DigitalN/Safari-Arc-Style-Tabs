@@ -2,11 +2,6 @@ import AppKit
 import ApplicationServices
 import os.log
 
-/// Private but long-stable API (used by most window managers) that maps an AX window to
-/// its window server id, so the panel can be ordered directly above Safari's window.
-@_silgen_name("_AXUIElementGetWindow")
-private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
-
 /// Private but long-stable window server calls (also used by most window managers) that
 /// say which Spaces a window is on and which Space each display is showing.
 @_silgen_name("CGSMainConnectionID")
@@ -20,6 +15,12 @@ private func CGSCopyManagedDisplaySpaces(_ connection: Int32) -> Unmanaged<CFArr
 
 /// Watches Safari through the Accessibility API: which browser window is in front, where
 /// it is, and whether it's full screen, minimized or hidden.
+///
+/// Nothing here waits for Safari on the main thread. Safari answers Accessibility calls from its
+/// own main thread, which can be busy for seconds, and the sidebar's main thread has clicks to
+/// handle. The reads happen in SafariWindowReader; this class keeps the last answer (`window`
+/// and `reading`) and updates it when a new one arrives, so a slow Safari just means the
+/// sidebar goes on with what it last knew.
 final class SafariTracker {
     static let safariBundleID = "com.apple.Safari"
 
@@ -30,6 +31,10 @@ final class SafariTracker {
         case visibilityChanged
         case launched
         case terminated
+        /// A background read found a different window to dock to than the one known before.
+        case windowChanged
+        /// The docked window's title changed (`reading` has the new one). Nothing else did.
+        case titleChanged
     }
 
     var onEvent: ((Event) -> Void)?
@@ -37,15 +42,33 @@ final class SafariTracker {
     private(set) var app: NSRunningApplication?
     /// The browser window the sidebar docks to.
     private(set) var window: AXUIElement?
+    /// What was last read from `window`: its frame, title and so on.
+    private(set) var reading = WindowReading()
 
     private var appElement: AXUIElement?
     private var observer: AXObserver?
-    /// Safari's File → Open Location… menu item, found once per Safari launch.
-    private var openLocationItem: AXUIElement?
+    /// The window Safari last reported as focused, kept up to date by its notifications and
+    /// the periodic refresh, so a click doesn't have to ask Safari on every mouse-down.
+    private var focusedWindow: AXUIElement?
+    /// The Accessibility requests a click makes of Safari, which run off the main thread.
+    private let clickActions = ClickActions()
+    /// Reads Safari's windows off the main thread.
+    private let windowReader = SafariWindowReader()
+    /// Switches tabs by pressing their buttons in Safari's tab bar, off the main thread.
+    private let tabBar = TabBarPresser()
     private var workspaceTokens: [NSObjectProtocol] = []
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "tracker")
-    private var lastWindowDescription = ""
-    private var lastRejectedDescription = ""
+
+    /// Window reads in flight. One runs at a time; requests made meanwhile are merged into one
+    /// that starts when it finishes, so a burst of window events costs Safari two reads at most.
+    private struct RefreshRequest {
+        var full: Bool
+        var completions: [(Bool) -> Void]
+    }
+    private var refreshRunning = false
+    private var queuedRefresh: RefreshRequest?
+    /// Bumped when attaching or detaching, so a read that started before can be told apart.
+    private var attachment = 0
 
     private static let appNotifications = [
         kAXFocusedWindowChangedNotification,
@@ -57,13 +80,6 @@ final class SafariTracker {
         kAXWindowDeminiaturizedNotification,
         kAXApplicationHiddenNotification,
         kAXApplicationShownNotification,
-    ]
-
-    private static let windowNotifications = [
-        kAXWindowMovedNotification,
-        kAXWindowResizedNotification,
-        kAXUIElementDestroyedNotification,
-        kAXWindowMiniaturizedNotification,
     ]
 
     var isTrusted: Bool { AccessibilityAccess.isGranted }
@@ -95,7 +111,7 @@ final class SafariTracker {
             // Give Safari a moment to create its accessibility hierarchy.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 tracker.attach(app)
-                tracker.onEvent?(.launched)
+                tracker.refreshWindow { _ in tracker.onEvent?(.launched) }
             }
         }
         observe(NSWorkspace.didTerminateApplicationNotification) { tracker, app in
@@ -106,15 +122,15 @@ final class SafariTracker {
         }
         observe(NSWorkspace.didActivateApplicationNotification) { tracker, app in
             if app?.bundleIdentifier == Self.safariBundleID {
-                tracker.refreshWindow()
+                tracker.refreshWindow { _ in tracker.onEvent?(.focusChanged) }
+            } else {
+                tracker.onEvent?(.focusChanged)
             }
-            tracker.onEvent?(.focusChanged)
         }
         observe(NSWorkspace.didHideApplicationNotification) { tracker, _ in tracker.onEvent?(.visibilityChanged) }
         observe(NSWorkspace.didUnhideApplicationNotification) { tracker, _ in tracker.onEvent?(.visibilityChanged) }
         observe(NSWorkspace.activeSpaceDidChangeNotification) { tracker, _ in
-            tracker.refreshWindow()
-            tracker.onEvent?(.visibilityChanged)
+            tracker.refreshWindow { _ in tracker.onEvent?(.visibilityChanged) }
         }
 
         attachIfNeeded()
@@ -128,8 +144,13 @@ final class SafariTracker {
         guard let app, !app.isTerminated else { return }
         if observer == nil {
             attach(app)
-        } else if window == nil {
-            refreshWindow()
+        }
+        if window == nil {
+            refreshWindow { [weak self] changed in
+                if changed {
+                    self?.onEvent?(.windowChanged)
+                }
+            }
         }
     }
 
@@ -154,187 +175,208 @@ final class SafariTracker {
             return
         }
 
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
-        var failures: [String] = []
-        for name in Self.appNotifications {
-            let error = AXObserverAddNotification(created, element, name as CFString, refcon)
-            if error != .success {
-                failures.append("\(name)=\(error.rawValue)")
-            }
-        }
-        log.notice("attached to Safari pid \(app.processIdentifier); notification failures: \(failures.isEmpty ? "none" : failures.joined(separator: ", "), privacy: .public)")
-        guard failures.count < Self.appNotifications.count else { return }
-
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .commonModes)
         appElement = element
         observer = created
-        refreshWindow()
+        attachment += 1
+
+        // Safari answers these requests from its main thread, which is the last thing to be free
+        // right after it launches, so they're made off ours. If Safari refuses all of them it
+        // isn't ready yet; let go, and the next attempt starts again.
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        let registration = Registration(observer: created, refcon: refcon)
+        let pid = app.processIdentifier
+        let names = Self.appNotifications
+        let reader = windowReader
+        let epoch = attachment
+        reader.queue.async { [weak self, log] in
+            reader.use(observer: registration.observer, refcon: registration.refcon)
+            let failures = reader.register(names, on: element, observer: registration.observer, refcon: registration.refcon)
+            log.notice("attached to Safari pid \(pid); notification failures: \(failures.isEmpty ? "none" : failures.joined(separator: ", "), privacy: .public)")
+            guard failures.count >= names.count else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let self, self.attachment == epoch {
+                        self.detach()
+                    }
+                }
+            }
+        }
+    }
+
+    /// An observer and the pointer its callback gets back, which can cross to the reader's queue.
+    private struct Registration: @unchecked Sendable {
+        let observer: AXObserver
+        let refcon: UnsafeMutableRawPointer
     }
 
     private func detach() {
         if let observer {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         }
+        attachment += 1
         observer = nil
         appElement = nil
         window = nil
-        openLocationItem = nil
+        reading = WindowReading()
+        focusedWindow = nil
+        clickActions.forgetMenuItem()
+        let reader = windowReader
+        reader.queue.async { reader.stopWatching() }
     }
 
     private func handle(_ name: String, element: AXUIElement) {
         switch name {
         case kAXWindowMovedNotification:
             if let window, CFEqual(window, element) {
-                onEvent?(.moved)
+                refreshWindow(full: false) { [weak self] _ in self?.onEvent?(.moved) }
             }
         case kAXWindowResizedNotification:
             if let window, CFEqual(window, element) {
-                onEvent?(.resized)
+                refreshWindow(full: false) { [weak self] _ in self?.onEvent?(.resized) }
+            }
+        case _ where DockedWindowNotifications.isTitleChange(name):
+            // Reported by every window, but only the docked one matters, and only its title: the
+            // read is the same as for a move, and what follows is not a layout.
+            if let window, CFEqual(window, element) {
+                refreshWindow(full: false) { [weak self] _ in self?.onEvent?(.titleChanged) }
             }
         case kAXApplicationHiddenNotification, kAXApplicationShownNotification:
             onEvent?(.visibilityChanged)
         case kAXWindowMiniaturizedNotification, kAXUIElementDestroyedNotification:
-            refreshWindow()
-            onEvent?(.visibilityChanged)
+            refreshWindow { [weak self] _ in self?.onEvent?(.visibilityChanged) }
         default:
-            refreshWindow()
-            onEvent?(.focusChanged)
+            refreshWindow { [weak self] _ in self?.onEvent?(.focusChanged) }
         }
     }
 
     // MARK: - Choosing the window
 
-    /// Picks the browser window to dock to: the focused one if it's a browser window,
-    /// otherwise keeps the current one, otherwise the frontmost browser window. Returns
-    /// whether the window changed.
-    @discardableResult
-    func refreshWindow() -> Bool {
-        let previous = window
-        setWindow(chooseWindow())
-        switch (previous, window) {
-        case let (old?, new?): return !CFEqual(old, new)
-        case (nil, nil): return false
-        default: return true
-        }
-    }
-
-    private func chooseWindow() -> AXUIElement? {
-        guard let appElement else { return nil }
-        let focused = element(appElement, kAXFocusedWindowAttribute)
-        if let focused, isBrowserWindow(focused) {
-            return focused
-        }
-        if let main = element(appElement, kAXMainWindowAttribute), isBrowserWindow(main) {
-            return main
-        }
-        if let focused {
-            let description = describe(focused)
-            if description != lastRejectedDescription {
-                lastRejectedDescription = description
-                log.notice("focused window isn't a browser window: \(description, privacy: .public)")
+    /// Looks again at which browser window to dock to, and at where it is, without waiting for
+    /// Safari on this thread. `completion` runs on the main thread when the answer is in,
+    /// with whether the docked window changed. If Safari doesn't answer in time, nothing
+    /// changes and `completion` is told so.
+    ///
+    /// Only one read runs at a time. Requests made while it does are merged into the next.
+    /// `full: false` only looks at the docked window's frame and the like, which is all a move or
+    /// resize needs.
+    func refreshWindow(full: Bool = true, then completion: ((Bool) -> Void)? = nil) {
+        let request = RefreshRequest(full: full || window == nil, completions: completion.map { [$0] } ?? [])
+        guard !refreshRunning else {
+            if var queued = queuedRefresh {
+                queued.full = queued.full || request.full
+                queued.completions += request.completions
+                queuedRefresh = queued
+            } else {
+                queuedRefresh = request
             }
-        }
-        if let window, isBrowserWindow(window) {
-            return window
-        }
-        let windows = elements(appElement, kAXWindowsAttribute)
-        if let first = windows.first(where: isBrowserWindow) {
-            return first
-        }
-        let description = windows.isEmpty ? "Safari reports no windows" : windows.map(describe).joined(separator: "; ")
-        if description != lastWindowDescription {
-            lastWindowDescription = description
-            log.notice("no browser window among: \(description, privacy: .public)")
-        }
-        return nil
-    }
-
-    private func describe(_ window: AXUIElement) -> String {
-        let button = element(window, kAXFullScreenButtonAttribute)
-        let buttonState = button.map { bool($0, kAXEnabledAttribute).map { $0 ? "enabled" : "disabled" } ?? "unknown" } ?? "missing"
-        return "“\(title(of: window) ?? "")” role=\(string(window, kAXRoleAttribute) ?? "nil") subrole=\(string(window, kAXSubroleAttribute) ?? "nil") minimized=\(bool(window, kAXMinimizedAttribute).map(String.init) ?? "nil") fullScreenButton=\(buttonState)"
-    }
-
-    private func setWindow(_ newWindow: AXUIElement?) {
-        if let window, let newWindow, CFEqual(window, newWindow) {
             return
         }
-        if let observer, let window {
-            for name in Self.windowNotifications {
-                AXObserverRemoveNotification(observer, window, name as CFString)
-            }
+        beginRefresh(request)
+    }
+
+    private func beginRefresh(_ request: RefreshRequest) {
+        guard let appElement else {
+            // Not attached: there is no window.
+            let changed = window != nil
+            window = nil
+            reading = WindowReading()
+            focusedWindow = nil
+            request.completions.forEach { $0(changed) }
+            return
         }
-        window = newWindow
-        if let observer, let newWindow {
-            let refcon = Unmanaged.passUnretained(self).toOpaque()
-            for name in Self.windowNotifications {
-                AXObserverAddNotification(observer, newWindow, name as CFString, refcon)
+        refreshRunning = true
+        let epoch = attachment
+        let current = window
+        let previous = reading
+        let reader = windowReader
+        reader.queue.async { [weak self] in
+            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.finish(request, outcome: outcome, epoch: epoch)
+                }
             }
         }
     }
 
-    /// Browser windows are standard windows that can go full screen. Safari's Settings
-    /// window has a disabled full-screen button, which is how it's told apart. Safari now and
-    /// then leaves the button out of a browser window for a few seconds, so a missing button
-    /// doesn't count against a window.
-    func isBrowserWindow(_ window: AXUIElement) -> Bool {
-        guard string(window, kAXRoleAttribute) == kAXWindowRole,
-              string(window, kAXSubroleAttribute) == kAXStandardWindowSubrole,
-              bool(window, kAXMinimizedAttribute) != true else { return false }
-        if isFullScreen(window) {
-            return true
+    private func finish(_ request: RefreshRequest, outcome: SafariWindowReader.Outcome, epoch: Int) {
+        refreshRunning = false
+        var changed = false
+        if epoch == attachment, !outcome.keepPrevious {
+            if outcome.focusedWindowKnown {
+                focusedWindow = outcome.focusedWindow
+            }
+            switch (window, outcome.window) {
+            case let (old?, new?): changed = !CFEqual(old, new)
+            case (nil, nil): changed = false
+            default: changed = true
+            }
+            window = outcome.window
+            reading = outcome.reading
         }
-        guard let button = element(window, kAXFullScreenButtonAttribute) else { return true }
-        return bool(button, kAXEnabledAttribute) ?? true
+        request.completions.forEach { $0(changed) }
+        if let next = queuedRefresh {
+            queuedRefresh = nil
+            beginRefresh(next)
+        }
     }
 
     // MARK: - Window geometry (AX coordinates: origin top-left of the main display, y down)
 
+    // These answer from the last read of the docked window, never by asking Safari.
+
     func frame(of window: AXUIElement) -> CGRect? {
-        guard let positionValue = value(window, kAXPositionAttribute),
-              let sizeValue = value(window, kAXSizeAttribute) else { return nil }
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(positionValue, .cgPoint, &position),
-              AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
-        return CGRect(origin: position, size: size)
-    }
-
-    func setFrame(_ frame: CGRect, of window: AXUIElement) {
-        var position = frame.origin
-        var size = frame.size
-        guard let positionValue = AXValueCreate(.cgPoint, &position),
-              let sizeValue = AXValueCreate(.cgSize, &size) else { return }
-        // Position, size, position: shrinking can be blocked until the window has moved,
-        // and a constrained resize can nudge the origin.
-        AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
-        AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, sizeValue)
-        AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
-    }
-
-    func isFullScreen(_ window: AXUIElement) -> Bool {
-        bool(window, "AXFullScreen") ?? false
+        cachedReading(of: window)?.frame
     }
 
     func title(of window: AXUIElement) -> String? {
-        string(window, kAXTitleAttribute)
+        cachedReading(of: window)?.title
     }
 
-    /// Bottom edge (AX coordinates) of Safari's toolbar and tab bar, from the window's direct
-    /// children only so it stays fast. Nil if Safari doesn't report them (e.g. a hidden
-    /// full-screen toolbar).
+    func isFullScreen(_ window: AXUIElement) -> Bool {
+        cachedReading(of: window)?.isFullScreen ?? false
+    }
+
+    func windowNumber(of window: AXUIElement) -> Int? {
+        cachedReading(of: window)?.number
+    }
+
+    /// Bottom edge of Safari's toolbar and tab bar in full screen, if Safari reported them.
     func toolbarBottom(of window: AXUIElement) -> CGFloat? {
-        guard let windowFrame = frame(of: window) else { return nil }
-        var bottom: CGFloat?
-        for child in elements(window, kAXChildrenAttribute) {
-            guard let role = string(child, kAXRoleAttribute),
-                  role == kAXToolbarRole || role == kAXTabGroupRole,
-                  let childFrame = frame(of: child),
-                  childFrame.height < 200,
-                  childFrame.minY < windowFrame.minY + 200 else { continue }
-            bottom = max(bottom ?? childFrame.maxY, childFrame.maxY)
+        cachedReading(of: window)?.toolbarBottom
+    }
+
+    private func cachedReading(of element: AXUIElement) -> WindowReading? {
+        guard let window, CFEqual(window, element) else { return nil }
+        return reading
+    }
+
+    /// Moves and resizes the docked window, off the main thread, then reads it back.
+    /// `completion` runs on the main thread with the frame the window ended up with.
+    func setFrame(_ frame: CGRect, of window: AXUIElement, then completion: ((CGRect?) -> Void)? = nil) {
+        let previous = reading
+        let reader = windowReader
+        reader.queue.async { [weak self] in
+            let reading = reader.setFrame(frame, of: window, previous: previous)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let self, let current = self.window, CFEqual(current, window) {
+                        self.reading = reading
+                    }
+                    completion?(reading.frame)
+                }
+            }
         }
-        return bottom
+    }
+
+    /// The same, but waits. For when the app is quitting and won't be around for the answer.
+    func setFrameAndWait(_ frame: CGRect, of window: AXUIElement) {
+        let previous = reading
+        let reader = windowReader
+        reader.queue.sync {
+            _ = reader.setFrame(frame, of: window, previous: previous)
+        }
     }
 
     /// Whether the window is on a Space being shown. Full-screen windows have their own
@@ -363,79 +405,31 @@ final class SafariTracker {
         return info?.first?[kCGWindowIsOnscreen as String] as? Bool ?? false
     }
 
-    func windowNumber(of window: AXUIElement) -> Int? {
-        var id: CGWindowID = 0
-        guard _AXUIElementGetWindow(window, &id) == .success, id != 0 else { return nil }
-        return Int(id)
-    }
-
-    /// Puts the cursor in Safari's own address bar, like pressing ⌘L. Presses the menu
-    /// item whose shortcut is ⌘L (so it works in any language and keyboard layout), or
-    /// sends the keystroke if that item can't be found.
+    /// Puts the cursor in Safari's own address bar, like pressing ⌘L, once Safari is in front.
     func openLocation() {
         focusSafari { [weak self] in
-            self?.pressOpenLocation()
+            guard let self, let appElement, let pid = app?.processIdentifier else { return }
+            // Part of the click that brought Safari forward, so it runs after that click's
+            // raise, and is dropped if the user has clicked something else since.
+            clickActions.pressOpenLocation(application: appElement, processIdentifier: pid, ticket: clickActions.currentTicket())
         }
-    }
-
-    private func pressOpenLocation() {
-        if openLocationItem == nil {
-            openLocationItem = findMenuItem(commandKey: "L")
-        }
-        if let item = openLocationItem, AXUIElementPerformAction(item, kAXPressAction as CFString) == .success {
-            return
-        }
-        openLocationItem = nil
-        log.notice("Open Location menu item not found; sending ⌘L instead")
-        guard let pid = app?.processIdentifier else { return }
-        let source = CGEventSource(stateID: .hidSystemState)
-        for keyDown in [true, false] {
-            let event = CGEvent(keyboardEventSource: source, virtualKey: 0x25, keyDown: keyDown) // L
-            event?.flags = .maskCommand
-            event?.postToPid(pid)
-        }
-    }
-
-    /// A menu item whose shortcut is ⌘ plus `commandKey`. Starts with the File menu,
-    /// where Open Location lives, to keep the search short.
-    private func findMenuItem(commandKey: String) -> AXUIElement? {
-        guard let appElement, let menuBar = element(appElement, kAXMenuBarAttribute) else { return nil }
-        var menus = elements(menuBar, kAXChildrenAttribute)
-        if menus.count > 2 {
-            menus.insert(menus.remove(at: 2), at: 0)
-        }
-        for menuBarItem in menus {
-            for menu in elements(menuBarItem, kAXChildrenAttribute) {
-                for item in elements(menu, kAXChildrenAttribute) {
-                    guard string(item, kAXMenuItemCmdCharAttribute) == commandKey,
-                          (copy(item, kAXMenuItemCmdModifiersAttribute) as? Int) == 0 else { continue }
-                    return item
-                }
-            }
-        }
-        return nil
     }
 
     /// Brings Safari and the docked window to the front.
     ///
     /// macOS ignores ordinary activation requests from apps that aren't in front, and Side
-    /// Tabs never is (its sidebar doesn't take focus). So ask through Accessibility first,
-    /// then the usual way, and if Safari still isn't in front shortly after, have
-    /// LaunchServices open it, which brings an already-running app forward.
+    /// Tabs never is (its sidebar doesn't take focus). So the usual request, which costs
+    /// nothing, goes out at once on the main thread, together with the Accessibility ones
+    /// (raise the window, make Safari frontmost). If Safari still isn't in front shortly
+    /// after, LaunchServices is asked to open it, which brings an already-running app forward.
+    ///
+    /// The Accessibility calls wait on Safari, so they run off the main thread, with a short
+    /// timeout, and are skipped if the user has clicked again or the request has gone stale.
     func focusSafari(then completion: (() -> Void)? = nil) {
         guard let app, !app.isTerminated else { return }
-        if let window {
-            AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-        }
-        if isSafariFrontmost {
-            completion?()
-            return
-        }
-        if let appElement {
-            AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-        }
+        let ticket = clickActions.newTicket()
         app.activate(from: .current, options: [])
+        clickActions.bringForward(window: window, application: appElement, ticket: ticket)
 
         waitForSafari(attempts: 6) { [weak self] inFront in
             guard let self else { return }
@@ -443,8 +437,9 @@ final class SafariTracker {
                 completion?()
                 return
             }
+            // By now the user may have gone elsewhere; don't pull Safari forward over it.
+            guard !ticket.isStale, let url = app.bundleURL else { return }
             self.log.notice("Safari didn't come forward; asking LaunchServices")
-            guard let url = app.bundleURL else { return }
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = true
             configuration.addsToRecentItems = false
@@ -456,15 +451,42 @@ final class SafariTracker {
         }
     }
 
-    /// When Safari is in front but another of its windows has focus (Settings, a second
-    /// window), makes the window the sidebar is docked to the focused one.
-    func raiseDockedWindowIfNeeded() {
-        guard let appElement, let window else { return }
-        if let focused = element(appElement, kAXFocusedWindowAttribute), CFEqual(focused, window) {
+    /// Presses the button for a tab in the docked window's tab bar. `completion` runs on the main
+    /// thread, and says whether that worked or the extension has to switch the tab instead.
+    func pressTab(_ target: TabBarTarget, then completion: @escaping (TabBarPressOutcome) -> Void) {
+        guard isTrusted, let window else {
+            completion(.fallback("there is no docked Safari window"))
             return
         }
-        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        tabBar.press(target, in: window) { outcome in
+            DispatchQueue.main.async { completion(outcome) }
+        }
+    }
+
+    /// Reads which of the docked window's tabs Safari has selected, from its tab bar, given the titles
+    /// of the window's tabs as the sidebar has them. `completion` runs on the main thread.
+    func selectedTab(windowTitles: [String?], then completion: @escaping (TabBarSelection) -> Void) {
+        guard isTrusted, let window else {
+            completion(.unknown("there is no docked Safari window"))
+            return
+        }
+        tabBar.selectedTab(windowTitles: windowTitles, in: window) { selection in
+            DispatchQueue.main.async { completion(selection) }
+        }
+    }
+
+    /// When Safari is in front but another of its windows has focus (Settings, a second
+    /// window), makes the window the sidebar is docked to the focused one.
+    ///
+    /// Safari's notifications keep `focusedWindow` current, so the usual click, with the
+    /// docked window already focused, makes no Accessibility call at all. Otherwise the
+    /// raise is sent off the main thread.
+    func raiseDockedWindowIfNeeded() {
+        guard let window else { return }
+        if let focusedWindow, CFEqual(focusedWindow, window) {
+            return
+        }
+        clickActions.bringForward(window: window, application: nil, ticket: clickActions.newTicket())
     }
 
     /// Polls every 25 ms until Safari is the frontmost app or the attempts run out.
@@ -476,36 +498,6 @@ final class SafariTracker {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { [weak self] in
             self?.waitForSafari(attempts: attempts - 1, done)
         }
-    }
-
-    // MARK: - AX helpers
-
-    private func copy(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
-        return value
-    }
-
-    private func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
-        guard let value = copy(element, attribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
-        return (value as! AXUIElement)
-    }
-
-    private func elements(_ element: AXUIElement, _ attribute: String) -> [AXUIElement] {
-        (copy(element, attribute) as? [AXUIElement]) ?? []
-    }
-
-    private func value(_ element: AXUIElement, _ attribute: String) -> AXValue? {
-        guard let value = copy(element, attribute), CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
-        return (value as! AXValue)
-    }
-
-    private func string(_ element: AXUIElement, _ attribute: String) -> String? {
-        copy(element, attribute) as? String
-    }
-
-    private func bool(_ element: AXUIElement, _ attribute: String) -> Bool? {
-        copy(element, attribute) as? Bool
     }
 }
 

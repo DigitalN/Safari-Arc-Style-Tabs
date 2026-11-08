@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct SidebarView: View {
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
+    @Environment(SidebarRows.self) private var rows
     @State private var drag = SidebarDrag()
 
     var body: some View {
@@ -42,6 +43,7 @@ struct SidebarView: View {
                     .padding(.bottom, 10)
                 }
                 .scrollIndicators(.automatic)
+                .onWindowFrame { rows.viewport = $0 }
             } else {
                 EmptySidebar()
             }

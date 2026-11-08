@@ -1,0 +1,59 @@
+{"role":"AXWindow","subrole":"AXStandardWindow","children":[
+  {"role":"AXSplitGroup","children":[
+    {"role":"AXSplitter"},
+    {"role":"AXTabGroup","children":[
+      {"role":"AXGroup","identifier":"BrowserView?tab=1","children":[
+        {"role":"AXWebArea"}
+      ]}
+    ]}
+  ]},
+  {"role":"AXGroup","children":[
+    {"role":"AXToolbar","children":[
+      {"role":"AXButton","description":"Toggle sidebar","actions":["AXPress"]},
+      {"role":"AXMenuButton","identifier":"TabGroupPickerButton?Profile","actions":["AXPress"]},
+      {"role":"AXButton","description":"Side Tabs","actions":["AXPress"]},
+      {"role":"AXGroup","children":[
+        {"role":"AXOpaqueProviderGroup","subrole":"AXOpaqueProviderList","description":"Tab bar, 30 tabs","identifier":"TabBar?isSeparate=false","children":[
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=1","title":"Test tab 1","description":"Test tab 1","x":100,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=2","title":"Test tab 2","description":"Test tab 2","x":140,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":1,"identifier":"TabBarTab?isNarrow=true&tab=3","title":"Test tab 3","description":"Test tab 3","x":180,"actions":["AXPress","Name:close tab"],"children":[
+            {"role":"AXTextField","description":"smart search field"},
+            {"role":"AXImage"},
+            {"role":"AXButton","description":"Page Menu","actions":["AXPress"]}
+          ]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=4","title":"Test tab 4","description":"Test tab 4","x":220,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=5","title":"Test tab 5","description":"Test tab 5","x":260,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=6","title":"Test tab 6","description":"Test tab 6","x":300,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=7","title":"Test tab 7","description":"Test tab 7","x":340,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=8","title":"Test tab 8","description":"Test tab 8","x":380,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=9","title":"Test tab 9","description":"Test tab 9","x":420,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=10","title":"Test tab 10","description":"Test tab 10","x":460,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=11","title":"Test tab 11","description":"Test tab 11","x":500,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=12","title":"Test tab 12","description":"Test tab 12","x":540,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=13","title":"Test tab 13","description":"Test tab 13","x":580,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=14","title":"Test tab 14","description":"Test tab 14","x":620,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=15","title":"Test tab 15","description":"Test tab 15","x":660,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=16","title":"Test tab 16","description":"Test tab 16","x":700,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=17","title":"Test tab 17","description":"Test tab 17","x":740,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=18","title":"Test tab 18","description":"Test tab 18","x":780,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=19","title":"Test tab 19","description":"Test tab 19","x":820,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=20","title":"Test tab 20","description":"Test tab 20","x":860,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=21","title":"Test tab 21","description":"Test tab 21","x":900,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=22","title":"Test tab 22","description":"Test tab 22","x":940,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=23","title":"Test tab 23","description":"Test tab 23","x":980,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=24","title":"Test tab 24","description":"Test tab 24","x":1020,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=25","title":"Test tab 25","description":"Test tab 25","x":1060,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=26","title":"Test tab 26","description":"Test tab 26","x":1100,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=27","title":"Test tab 27","description":"Test tab 27","x":1140,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=28","title":"Test tab 28","description":"Test tab 28","x":1180,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=29","title":"Test tab 29","description":"Test tab 29","x":1220,"actions":["AXPress","Name:close tab"]},
+          {"role":"AXRadioButton","subrole":"AXTabButton","value":0,"identifier":"TabBarTab?isNarrow=true&tab=30","title":"Test tab 30","description":"Test tab 30","x":1260,"actions":["AXPress","Name:close tab"]}
+        ]}
+      ]},
+      {"role":"AXButton","description":"Downloads","actions":["AXPress"]},
+      {"role":"AXButton","description":"Share","actions":["AXPress"]},
+      {"role":"AXButton","description":"New Tab","actions":["AXPress"]},
+      {"role":"AXButton","description":"Tab Overview","actions":["AXPress"]}
+    ]}
+  ]}
+]}

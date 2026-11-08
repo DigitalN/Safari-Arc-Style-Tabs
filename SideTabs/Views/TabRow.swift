@@ -7,12 +7,19 @@ struct TabRow: View {
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
     @Environment(SidebarDrag.self) private var drag
+    @Environment(SidebarRows.self) private var rows
     @State private var hovering = false
     @State private var rowTop: CGFloat = 0
+    /// Where the mute and close buttons are, in sidebar coordinates (the space the row's gesture
+    /// reports presses in). Presses on them belong to the button, not the row. Only trusted while
+    /// the button is showing.
+    @State private var muteFrame = CGRect.zero
+    @State private var closeFrame = CGRect.zero
 
     private var key: TabKey { TabKey(instance: instance, tabId: tab.id) }
     private var isSlot: Bool { drag.isSlot(tab: tab) }
     private var isRenaming: Bool { store.renaming == .tab(key) }
+    private var showsMute: Bool { tab.audible || tab.muted }
     private var showsClose: Bool {
         !isRenaming && (settings.closeButtonMode == .always || hovering || tab.active)
     }
@@ -43,7 +50,7 @@ struct TabRow: View {
 
             Spacer(minLength: 0)
 
-            if tab.audible || tab.muted {
+            if showsMute {
                 SidebarIconButton(
                     systemImage: tab.muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
                     help: tab.muted ? "Unmute Tab" : "Mute Tab",
@@ -51,6 +58,7 @@ struct TabRow: View {
                 ) {
                     store.setMuted(!tab.muted, tab: tab, instance: instance)
                 }
+                .onSidebarFrame { muteFrame = $0 }
             }
 
             ZStack {
@@ -58,6 +66,7 @@ struct TabRow: View {
                     SidebarIconButton(systemImage: "xmark", help: "Close Tab", size: 9) {
                         store.close([tab], instance: instance)
                     }
+                    .onSidebarFrame { closeFrame = $0 }
                 } else if tab.pinned {
                     Image(systemName: "pin.fill")
                         .font(.system(size: 9))
@@ -77,31 +86,51 @@ struct TabRow: View {
                 DropSlot()
             }
         }
-        .background(MouseTracking(onHover: { hovering = $0 }, onMiddleClick: { store.close([tab], instance: instance) }))
+        .background(MouseTracking(onHover: { hovering = $0 }))
         .contentShape(Rectangle())
-        .onTapGesture {
-            // A separate double-tap gesture would make SwiftUI hold every single click
-            // for the double-click interval, so read the click count instead.
-            guard !isRenaming else { return }
-            if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
-                store.beginRename(.tab(key))
-            } else {
-                store.activate(tab, instance: instance)
-            }
-        }
-        .sidebarDraggable(
+        // Safari's own tab bar switches on mouse-down, so this does too: waiting for the
+        // mouse-up would add the length of the click to every switch. The second press of a
+        // double-click renames instead. A separate double-tap gesture would make SwiftUI hold
+        // every single click for the double-click interval, so the click count is read here.
+        // The same gesture is the drag to reorder (see sidebarRowGesture).
+        .sidebarRowGesture(
             .tab(tab, instance: instance),
             drag: drag,
             store: store,
             settings: settings,
             rowTop: rowTop,
-            enabled: !isRenaming
+            dragEnabled: !isRenaming,
+            onPress: press(at:)
         )
         .onSidebarTop { rowTop = $0 }
+        // Where the row is, so a middle click on it can be found (SidebarPanel.sendEvent).
+        .onWindowFrame { rows.setFrame($0, for: key) }
+        .onDisappear { rows.remove(key) }
         .contextMenu { contextMenu }
         .help(tooltip)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(tab.active ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { store.activate(tab, instance: instance) }
+    }
+
+    /// Whether a press at `point` (sidebar coordinates) landed on the mute or close button.
+    /// Decided from where the press landed, not from hover state: a button that disappears
+    /// under the pointer never reports the pointer leaving, which would leave the row
+    /// ignoring every press.
+    private func isOnControl(_ point: CGPoint) -> Bool {
+        (showsMute && muteFrame.containsCircle(point)) || (showsClose && closeFrame.containsCircle(point))
+    }
+
+    /// The first event of a press. Runs while the mouse-down is being dispatched, which is
+    /// when `NSApp.currentEvent` still has the click count. Says whether the row took the press.
+    private func press(at point: CGPoint) -> Bool {
+        guard !isRenaming, !isOnControl(point) else { return false }
+        if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
+            store.beginRename(.tab(key))
+        } else {
+            store.activate(tab, instance: instance)
+        }
+        return true
     }
 
     private var tooltip: String {

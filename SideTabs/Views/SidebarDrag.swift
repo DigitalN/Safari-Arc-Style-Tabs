@@ -116,6 +116,16 @@ final class SidebarDrag {
         }
     }
 
+    /// Forgets a drag whose gesture was cancelled before it ended (SwiftUI doesn't call `onEnded`
+    /// for a cancelled one), so the row it left open doesn't stay open.
+    func cancel() {
+        guard item != nil else { return }
+        withAnimation(.snappy(duration: 0.18)) {
+            item = nil
+            target = .none
+        }
+    }
+
     /// Bookmark slot for a link dropped from outside the sidebar at `y` (section coordinates).
     func bookmarkIndex(forDropAt y: CGFloat, count: Int) -> Int {
         let rowsOffset = bookmarkRowsTop - bookmarksSectionTop
@@ -166,19 +176,83 @@ struct DragGhost: View {
 }
 
 extension View {
-    /// Makes a row draggable within the sidebar.
-    func sidebarDraggable(
+    /// The one mouse gesture a sidebar row has: it reacts to the press at once, and turns into a
+    /// drag to reorder when the pointer moves.
+    ///
+    /// It has to be a single gesture. A row that has a press gesture (which starts the moment the
+    /// button goes down) and a separate drag gesture outside it never gets the drag: SwiftUI
+    /// lets the inner one win, and a press with no minimum distance never fails.
+    ///
+    /// - `onPress` runs on the first update of a press, with where it started (sidebar
+    ///   coordinates), and says whether the row takes it. A press it declines does nothing else.
+    /// - `onClick` runs when the button goes up and the press didn't turn into a drag. A press
+    ///   that did can never also be a click.
+    /// - `dragEnabled` is read at every update, so a row that starts renaming mid-press stops
+    ///   reordering.
+    func sidebarRowGesture(
         _ item: SidebarDrag.Item,
         drag: SidebarDrag,
         store: TabStore,
         settings: AppSettings,
         rowTop: CGFloat,
-        enabled: Bool
+        dragEnabled: Bool,
+        onPress: @escaping (CGPoint) -> Bool,
+        onClick: (() -> Void)? = nil
     ) -> some View {
-        gesture(
-            DragGesture(minimumDistance: 4, coordinateSpace: .named(SidebarDrag.coordinateSpace))
-                .onChanged { value in
-                    guard enabled else { return }
+        modifier(SidebarRowGesture(
+            item: item, drag: drag, store: store, settings: settings, rowTop: rowTop,
+            dragEnabled: dragEnabled, onPress: onPress, onClick: onClick
+        ))
+    }
+
+    /// Reports this view's top edge in sidebar coordinates.
+    func onSidebarTop(_ action: @escaping (CGFloat) -> Void) -> some View {
+        onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.frame(in: .named(SidebarDrag.coordinateSpace)).minY
+        } action: { top in
+            action(top)
+        }
+    }
+
+    /// Reports this view's frame in sidebar coordinates, which is where a row's gesture reports
+    /// the pointer. They don't change when the list scrolls.
+    func onSidebarFrame(_ action: @escaping (CGRect) -> Void) -> some View {
+        onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .named(SidebarDrag.coordinateSpace))
+        } action: { frame in
+            action(frame)
+        }
+    }
+}
+
+private struct SidebarRowGesture: ViewModifier {
+    let item: SidebarDrag.Item
+    let drag: SidebarDrag
+    let store: TabStore
+    let settings: AppSettings
+    let rowTop: CGFloat
+    let dragEnabled: Bool
+    let onPress: (CGPoint) -> Bool
+    let onClick: (() -> Void)?
+
+    /// The press in progress. A gesture state rather than `@State`: SwiftUI resets it when a press
+    /// ends *or is cancelled*, and doesn't call `onEnded` for a cancelled one, so a single
+    /// cancelled press can't leave the row ignoring every press after it.
+    @GestureState private var press = RowPress()
+
+    func body(content: Content) -> some View {
+        // simultaneousGesture, so the row's buttons (mute, close) and the rename field still
+        // get their own presses, which `onPress` tells apart by where the press landed.
+        content.simultaneousGesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .named(SidebarDrag.coordinateSpace))
+                .updating($press) { value, press, _ in
+                    let isDrag = press.update(translation: value.translation) {
+                        // Only one press can be going on, so a drag still showing is one whose
+                        // gesture was cancelled.
+                        drag.cancel()
+                        return onPress(value.startLocation)
+                    }
+                    guard isDrag, dragEnabled else { return }
                     drag.update(
                         item,
                         rowTop: rowTop,
@@ -189,17 +263,14 @@ extension View {
                     )
                 }
                 .onEnded { _ in
+                    // Whether it was a drag is the drag's own state: it began (and stays) once
+                    // the pointer moved far enough, even if it came back to where it started.
+                    let wasDrag = drag.isActive
                     drag.finish(store: store)
+                    if !wasDrag {
+                        onClick?()
+                    }
                 }
         )
-    }
-
-    /// Reports this view's top edge in sidebar coordinates.
-    func onSidebarTop(_ action: @escaping (CGFloat) -> Void) -> some View {
-        onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.frame(in: .named(SidebarDrag.coordinateSpace)).minY
-        } action: { top in
-            action(top)
-        }
     }
 }
