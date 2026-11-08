@@ -80,12 +80,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
         store.onOpenAddressBar = { [weak self] in self?.dock?.openSafariAddressBar() }
         store.lastPointerDown = { [weak panel] in panel?.lastMouseDown ?? .distantPast }
-        // A middle click on a tab row closes the tab. It doesn't switch to it first: only a left
-        // press does that. (Safari has already been brought forward by then, like for any click.)
+        // A middle click on a tab row closes the tab, and one on an open bookmark closes the
+        // bookmark's tab, like its "−" (a closed bookmark has nothing to close). Neither switches to
+        // the tab first: only a left press does that. (Safari has already been brought forward by
+        // then, like for any click.)
         panel.onMiddleClick = { [weak self] point in
-            guard let self, let key = rows.tab(at: point), let tab = store.tab(for: key) else { return false }
-            store.close([tab], instance: key.instance)
-            return true
+            guard let self else { return false }
+            if let key = rows.tab(at: point), let tab = store.tab(for: key) {
+                store.close([tab], instance: key.instance)
+                return true
+            }
+            if let id = rows.bookmark(at: point) {
+                return store.closeBookmarkTab(id)
+            }
+            return false
         }
         store.pressTab = { [weak self] target, completion in
             guard let self else {

@@ -32,6 +32,8 @@ final class SidebarDrag {
     /// Top edge of the floating copy, in sidebar coordinates.
     private(set) var ghostTop: CGFloat = 0
     @ObservationIgnored private var grabOffset: CGFloat = 0
+    /// Whether bookmarks show, which decides whether bookmarks' tabs are in the Tabs list.
+    @ObservationIgnored private var bookmarksVisible = true
 
     // Layout reported by the sections, in sidebar coordinates.
     @ObservationIgnored var bookmarkRowsTop: CGFloat = 0
@@ -69,6 +71,7 @@ final class SidebarDrag {
             self.item = item
             grabOffset = value.startLocation.y - rowTop
         }
+        self.bookmarksVisible = bookmarksVisible
         ghostTop = value.location.y - grabOffset
 
         let overBookmarks = bookmarksVisible && value.location.y < tabsSectionTop
@@ -105,7 +108,7 @@ final class SidebarDrag {
             case (.bookmark(let bookmark), .bookmarks(let index)):
                 store.moveBookmark(bookmark.id, to: index)
             case (.tab(let tab, let instance), .tabs(let index)):
-                store.moveTab(tab, instance: instance, to: index)
+                store.moveTab(tab, instance: instance, toListedSlot: index, bookmarksShown: bookmarksVisible)
             case (.tab(let tab, let instance), .bookmarks(let index)):
                 store.addBookmark(from: tab, instance: instance, at: index)
             default:
@@ -258,7 +261,9 @@ private struct SidebarRowGesture: ViewModifier {
                         rowTop: rowTop,
                         value: value,
                         bookmarkCount: store.bookmarks.count,
-                        tabCount: store.currentWindow?.window.tabs.count ?? 0,
+                        tabCount: store.currentWindow.map {
+                            store.tabsListed(in: $0.window, instance: $0.instance, bookmarksShown: settings.showBookmarks).count
+                        } ?? 0,
                         bookmarksVisible: settings.showBookmarks
                     )
                 }

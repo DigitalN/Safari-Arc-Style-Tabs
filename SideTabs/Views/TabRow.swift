@@ -160,8 +160,8 @@ struct TabRow: View {
         }
         Divider()
         Button("Close Tab") { store.close([tab], instance: instance) }
-        Button("Close Other Tabs") { store.closeOtherTabs(than: tab, instance: instance) }
-        Button("Close Tabs Below") { store.closeTabsBelow(tab, instance: instance) }
+        Button("Close Other Tabs") { store.closeOtherTabs(than: tab, instance: instance, bookmarksShown: settings.showBookmarks) }
+        Button("Close Tabs Below") { store.closeTabsBelow(tab, instance: instance, bookmarksShown: settings.showBookmarks) }
     }
 }
 

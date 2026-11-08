@@ -20,7 +20,7 @@ node Tests/ExtensionChecks/background-checks.js
 echo "== TabStore"
 swiftc -o "$WORK/store-checks" \
     Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift SideTabs/TabBarMatcher.swift \
-    Shared/Bridge.swift
+    SideTabs/BookmarkTabs.swift Shared/Bridge.swift
 "$WORK/store-checks"
 
 echo "== click actions"

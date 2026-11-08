@@ -83,7 +83,8 @@ final class TabStore {
     private(set) var lastMessageAt: Date?
     private(set) var bookmarks: [Bookmark] = []
     private(set) var customNames: [TabKey: CustomName] = [:]
-    private(set) var bookmarkLinks: [UUID: TabKey] = [:]
+    /// The tabs that belong to bookmarks, listed under them instead of under Tabs (see BookmarkTabs).
+    private(set) var bookmarkTabs = BookmarkTabs()
 
     var renaming: RenameTarget?
 
@@ -114,7 +115,7 @@ final class TabStore {
     /// Names whose tab ids are gone (Safari restarted), keyed by URL so they can be
     /// given back to the restored tabs.
     @ObservationIgnored private var orphanNames: [String: String] = [:]
-    @ObservationIgnored private var pendingBookmarkOpens: [String: (bookmark: UUID, at: Date)] = [:]
+    @ObservationIgnored private var pendingBookmarkOpens: [String: (bookmark: UUID, windowId: Int, at: Date)] = [:]
     @ObservationIgnored private var saveWork: DispatchWorkItem?
     /// The last tab switch the sidebar asked for, until Safari confirms it or it goes stale.
     @ObservationIgnored private var pendingActivation: PendingActivation?
@@ -189,7 +190,7 @@ final class TabStore {
                let instance = object["instance"] as? String,
                let tabId = object["tabId"] as? Int,
                let pending = pendingBookmarkOpens.removeValue(forKey: requestId) {
-                bookmarkLinks[pending.bookmark] = TabKey(instance: instance, tabId: tabId)
+                linkOpenedTab(TabKey(instance: instance, tabId: tabId), to: pending.bookmark, windowId: pending.windowId)
             }
             return [:]
 
@@ -210,7 +211,7 @@ final class TabStore {
             orphanNamesOfDeadInstances()
         }
         reconcileNames(with: snapshot)
-        pruneBookmarkLinks()
+        updateBookmarkTabs(with: snapshot)
 
         // A report sent after this snapshot was started can have arrived first. The snapshot
         // may not know about it yet, so it must not move the highlight back. (Not one that was
@@ -478,7 +479,7 @@ final class TabStore {
         anchors.removeAll()
         pendingActivation = nil
         orphanNamesOfDeadInstances()
-        bookmarkLinks.removeAll()
+        changeBookmarkTabs { $0.safariDidTerminate() }
         pendingBookmarkOpens.removeAll()
         renaming = nil
     }
@@ -848,18 +849,24 @@ final class TabStore {
             }
             window.tabs.removeAll { ids.contains($0.id) }
         }
+        // A bookmark whose tab this was is closed again at once, so a click on it opens its saved page.
+        changeBookmarkTabs { $0.unlink(ids.map { TabKey(instance: instance, tabId: $0) }) }
         send(["action": "close", "tabIds": Array(ids)], to: instance)
     }
 
-    func closeOtherTabs(than tab: BrowserTab, instance: String) {
+    /// Closes the other tabs listed under Tabs. Bookmarks' tabs aren't listed there, so they stay open.
+    func closeOtherTabs(than tab: BrowserTab, instance: String, bookmarksShown: Bool = true) {
         guard let window = window(instance: instance, id: tab.windowId) else { return }
-        close(window.tabs.filter { $0.id != tab.id && !$0.pinned }, instance: instance)
+        let listed = tabsListed(in: window, instance: instance, bookmarksShown: bookmarksShown)
+        close(listed.filter { $0.id != tab.id && !$0.pinned }, instance: instance)
     }
 
-    func closeTabsBelow(_ tab: BrowserTab, instance: String) {
-        guard let window = window(instance: instance, id: tab.windowId),
-              let index = window.tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-        close(Array(window.tabs[(index + 1)...]), instance: instance)
+    /// Closes the tabs listed below this one under Tabs (bookmarks' tabs aren't listed there).
+    func closeTabsBelow(_ tab: BrowserTab, instance: String, bookmarksShown: Bool = true) {
+        guard let window = window(instance: instance, id: tab.windowId) else { return }
+        let listed = tabsListed(in: window, instance: instance, bookmarksShown: bookmarksShown)
+        guard let index = listed.firstIndex(where: { $0.id == tab.id }) else { return }
+        close(Array(listed[(index + 1)...]), instance: instance)
     }
 
     func newTab(url: String? = nil) {
@@ -940,15 +947,11 @@ final class TabStore {
 
     // MARK: - Bookmarks
 
-    /// The open tab in the current window that belongs to this bookmark, if any.
+    /// The bookmark's own tab in the window the sidebar shows, if it has one there. Wherever the
+    /// tab has browsed to since, it's the bookmark's until it closes.
     func openTab(for bookmark: Bookmark) -> BrowserTab? {
         guard let selection = currentWindow else { return nil }
-        if let key = bookmarkLinks[bookmark.id], key.instance == selection.instance,
-           let tab = selection.window.tabs.first(where: { $0.id == key.tabId }) {
-            return tab
-        }
-        let target = bookmark.url.comparableURL
-        return selection.window.tabs.first { $0.url?.comparableURL == target }
+        return bookmarkTabs.tab(of: bookmark.id, in: selection.window, instance: selection.instance)
     }
 
     func open(_ bookmark: Bookmark, inNewTab: Bool = false) {
@@ -957,7 +960,13 @@ final class TabStore {
             return
         }
         if !inNewTab, let tab = openTab(for: bookmark) {
-            bookmarkLinks[bookmark.id] = TabKey(instance: selection.instance, tabId: tab.id)
+            activate(tab, instance: selection.instance)
+            return
+        }
+        // An ordinary tab that is on the saved page becomes the bookmark's, rather than a second
+        // copy opening.
+        if !inNewTab, let tab = tabOnSavedPage(of: bookmark, in: selection) {
+            changeBookmarkTabs { $0.link(TabKey(instance: selection.instance, tabId: tab.id), to: bookmark.id) }
             activate(tab, instance: selection.instance)
             return
         }
@@ -967,7 +976,7 @@ final class TabStore {
             return
         }
         let requestId = UUID().uuidString
-        pendingBookmarkOpens[requestId] = (bookmark.id, Date())
+        pendingBookmarkOpens[requestId] = (bookmark.id, selection.window.id, Date())
         send([
             "action": "create",
             "windowId": selection.window.id,
@@ -984,7 +993,8 @@ final class TabStore {
             faviconURL: tab.favIconUrl
         )
         insert(bookmark, at: index)
-        bookmarkLinks[bookmark.id] = TabKey(instance: instance, tabId: tab.id)
+        // The tab moves up into Bookmarks as the new bookmark's tab, unless it's another bookmark's.
+        changeBookmarkTabs { $0.link(TabKey(instance: instance, tabId: tab.id), to: bookmark.id) }
     }
 
     func addBookmarkForCurrentTab() {
@@ -1005,7 +1015,7 @@ final class TabStore {
 
     func removeBookmark(_ bookmark: Bookmark) {
         bookmarks.removeAll { $0.id == bookmark.id }
-        bookmarkLinks[bookmark.id] = nil
+        changeBookmarkTabs { $0.forget(bookmark: bookmark.id) }
         scheduleSave()
     }
 
@@ -1016,7 +1026,11 @@ final class TabStore {
               let index = bookmarks.firstIndex(where: { $0.id == bookmark.id }) else { return }
         bookmarks[index].url = url
         bookmarks[index].faviconURL = tab.favIconUrl
-        bookmarkLinks[bookmark.id] = TabKey(instance: selection.instance, tabId: tab.id)
+        // The tab showing the page becomes the bookmark's too, if the bookmark has none in this window
+        // (and the tab isn't another bookmark's). The bookmark's own tab is already.
+        if bookmarkTabs.tab(of: bookmark.id, in: selection.window, instance: selection.instance) == nil {
+            changeBookmarkTabs { $0.link(TabKey(instance: selection.instance, tabId: tab.id), to: bookmark.id) }
+        }
         scheduleSave()
     }
 
@@ -1028,11 +1042,43 @@ final class TabStore {
         scheduleSave()
     }
 
-    private func pruneBookmarkLinks() {
-        let stale = bookmarkLinks.filter { tab(for: $0.value) == nil }.map(\.key)
-        for id in stale {
-            bookmarkLinks[id] = nil
+    /// An ordinary tab in the window on the bookmark's saved page: the one showing, or the first.
+    private func tabOnSavedPage(of bookmark: Bookmark, in selection: WindowSelection) -> BrowserTab? {
+        let page = bookmark.url.comparableURL
+        let candidates = selection.window.tabs.filter {
+            $0.url?.comparableURL == page && bookmarkTabs.bookmark(owning: TabKey(instance: selection.instance, tabId: $0.id)) == nil
         }
+        return candidates.first(where: \.active) ?? candidates.first
+    }
+
+    /// A tab opened for a bookmark becomes its tab, unless the bookmark already has one in that
+    /// window (Open in New Tab on an open bookmark gives an ordinary tab) or was removed meanwhile.
+    private func linkOpenedTab(_ key: TabKey, to bookmark: UUID, windowId: Int) {
+        guard bookmarks.contains(where: { $0.id == bookmark }) else { return }
+        if let window = window(instance: key.instance, id: windowId),
+           bookmarkTabs.tab(of: bookmark, in: window, instance: key.instance) != nil {
+            return
+        }
+        changeBookmarkTabs { $0.link(key, to: bookmark) }
+    }
+
+    private func updateBookmarkTabs(with snapshot: Snapshot) {
+        let before = bookmarkTabs.owners.count
+        changeBookmarkTabs { $0.update(with: snapshot, live: Set(snapshots.keys), bookmarks: bookmarks) }
+        let after = bookmarkTabs.owners.count
+        if after != before {
+            log.notice("bookmarks' tabs: \(before) before snapshot \(snapshot.seq), \(after) after")
+        }
+    }
+
+    /// Changes the links on a copy, so views aren't told of a change when nothing changed, and saves
+    /// them when something did.
+    private func changeBookmarkTabs(_ change: (inout BookmarkTabs) -> Void) {
+        var tabs = bookmarkTabs
+        change(&tabs)
+        guard tabs != bookmarkTabs else { return }
+        bookmarkTabs = tabs
+        scheduleSave()
     }
 
     // MARK: - Persistence
@@ -1047,6 +1093,10 @@ final class TabStore {
         var bookmarks: [Bookmark]
         var names: [SavedName]
         var orphanNames: [String: String]
+        /// Which tabs belong to bookmarks, and the extension instances running when they were saved
+        /// (#25). Optional, so a file saved before there were any still loads.
+        var bookmarkTabs: [BookmarkTabs.Saved]?
+        var instances: [String]?
     }
 
     static var defaultStateURL: URL {
@@ -1063,6 +1113,7 @@ final class TabStore {
             state.names.map { (TabKey(instance: $0.instance, tabId: $0.tabId), $0.name) },
             uniquingKeysWith: { first, _ in first }
         )
+        bookmarkTabs = BookmarkTabs(saved: state.bookmarkTabs ?? [], instances: state.instances ?? [], bookmarks: state.bookmarks)
     }
 
     private func scheduleSave() {
@@ -1076,7 +1127,9 @@ final class TabStore {
         let state = SavedState(
             bookmarks: bookmarks,
             names: customNames.map { SavedName(instance: $0.key.instance, tabId: $0.key.tabId, name: $0.value) },
-            orphanNames: orphanNames
+            orphanNames: orphanNames,
+            bookmarkTabs: bookmarkTabs.saved,
+            instances: bookmarkTabs.savedInstances
         )
         do {
             let url = stateURL
