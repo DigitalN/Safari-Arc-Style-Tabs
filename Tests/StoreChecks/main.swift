@@ -366,13 +366,15 @@ withPresser { store, presses, commands in
 }
 
 do {
-    // A snapshot older than the click only holds the highlight while the click is still being waited for.
+    // A snapshot started before the click shows the state the click replaced, however late it arrives (#22 item 3).
     let (store, _) = makeStore()
     let earlier = nowMilliseconds() - 50
     click(store, tab: 3)
     wait(1.1)
     send(store, snapshotObject(seq: 2, active: 1, startedAt: earlier))
-    check(highlighted(store) == 1, "once the click is stale, even an older snapshot shows where Safari is")
+    check(highlighted(store) == 3, "even after the first second, a snapshot started before the click doesn't move the highlight")
+    send(store, snapshotObject(seq: 3, active: 1, startedAt: nowMilliseconds()))
+    check(highlighted(store) == 1, "but one started after it, once the click is no longer waited for, shows where Safari is")
 }
 
 do {
@@ -761,6 +763,126 @@ do {
         let other = store.snapshots[instance]?.windows.first(where: { $0.id == 2 })?.tabs.first(where: \.active)?.id
         check(other == 12, "its report is taken as it always was")
     }
+}
+
+// MARK: - Old snapshots, and a one-second check that can't be starved (#22 item 3)
+//
+// Under load a snapshot arrives seconds after the extension started building it. Once the click is
+// confirmed nothing holds the highlight against it, and it used to be believed.
+
+withPresser(reading: true) { store, presses, commands in
+    // The first second is over, the click was confirmed, and a snapshot started before the click arrives.
+    let earlier = nowMilliseconds() - 50
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    wait(1.1)
+    send(store, snapshotObject(seq: 3, active: 1, startedAt: earlier))
+    check(highlighted(store) == 3, "a snapshot started before the click doesn't move the highlight, even after the click was confirmed")
+    check(selectionReads.isEmpty, "it is older than what the sidebar knows, so Safari isn't asked")
+    send(store, snapshotObject(seq: 4, active: 2, tabs: [1, 2, 4], startedAt: earlier))
+    check(highlighted(store) == 2, "unless the clicked tab is gone from the window: then the snapshot is believed")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // A snapshot started after the click that shows another tab: right, or built before the switch took effect.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    wait(1.1)
+    send(store, snapshotObject(seq: 3, active: 1, startedAt: nowMilliseconds()))
+    check(highlighted(store) == 3, "a snapshot that shows another tab doesn't move the highlight by itself")
+    check(selectionReads.count == 1, "it asks Safari's tab bar which tab is selected")
+    selectionReads[0].finish(.tab(position: 2))
+    check(highlighted(store) == 3, "Safari is on the clicked tab: the snapshot was wrong")
+    send(store, snapshotObject(seq: 4, active: 1, startedAt: nowMilliseconds()))
+    selectionReads[1].finish(.tab(position: 0))
+    check(highlighted(store) == 1, "when Safari is on the other tab, the highlight goes there")
+    send(store, snapshotObject(seq: 5, active: 1, startedAt: nowMilliseconds()))
+    check(highlighted(store) == 1 && selectionReads.count == 2, "and a snapshot that agrees with it needs no question")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // Safari's answer is also the anchor from then on: a snapshot older than the answer is old.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    wait(1.1)
+    let before = nowMilliseconds()
+    wait(0.05)
+    send(store, snapshotObject(seq: 3, active: 1, startedAt: nowMilliseconds()))
+    selectionReads[0].finish(.tab(position: 0))
+    check(highlighted(store) == 1, "Safari moved on")
+    send(store, snapshotObject(seq: 4, active: 3, startedAt: before))
+    check(highlighted(store) == 1, "a snapshot started before that answer doesn't take the highlight back to the clicked tab")
+    check(selectionReads.count == 1, "and needs no question")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // The answer is dropped if a click has come since.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    wait(1.1)
+    send(store, snapshotObject(seq: 3, active: 1, startedAt: nowMilliseconds()))
+    click(store, tab: 4)
+    selectionReads[0].finish(.tab(position: 0))
+    check(highlighted(store) == 4, "an answer that arrives after a newer click doesn't move the highlight")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // Safari can't say, and the click is long confirmed: the snapshot is believed.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    wait(1.1)
+    send(store, snapshotObject(seq: 3, active: 1, startedAt: nowMilliseconds()))
+    selectionReads[0].finish(.unknown("2 buttons for 4 tabs"))
+    check(highlighted(store) == 1, "when the tab bar can't be mapped to the tabs, the snapshot is taken as before")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // While the click is still waited for, a snapshot that can't be checked keeps the highlight on the clicked tab.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    send(store, snapshotObject(seq: 2, active: 1, startedAt: nowMilliseconds()))
+    selectionReads[0].finish(.unknown("Safari didn't answer in time"))
+    check(highlighted(store) == 3, "within the first second, a snapshot that Safari's tab bar can't settle doesn't move the highlight either")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // The one-second check asks the tab bar as well as the extension, and settles the highlight from it.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    wait(1.2)
+    check(snapshotRequests(commands()) == 1, "the extension is still asked for a snapshot")
+    check(selectionReads.count == 1, "and so is Safari's tab bar")
+    selectionReads[0].finish(.tab(position: 2))
+    check(highlighted(store) == 3, "Safari is on the clicked tab: the highlight stays")
+    activated(store, tab: 2, seq: 2, at: nowMilliseconds())
+    check(highlighted(store) == 3 && selectionReads.count == 2, "and the click counts as confirmed: a report of another tab is then checked like any")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // The press was acknowledged but Safari didn't switch (or moved on) and the starved extension says nothing.
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    wait(1.2)
+    selectionReads[0].finish(.tab(position: 0))
+    check(highlighted(store) == 1, "Safari is on another tab: the highlight goes back there, without waiting for the extension")
+    check(activations(commands()).isEmpty, "and no command is sent")
+}
+
+withPresser(reading: true) { store, presses, commands in
+    // A click on the tab the highlight is on, Safari being elsewhere, then a lost report: the next click still presses.
+    send(store, snapshotObject(seq: 5, active: 3))
+    click(store, tab: 1)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    wait(1.2)
+    selectionReads[0].finish(.tab(position: 2))
+    check(highlighted(store) == 3, "Safari stayed on tab 3: the highlight returns to it")
+    click(store, tab: 3)
+    check(presses().count == 2, "and a click on tab 3 is still looked into rather than ignored")
 }
 
 // MARK: - Fixes found alongside (#21)

@@ -15,6 +15,7 @@ final class TabStore {
     private struct PendingActivation {
         let id: Int
         let key: TabKey
+        let windowId: Int
         /// When the click started (the mouse-down, if there was one), to time the switch.
         let clickAt: Date
         /// When the switch was requested, to tell whether it's still worth waiting for.
@@ -218,6 +219,8 @@ final class TabStore {
             moveHighlight(instance: snapshot.instance, windowId: last.windowId, tabId: last.tabId)
         }
 
+        holdAnchoredTabs(against: snapshot)
+
         if let pending = pendingActivation, pending.key.instance == snapshot.instance {
             let showsClicked = snapshot.windows.contains { $0.tabs.contains { $0.id == pending.key.tabId && $0.active } }
             let startedAfterClick = snapshot.startedAt.map { $0 >= pending.requestedAtMilliseconds }
@@ -225,13 +228,11 @@ final class TabStore {
                 // The click's switch is on its way, and the snapshot doesn't have it: one started
                 // before the click shows the state the click is about to change, and one started
                 // after it can still be ahead of Safari's switch (a press takes effect a few
-                // milliseconds on, an extension command a hundred or more). Either way it mustn't
-                // move the highlight back to the old tab, and it isn't Safari's answer: the click's
-                // report is, and it also says when Safari goes somewhere else. If that never comes,
-                // Safari is asked again once the wait is over.
-                if let windowId = tab(for: pending.key)?.windowId {
-                    moveHighlight(instance: snapshot.instance, windowId: windowId, tabId: pending.key.tabId)
-                } else {
+                // milliseconds on, an extension command a hundred or more). Either way it isn't Safari's
+                // answer: the click's report is, and it also says when Safari goes somewhere else. If
+                // that never comes, Safari is asked again once the wait is over. (`holdAnchoredTabs` has
+                // kept the highlight on the clicked tab.)
+                if tab(for: pending.key) == nil {
                     pendingActivation = nil
                     log.notice("the clicked tab is gone; no longer waiting for it")
                 }
@@ -239,6 +240,42 @@ final class TabStore {
                 confirmActivation(pending)
             } else if !pending.isFresh {
                 dropStalePending()
+            }
+        }
+    }
+
+    /// Keeps a snapshot from moving a window's highlight off the tab the sidebar put the window on while
+    /// that is recent (see `Anchor`). A snapshot is the extension's picture of Safari as of the moment it
+    /// started building it (`startedAt`), and under load it arrives seconds after that, so:
+    ///
+    /// - One started before the sidebar put the window on its tab shows the state that was replaced. It
+    ///   never moves the highlight, however late it is, unless the tab is gone from the window.
+    /// - One started after it that shows another tab may be right (Safari moved on) or may have been
+    ///   built before the switch took effect. The highlight stays, and Safari's tab bar is asked which
+    ///   tab is selected; that answer decides. If it can't say, the snapshot is believed.
+    ///
+    /// A snapshot without a `startedAt` (an extension page from before it was sent) can't be told apart
+    /// from a new one and is believed as before.
+    private func holdAnchoredTabs(against snapshot: Snapshot) {
+        guard let startedAt = snapshot.startedAt else { return }
+        for window in snapshot.windows {
+            let id = WindowID(instance: snapshot.instance, windowId: window.id)
+            guard let anchor = recentAnchor(of: id),
+                  window.tabs.contains(where: { $0.id == anchor.tabId }),
+                  let shown = window.tabs.first(where: \.active)?.id,
+                  shown != anchor.tabId else { continue }
+            moveHighlight(instance: snapshot.instance, windowId: window.id, tabId: anchor.tabId)
+            guard startedAt >= anchor.atMilliseconds else { continue }
+            checkSelectedTab(in: id, because: "a snapshot showing another tab") { [self] in
+                // Safari can't say. A click that is still being waited for keeps the highlight: its
+                // switch is on its way, and a snapshot can be ahead of it (a press takes effect a few
+                // milliseconds on, a command a hundred or more). Its report, or the check a second
+                // later, settles it. Otherwise the snapshot is taken as it always was.
+                if let pending = pendingActivation, pending.isFresh, pending.key == TabKey(instance: id.instance, tabId: anchor.tabId) {
+                    return
+                }
+                anchors[id] = Anchor(tabId: shown, at: Date(timeIntervalSince1970: startedAt / 1000), clickId: nil)
+                moveHighlight(instance: snapshot.instance, windowId: window.id, tabId: shown)
             }
         }
     }
@@ -360,7 +397,7 @@ final class TabStore {
     /// since it was asked for, because that is newer than the answer. `whenUnknown` runs when Safari's
     /// tab bar can't be asked or can't say (the buttons don't line up with the window's tabs, or Safari
     /// didn't answer in time), so the message is taken the way it was before this check existed.
-    private func checkSelectedTab(in window: WindowID, because why: String, whenUnknown fallback: @escaping () -> Void) {
+    private func checkSelectedTab(in window: WindowID, because why: String, final: Bool = false, whenUnknown fallback: @escaping () -> Void) {
         guard let checkSelection, let selection = currentWindow,
               selection.instance == window.instance, selection.window.id == window.windowId else {
             fallback()
@@ -379,7 +416,7 @@ final class TabStore {
             switch answer {
             case .tab(let position) where tabs.indices.contains(position):
                 self.log.notice("Safari's selected tab (\(why, privacy: .public)) is the one at position \(position)")
-                self.settle(on: tabs[position].id, in: window, asked: asked)
+                self.settle(on: tabs[position].id, in: window, asked: asked, final: final)
             case .tab, .unknown:
                 var reason = "the position doesn't fit the window's tabs"
                 if case .unknown(let said) = answer { reason = said }
@@ -394,13 +431,14 @@ final class TabStore {
     /// Puts the highlight on the tab Safari's tab bar says is selected, and ends the wait for a click
     /// that this settles: confirmed if Safari is on the clicked tab, otherwise Safari is somewhere
     /// else and the click isn't waited for any more. The exception is a click whose command to the
-    /// extension is still on its way: Safari hasn't gone there yet, and the highlight stays.
-    private func settle(on tabId: Int, in window: WindowID, asked: Date) {
+    /// extension is still on its way: Safari hasn't gone there yet, and the highlight stays. (Not when
+    /// the click has been waited for as long as it's worth, `final`.)
+    private func settle(on tabId: Int, in window: WindowID, asked: Date, final: Bool) {
         if let pending = pendingActivation, pending.key.instance == window.instance,
            tab(for: pending.key)?.windowId == window.windowId {
             if pending.key.tabId == tabId {
                 confirmActivation(pending)
-            } else if pending.isFresh && pending.path != "accessibility" {
+            } else if !final && pending.isFresh && pending.path != "accessibility" {
                 return
             } else {
                 pendingActivation = nil
@@ -677,6 +715,7 @@ final class TabStore {
         let request = PendingActivation(
             id: activationCount,
             key: key,
+            windowId: tab.windowId,
             clickAt: now.timeIntervalSince(pointerDown) < 1.5 ? pointerDown : now,
             requestedAt: now
         )
@@ -726,6 +765,14 @@ final class TabStore {
             guard let self, self.pendingActivation?.id == request.id else { return }
             self.log.notice("tab switch wasn't confirmed within a second; asking Safari where it is")
             self.requestSnapshot()
+            // The extension may be too starved to answer (under load its snapshots came back seconds old,
+            // or not at all), so Safari's tab bar is asked too, and settles the highlight and the wait.
+            self.checkSelectedTab(
+                in: WindowID(instance: request.key.instance, windowId: request.windowId),
+                because: "the switch wasn't confirmed within a second",
+                final: true,
+                whenUnknown: {}
+            )
         }
     }
 
