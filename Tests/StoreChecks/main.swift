@@ -1052,6 +1052,22 @@ do {
 }
 
 do {
+    // A quick second click while the first one's tab is opening.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    store.open(saved)
+    store.open(saved)
+    check(creates(commands()).count == 1, "a second click before Safari reports the new tab doesn't open another")
+    let requestId = creates(commands()).last?["requestId"] as? String ?? ""
+    send(store, ["type": "created", "instance": instance, "requestId": requestId, "tabId": 10])
+    store.open(saved)
+    check(creates(commands()).count == 1, "nor one after Safari reports it but before a snapshot has it")
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, news)])], active: [10]))
+    store.open(saved)
+    check(creates(commands()).count == 1 && activations(commands()).last == 10, "once a snapshot has it, a click switches to it")
+}
+
+do {
     // A middle click does what the − does, and nothing on a closed bookmark.
     let (store, commands) = makeStore()
     let saved = bookmark(store, news)

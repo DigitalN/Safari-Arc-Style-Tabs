@@ -115,7 +115,9 @@ final class TabStore {
     /// Names whose tab ids are gone (Safari restarted), keyed by URL so they can be
     /// given back to the restored tabs.
     @ObservationIgnored private var orphanNames: [String: String] = [:]
-    @ObservationIgnored private var pendingBookmarkOpens: [String: (bookmark: UUID, windowId: Int, at: Date)] = [:]
+    /// Tabs being opened for bookmarks, by request id. `tab` is set once the extension says which
+    /// tab it opened, which can be before a snapshot has it.
+    @ObservationIgnored private var pendingBookmarkOpens: [String: (bookmark: UUID, windowId: Int, at: Date, tab: TabKey?)] = [:]
     @ObservationIgnored private var saveWork: DispatchWorkItem?
     /// The last tab switch the sidebar asked for, until Safari confirms it or it goes stale.
     @ObservationIgnored private var pendingActivation: PendingActivation?
@@ -189,8 +191,10 @@ final class TabStore {
             if let requestId = object["requestId"] as? String,
                let instance = object["instance"] as? String,
                let tabId = object["tabId"] as? Int,
-               let pending = pendingBookmarkOpens.removeValue(forKey: requestId) {
-                linkOpenedTab(TabKey(instance: instance, tabId: tabId), to: pending.bookmark, windowId: pending.windowId)
+               let pending = pendingBookmarkOpens[requestId], pending.tab == nil {
+                let key = TabKey(instance: instance, tabId: tabId)
+                pendingBookmarkOpens[requestId]?.tab = key
+                linkOpenedTab(key, to: pending.bookmark, windowId: pending.windowId)
             }
             return [:]
 
@@ -970,13 +974,19 @@ final class TabStore {
             activate(tab, instance: selection.instance)
             return
         }
-        // A quick second click arrives before Safari reports the new tab; don't open two.
+        // A quick second click can arrive before a snapshot has the tab the first one opened; don't
+        // open two. Once a snapshot has it, the click switches to it (above), and once it's closed,
+        // a click opens a new one.
         pendingBookmarkOpens = pendingBookmarkOpens.filter { Date().timeIntervalSince($0.value.at) < 2 }
-        if !inNewTab, pendingBookmarkOpens.values.contains(where: { $0.bookmark == bookmark.id }) {
+        let opening = pendingBookmarkOpens.values.contains { pending in
+            pending.bookmark == bookmark.id && pending.windowId == selection.window.id
+                && pending.tab.map { bookmarkTabs.bookmark(owning: $0) == bookmark.id && tab(for: $0) == nil } ?? true
+        }
+        if !inNewTab, opening {
             return
         }
         let requestId = UUID().uuidString
-        pendingBookmarkOpens[requestId] = (bookmark.id, selection.window.id, Date())
+        pendingBookmarkOpens[requestId] = (bookmark.id, selection.window.id, Date(), nil)
         send([
             "action": "create",
             "windowId": selection.window.id,
