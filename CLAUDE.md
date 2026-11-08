@@ -58,6 +58,10 @@ Building, the release checklist, how it works, and testing the updater are in
 - Commits use the GitHub noreply address set in this repo's git config. Don't change it.
 - Work on a branch, not `main`. The maintainer opens pull requests with Create PR, which
   needs a branch other than `main`.
+- The code is **GPL-3.0-or-later**, the maintainer's choice, so nobody can build a closed
+  product from it. `LICENSE` is the unedited GPL text. `docs/NOTICE` holds the copyright
+  line and a section 7(b) term that copies must keep crediting the project. Copyright
+  notices, including the app's `NSHumanReadableCopyright`, name DigitalN.
 
 ## Decisions already made
 
