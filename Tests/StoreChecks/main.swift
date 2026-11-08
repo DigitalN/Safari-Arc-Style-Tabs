@@ -964,6 +964,335 @@ do {
     check(store.tab(for: TabKey(instance: instance, tabId: 2))?.muted == false, "unmuting shows it at once too")
 }
 
+// MARK: - An open bookmark's tab stays under its bookmark (#25)
+
+/// A snapshot of windows given as (window id, its tabs as (id, page)). `active` are the tabs showing
+/// in their windows. It starts after any link made before it, unless `startedAt` says otherwise.
+func pagesSnapshot(
+    seq: Int,
+    from profile: String = instance,
+    focused: Int = 1,
+    startedAt: Double? = nil,
+    _ windows: [(id: Int, tabs: [(id: Int, url: String)])],
+    active: Set<Int> = []
+) -> [String: Any] {
+    ["type": "snapshot", "instance": profile, "seq": seq, "focusedWindowId": focused, "lastFocusedWindowId": focused,
+     "focusChangedAt": Double(seq), "startedAt": startedAt ?? nowMilliseconds() + 1,
+     "windows": windows.map { window -> [String: Any] in
+         ["id": window.id, "focused": window.id == focused, "incognito": false,
+          "tabs": window.tabs.enumerated().map { position, tab -> [String: Any] in
+              ["id": tab.id, "windowId": window.id, "index": position, "title": "Page \(tab.id)", "url": tab.url,
+               "active": active.contains(tab.id), "pinned": false, "audible": false, "muted": false, "loading": false]
+          }]
+     }]
+}
+
+/// The tabs listed under Tabs in the window the sidebar shows.
+func listedIds(_ store: TabStore, bookmarksShown: Bool = true) -> [Int] {
+    guard let selection = store.currentWindow else { return [] }
+    return store.tabsListed(in: selection.window, instance: selection.instance, bookmarksShown: bookmarksShown).map(\.id)
+}
+
+func creates(_ commands: [[String: Any]]) -> [[String: Any]] {
+    commands.filter { $0["action"] as? String == "create" }
+}
+
+func closes(_ commands: [[String: Any]]) -> [[Int]] {
+    commands.filter { $0["action"] as? String == "close" }.compactMap { $0["tabIds"] as? [Int] }
+}
+
+/// Adds a bookmark for `url` and returns it.
+func bookmark(_ store: TabStore, _ url: String) -> Bookmark {
+    store.addBookmark(url: URL(string: url)!)
+    return store.bookmarks.last!
+}
+
+/// Opens the bookmark as a click does, and answers the extension's `create` with tab `tabId`.
+func openAndCreate(_ store: TabStore, _ bookmark: Bookmark, commands: () -> [[String: Any]], tabId: Int, from profile: String = instance, inNewTab: Bool = false) {
+    let before = creates(commands()).count
+    store.open(bookmark, inNewTab: inNewTab)
+    guard creates(commands()).count == before + 1, let requestId = creates(commands()).last?["requestId"] as? String else {
+        check(false, "opening the bookmark asks Safari for a new tab")
+        return
+    }
+    send(store, ["type": "created", "instance": profile, "requestId": requestId, "tabId": tabId])
+}
+
+let news = "https://news.example/"
+let elsewhere = "https://elsewhere.example/story"
+
+do {
+    // Open a bookmark, browse away in its tab, switch to it, and close it with the −.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    check(store.openTab(for: saved) == nil, "a bookmark starts out closed")
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    check(creates(commands()).last?["url"] as? String == news, "opening it opens its saved page")
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (2, "https://example.com/2"), (10, news)])], active: [10]))
+    check(store.openTab(for: saved)?.id == 10, "the new tab is the bookmark's")
+    check(listedIds(store) == [1, 2], "a bookmark's tab isn't in the Tabs list (nor its count)")
+    check(listedIds(store, bookmarksShown: false) == [1, 2, 10], "unless bookmarks are hidden: then every tab is listed")
+    check(store.openTab(for: saved)?.active == true, "the bookmark's row is highlighted while its tab is active")
+
+    send(store, pagesSnapshot(seq: 3, [(1, [(1, "https://example.com/1"), (2, "https://example.com/2"), (10, elsewhere)])], active: [1]))
+    check(store.openTab(for: saved)?.id == 10, "browsing to another site in the tab doesn't unlink it")
+    check(listedIds(store) == [1, 2], "and it stays out of the Tabs list")
+    check(store.openTab(for: saved)?.active == false, "the row isn't highlighted while another tab is active")
+
+    let createsBefore = creates(commands()).count
+    store.open(saved)
+    check(activations(commands()).last == 10, "pressing the row switches to the bookmark's tab")
+    check(creates(commands()).count == createsBefore, "and opens nothing new")
+
+    check(store.closeBookmarkTab(saved.id), "the − closes the bookmark's tab")
+    check(closes(commands()).last == [10], "it asks Safari to close that tab")
+    check(store.openTab(for: saved) == nil, "and the bookmark is closed again at once")
+    openAndCreate(store, saved, commands: commands, tabId: 11)
+    check(creates(commands()).last?["url"] as? String == news, "the next click opens the saved page fresh")
+}
+
+do {
+    // A middle click does what the − does, and nothing on a closed bookmark.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, elsewhere)])], active: [10]))
+    check(store.closeBookmarkTab(saved.id), "a middle click on an open bookmark closes its tab")
+    check(closes(commands()).last == [10] && store.openTab(for: saved) == nil, "and puts the bookmark back to closed")
+    let sent = commands().count
+    check(!store.closeBookmarkTab(saved.id), "a middle click on a closed bookmark does nothing")
+    check(commands().count == sent, "and sends Safari nothing")
+}
+
+do {
+    // Closed in Safari (⌘W, its tab bar): the tab is missing from the next snapshot.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, elsewhere)])], active: [10]))
+    send(store, pagesSnapshot(seq: 3, [(1, [(1, "https://example.com/1")])], active: [1]))
+    check(store.openTab(for: saved) == nil, "a bookmark's tab closed in Safari puts the bookmark back to closed")
+    check(store.bookmarkTabs.owners.isEmpty, "and forgets the tab")
+    openAndCreate(store, saved, commands: commands, tabId: 12)
+    check(creates(commands()).last?["url"] as? String == news, "the next click opens the saved page")
+}
+
+do {
+    // Closed with the sidebar's own commands.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, elsewhere)])], active: [10]))
+    store.close([store.tab(for: TabKey(instance: instance, tabId: 10))!], instance: instance)
+    check(store.openTab(for: saved) == nil, "closing a bookmark's tab from the sidebar puts the bookmark back to closed at once")
+}
+
+do {
+    // Close Other Tabs and Close Tabs Below act on the Tabs list, which a bookmark's tab isn't in.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, elsewhere), (2, "https://example.com/2")])], active: [1]))
+    let first = store.tab(for: TabKey(instance: instance, tabId: 1))!
+    store.closeTabsBelow(first, instance: instance)
+    check(closes(commands()).last == [2], "Close Tabs Below closes the tabs listed below, not a bookmark's tab between them")
+    send(store, pagesSnapshot(seq: 3, [(1, [(1, "https://example.com/1"), (10, elsewhere), (3, "https://example.com/3")])], active: [3]))
+    store.closeOtherTabs(than: store.tab(for: TabKey(instance: instance, tabId: 3))!, instance: instance)
+    check(closes(commands()).last == [1], "Close Other Tabs leaves the bookmark's tab open too")
+    check(store.openTab(for: saved)?.id == 10, "and the bookmark stays open")
+
+    let (hidden, hiddenCommands) = makeStore()
+    let other = bookmark(hidden, news)
+    openAndCreate(hidden, other, commands: hiddenCommands, tabId: 10)
+    send(hidden, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, elsewhere)])], active: [1]))
+    hidden.closeOtherTabs(than: hidden.tab(for: TabKey(instance: instance, tabId: 1))!, instance: instance, bookmarksShown: false)
+    check(closes(hiddenCommands()).last == [10], "with bookmarks hidden, every tab is listed, so Close Other Tabs closes it")
+    check(hidden.openTab(for: other) == nil, "and its bookmark is closed")
+}
+
+do {
+    // A snapshot that was started before the new tab opened can't have it. That isn't the tab closing.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, startedAt: nowMilliseconds() - 500, [(1, [(1, "https://example.com/1")])], active: [1]))
+    check(store.bookmarkTabs.owners[TabKey(instance: instance, tabId: 10)] == saved.id, "a snapshot started before the bookmark's tab opened doesn't close the bookmark")
+    send(store, pagesSnapshot(seq: 3, [(1, [(1, "https://example.com/1"), (10, news)])], active: [10]))
+    check(store.openTab(for: saved)?.id == 10, "and the next snapshot shows the tab under its bookmark")
+}
+
+do {
+    // Each window has its own tab for a bookmark.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    let windows: (Int?) -> [(id: Int, tabs: [(id: Int, url: String)])] = { second in
+        [(1, [(1, "https://example.com/1"), (10, news)]), (2, [(2, "https://example.com/2")] + (second.map { [($0, news)] } ?? []))]
+    }
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, focused: 1, windows(nil), active: [10, 2]))
+    check(store.openTab(for: saved)?.id == 10, "the bookmark is open in the window it was opened in")
+    send(store, pagesSnapshot(seq: 3, focused: 2, windows(nil), active: [10, 2]))
+    check(store.openTab(for: saved) == nil, "and closed in another window")
+    check(listedIds(store) == [2], "where its tab in the first window isn't listed either")
+    openAndCreate(store, saved, commands: commands, tabId: 20)
+    check(creates(commands()).last?["windowId"] as? Int == 2, "a click there opens a tab in that window")
+    send(store, pagesSnapshot(seq: 4, focused: 2, windows(20), active: [10, 20]))
+    check(store.openTab(for: saved)?.id == 20, "which is the bookmark's tab in that window")
+    check(store.closeBookmarkTab(saved.id) && closes(commands()).last == [20], "the − closes the tab of the window it's shown in")
+    send(store, pagesSnapshot(seq: 5, focused: 1, windows(nil), active: [10, 2]))
+    check(store.openTab(for: saved)?.id == 10, "and leaves the first window's tab with the bookmark")
+}
+
+do {
+    // A bookmark's tab moved into a window where the bookmark already has one.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, focused: 2, [(1, [(1, "https://example.com/1"), (10, news)]), (2, [(2, "https://example.com/2")])], active: [10, 2]))
+    openAndCreate(store, saved, commands: commands, tabId: 20)
+    send(store, pagesSnapshot(seq: 3, focused: 1, [(1, [(1, "https://example.com/1"), (10, news)]), (2, [(2, "https://example.com/2"), (20, elsewhere)])], active: [10, 20]))
+    send(store, pagesSnapshot(seq: 4, focused: 1, [(1, [(1, "https://example.com/1"), (10, news), (20, elsewhere)]), (2, [(2, "https://example.com/2")])], active: [20, 2]))
+    check(store.openTab(for: saved)?.id == 20, "of two tabs of one bookmark in a window, the one showing stays the bookmark's")
+    check(listedIds(store) == [1, 10], "and the other goes back under Tabs")
+}
+
+do {
+    // An ordinary tab that happens to be on a bookmark's page.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (5, "https://news.example")])], active: [1]))
+    check(store.openTab(for: saved) == nil, "an ordinary tab on a bookmark's page doesn't make the bookmark open")
+    check(listedIds(store) == [1, 5], "and stays under Tabs")
+    let createsBefore = creates(commands()).count
+    store.open(saved)
+    check(creates(commands()).count == createsBefore, "clicking the bookmark doesn't open a second copy")
+    check(store.openTab(for: saved)?.id == 5 && activations(commands()).last == 5, "it switches to that tab, which becomes the bookmark's")
+    check(listedIds(store) == [1], "and moves up out of Tabs")
+}
+
+do {
+    // Open in New Tab on a bookmark that's open in this window gives an ordinary tab.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, elsewhere)])], active: [10]))
+    openAndCreate(store, saved, commands: commands, tabId: 11, inNewTab: true)
+    send(store, pagesSnapshot(seq: 3, [(1, [(1, "https://example.com/1"), (10, elsewhere), (11, news)])], active: [11]))
+    check(store.openTab(for: saved)?.id == 10, "Open in New Tab on an open bookmark leaves its tab as it is")
+    check(listedIds(store) == [1, 11], "and the new tab is an ordinary one")
+}
+
+do {
+    // Dragging a tab onto Bookmarks, Replace with Current Page, and Remove Bookmark.
+    let (store, _) = makeStore()
+    store.addBookmark(from: store.tab(for: TabKey(instance: instance, tabId: 3))!, instance: instance, at: 0)
+    let dragged = store.bookmarks[0]
+    check(dragged.url == "https://example.com/3", "a tab dragged onto Bookmarks makes a bookmark of its page")
+    check(store.openTab(for: dragged)?.id == 3, "which owns the tab")
+    check(listedIds(store) == [1, 2, 4], "so the tab moves up out of Tabs")
+
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (2, "https://example.com/2"), (3, elsewhere), (4, "https://example.com/4")])], active: [3]))
+    store.replaceBookmarkWithCurrentPage(dragged)
+    check(store.bookmarks[0].url == elsewhere, "Replace with Current Page saves the tab's current page as the bookmark's")
+    check(store.openTab(for: store.bookmarks[0])?.id == 3, "and the tab stays the bookmark's")
+
+    store.removeBookmark(store.bookmarks[0])
+    check(store.bookmarkTabs.owners.isEmpty, "removing the bookmark lets go of its tab")
+    check(listedIds(store) == [1, 2, 3, 4], "which goes back under Tabs, still open")
+}
+
+do {
+    // Reordering the Tabs list puts a tab among the listed ones, wherever bookmarks' tabs are.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, elsewhere), (2, "https://example.com/2"), (3, "https://example.com/3")])], active: [1]))
+    let moves = { commands().filter { $0["action"] as? String == "move" }.compactMap { $0["index"] as? Int } }
+    store.moveTab(store.tab(for: TabKey(instance: instance, tabId: 3))!, instance: instance, toListedSlot: 1)
+    check(moves().last == 2, "a tab dropped between two listed tabs goes just before the second, past the bookmark's tab")
+    check(listedIds(store) == [1, 3, 2], "and shows there")
+    store.moveTab(store.tab(for: TabKey(instance: instance, tabId: 1))!, instance: instance, toListedSlot: 2)
+    check(moves().last == 3, "one dropped at the end goes after the last listed tab")
+    check(listedIds(store) == [3, 2, 1], "and shows there")
+}
+
+do {
+    // Links survive Side Tabs restarting, even for a profile that reports later than another.
+    storeCount += 1
+    let url = stateFolder.appending(path: "state-\(storeCount).json")
+    let store = TabStore(stateURL: url)
+    var sent: [[String: Any]] = []
+    store.sendCommand = { sent.append($0) }
+    let other = "other-profile"
+    send(store, pagesSnapshot(seq: 1, [(1, [(1, "https://example.com/1")])], active: [1]))
+    let saved = bookmark(store, news)
+    let docs = bookmark(store, "https://docs.example/")
+    openAndCreate(store, saved, commands: { sent }, tabId: 10)
+    openAndCreate(store, docs, commands: { sent }, tabId: 12)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, elsewhere), (12, "https://docs.example/")])], active: [10]))
+    send(store, pagesSnapshot(seq: 3, from: other, focused: 5, [(5, [(50, "https://example.com/5")])], active: [50]))
+    openAndCreate(store, saved, commands: { sent }, tabId: 51, from: other)
+    send(store, pagesSnapshot(seq: 4, from: other, focused: 5, [(5, [(50, "https://example.com/5"), (51, elsewhere)])], active: [51]))
+    check(store.bookmarkTabs.owners.count == 3, "three tabs belong to bookmarks before the restart")
+    store.save()
+
+    let reloaded = TabStore(stateURL: url)
+    check(reloaded.bookmarkTabs.owners.count == 3, "the links are read back from state.json")
+    // Safari kept running. Meanwhile the docs tab closed, and a tab went to the docs page.
+    send(reloaded, pagesSnapshot(seq: 5, [(1, [(1, "https://example.com/1"), (10, elsewhere), (13, "https://docs.example/")])], active: [10]))
+    check(reloaded.openTab(for: saved)?.id == 10, "a bookmark's tab is still its own after Side Tabs restarts, though it browsed away")
+    check(reloaded.openTab(for: docs) == nil, "one that closed meanwhile is closed")
+    check(listedIds(reloaded) == [1, 13], "and a tab on a bookmark's page that wasn't its tab stays under Tabs")
+    check(reloaded.bookmarkTabs.owners[TabKey(instance: other, tabId: 51)] == saved.id, "a profile that hasn't reported yet keeps its links")
+    send(reloaded, pagesSnapshot(seq: 6, from: other, focused: 5, [(5, [(50, "https://example.com/5"), (51, elsewhere)])], active: [51]))
+    check(reloaded.openTab(for: saved)?.id == 51, "and has them when it does")
+}
+
+do {
+    // Safari restarts: tab ids change, and only a restored tab still on the saved page goes back to its bookmark.
+    let (store, commands) = makeStore()
+    let saved = bookmark(store, news)
+    let docs = bookmark(store, "https://docs.example/")
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    openAndCreate(store, docs, commands: commands, tabId: 11)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, news), (11, elsewhere)])], active: [1]))
+    store.safariDidTerminate()
+    send(store, pagesSnapshot(seq: 1, from: "restarted", focused: 7, [(7, [(30, "https://example.com/1"), (31, news), (32, elsewhere)])], active: [30]))
+    check(store.openTab(for: saved)?.id == 31, "after Safari restarts, a restored tab still on the bookmark's page goes back to it")
+    check(store.openTab(for: docs) == nil, "one that had browsed away comes back under Tabs")
+    check(listedIds(store) == [30, 32], "so the Tabs list has it")
+}
+
+do {
+    // Safari restarted while Side Tabs wasn't running.
+    storeCount += 1
+    let url = stateFolder.appending(path: "state-\(storeCount).json")
+    let store = TabStore(stateURL: url)
+    var sent: [[String: Any]] = []
+    store.sendCommand = { sent.append($0) }
+    send(store, pagesSnapshot(seq: 1, [(1, [(1, "https://example.com/1")])], active: [1]))
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: { sent }, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, news)])], active: [10]))
+    store.save()
+
+    let relaunched = TabStore(stateURL: url)
+    send(relaunched, pagesSnapshot(seq: 1, from: "relaunched", focused: 3, [(3, [(40, "https://example.com/1"), (41, news)])], active: [41]))
+    check(relaunched.openTab(for: saved)?.id == 41, "a tab Safari restored while Side Tabs wasn't running goes back to its bookmark")
+    check(relaunched.bookmarkTabs.owners.count == 1, "and the old tab id is forgotten")
+}
+
+do {
+    // A state.json saved before bookmarks' tabs were saved still loads.
+    storeCount += 1
+    let url = stateFolder.appending(path: "state-\(storeCount).json")
+    try! FileManager.default.createDirectory(at: stateFolder, withIntermediateDirectories: true)
+    let old = #"{"bookmarks":[{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","title":"Old","url":"https://old.example/"}],"names":[],"orphanNames":{}}"#
+    try! old.write(to: url, atomically: true, encoding: .utf8)
+    let store = TabStore(stateURL: url)
+    check(store.bookmarks.map(\.title) == ["Old"], "an older state.json without bookmarks' tabs still loads its bookmarks")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {
