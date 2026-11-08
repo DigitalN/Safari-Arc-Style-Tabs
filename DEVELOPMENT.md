@@ -32,10 +32,11 @@ scripts/run-checks.sh
 Runs what can be checked without Safari: `background.js` against a stand-in `browser`
 (`Tests/ExtensionChecks`), the Swift logic compiled with small test programs (`TabStore`'s
 handling of messages, where Safari's tab bar is in a window's Accessibility tree and which
-of its buttons a tab matches, checked against trees kept as data in
+of its buttons a tab matches and which one Safari has selected, checked against trees kept as data in
 `Tests/TabBarFinderChecks/trees`; what a press on a row turns into; which row is under a
 middle click; which queued
-Accessibility requests are still wanted), and a compile check of the app's sources. It doesn't touch the
+Accessibility requests are still wanted; which notifications the docked window is watched for),
+a check that no log line carries a window or tab title, and a compile check of the app's sources. It doesn't touch the
 installed app, Safari, or your saved bookmarks and names. Anything that needs the real
 Safari (clicks, windows, timing) still has to be tried by hand.
 

@@ -58,6 +58,16 @@ if grep -n "DragGesture" SideTabs/Views/TabRow.swift SideTabs/Views/BookmarkRow.
 fi
 echo "rows have no gesture of their own"
 
+# A window's title is the page's, and a tab's title is too, so neither goes into the system log: it
+# would keep browsing history in plain text (#22 item 5). Lengths and counts are fine.
+echo "== log privacy"
+if grep -nE '(\blog\.(notice|info|error|debug|warning|fault)|\bnote)\(.*[Tt]itle' SideTabs/*.swift \
+    || grep -nE '\\\(.*kAXTitleAttribute' SideTabs/*.swift; then
+    echo "FAIL: a log line carries a window or tab title; leave it out or log only its length"
+    exit 1
+fi
+echo "no titles in the log"
+
 # A quick compile check of the app's Swift sources (no signing, no packaging). The full
 # build is scripts/build.sh.
 echo "== app sources"

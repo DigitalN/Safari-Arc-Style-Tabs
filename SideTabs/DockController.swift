@@ -168,7 +168,7 @@ final class DockController {
         }
 
         if tracker.isFullScreen(window) {
-            note("full screen overlay for “\(title ?? "untitled")”")
+            note("full screen overlay")
             showOverlay(on: screen(containing: axFrame), window: window)
             return
         }
@@ -184,7 +184,7 @@ final class DockController {
         orderPanel(below: window)
         mode = .docked
         appliedInset = settings.width
-        note("docked to “\(title ?? "untitled")”: Safari at \(axFrame.integral), panel at \(panel.frame), on screen: \(panel.isVisible && panel.isOnActiveSpace)")
+        note("docked: Safari at \(axFrame.integral), panel at \(panel.frame), on screen: \(panel.isVisible && panel.isOnActiveSpace)")
 
         if makeRoom {
             self.makeRoom(for: window)

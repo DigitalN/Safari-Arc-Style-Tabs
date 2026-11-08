@@ -225,7 +225,8 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
     private func describe(_ window: AXUIElement) -> String {
         let button = query.element(window, kAXFullScreenButtonAttribute)
         let buttonState = button.map { query.bool($0, kAXEnabledAttribute).map { $0 ? "enabled" : "disabled" } ?? "unknown" } ?? "missing"
-        return "“\(query.string(window, kAXTitleAttribute) ?? "")” role=\(query.string(window, kAXRoleAttribute) ?? "nil") subrole=\(query.string(window, kAXSubroleAttribute) ?? "nil") minimized=\(query.bool(window, kAXMinimizedAttribute).map(String.init) ?? "nil") fullScreenButton=\(buttonState)"
+        // Without the window's title: it is the page's, and the log keeps no browsing history.
+        return "role=\(query.string(window, kAXRoleAttribute) ?? "nil") subrole=\(query.string(window, kAXSubroleAttribute) ?? "nil") minimized=\(query.bool(window, kAXMinimizedAttribute).map(String.init) ?? "nil") fullScreenButton=\(buttonState)"
     }
 
     /// Browser windows are standard windows that can go full screen. Safari's Settings
