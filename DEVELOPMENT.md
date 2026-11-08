@@ -185,8 +185,10 @@ The list holds titles and URLs, so it stays out of the log.
 
 To try cleanup without waiting 12 hours, leave Safari open (tab ids are only good until it
 restarts), quit Side Tabs, move times in `cleanup.lastViewed` back by a day or more (they're
-seconds since 2001), and start Side Tabs again. The next run, within five minutes or when Safari
-comes forward, closes those tabs.
+seconds since 2001), and start Side Tabs again within five minutes, or set `cleanup.savedAt` to
+the present too: after longer away, Side Tabs starts every clock over, because tabs may have been
+looked at meanwhile. The next run, within five minutes or a few seconds after Safari comes
+forward, closes those tabs.
 
 To watch live logs from the app and the extension, run the command below. In zsh, plain
 `log` is a shell built-in, so use the full path:

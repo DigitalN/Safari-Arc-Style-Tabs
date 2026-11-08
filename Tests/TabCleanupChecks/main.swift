@@ -278,24 +278,55 @@ do {
 }
 
 do {
-    // The clocks are saved in state.json, so restarting Side Tabs doesn't reset them.
-    now = start
+    // The clocks are saved in state.json, so a quick restart of Side Tabs (an update) doesn't reset them.
+    // (Loading compares when they were saved with the real clock, so this runs on today's date.)
+    let t0 = Date() - day
+    now = t0
     let stateURL = stateFolder.appending(path: "restart.json")
     let (first, _) = makeStore(stateURL: stateURL)
     send(first, simpleSnapshot(seq: 1, active: 1))
-    now = start + hour
+    now = t0 + 20 * hour
     send(first, simpleSnapshot(seq: 2, active: 2))
+    now = Date() - 30
     first.save()
 
-    now = start + 20 * hour
     let (second, commands) = makeStore(stateURL: stateURL)
-    check(second.cleanup.lastViewed == [key(1): start + hour, key(2): start + hour, key(3): start],
-          "the clocks come back after Side Tabs restarts")
+    check(second.cleanup.lastViewed == [key(1): t0 + 20 * hour, key(2): t0 + 20 * hour, key(3): t0],
+          "the clocks come back after a quick restart of Side Tabs")
     send(second, simpleSnapshot(seq: 5, active: 2))
-    check(second.cleanup.lastViewed[key(3)] == start, "the same Safari's tabs keep their clocks")
-    now = start + 24 * hour
+    check(second.cleanup.lastViewed[key(3)] == t0, "the same Safari's tabs keep their clocks")
+    now = t0 + 24 * hour
     second.runCleanup(after: day)
     check(closedIds(commands()) == [[3]], "so a tab idle since before the restart closes on time")
+    now = start
+}
+
+do {
+    // Longer away, every clock starts over, as when cleanup is turned on: while Side Tabs isn't running,
+    // tabs can be looked at without it seeing.
+    check(TabCleanup.clocksStillHold(savedAt: start, now: start + 30), "clocks saved half a minute before Side Tabs starts hold")
+    check(TabCleanup.clocksStillHold(savedAt: start, now: start + TabCleanup.restartAllowance), "and so do clocks a few minutes old")
+    check(!TabCleanup.clocksStillHold(savedAt: start, now: start + TabCleanup.restartAllowance + 1), "but not older ones")
+    check(!TabCleanup.clocksStillHold(savedAt: nil, now: start), "nor clocks saved without a time")
+
+    let t0 = Date() - 3 * day
+    now = t0
+    let stateURL = stateFolder.appending(path: "away.json")
+    let (first, _) = makeStore(stateURL: stateURL)
+    send(first, simpleSnapshot(seq: 1, active: 1))
+    first.cleanup.record([closedTab(1, closedAt: Date() - hour)])
+    now = Date() - 10 * minute
+    first.save()
+
+    now = Date()
+    let (second, commands) = makeStore(stateURL: stateURL)
+    check(second.cleanup.lastViewed.isEmpty, "after ten minutes away, the saved clocks are dropped")
+    check(second.cleanup.closedTabs.map(\.title) == ["Page 1"], "but the list is kept")
+    send(second, simpleSnapshot(seq: 5, active: 1))
+    check(second.cleanup.lastViewed == [key(1): now, key(2): now, key(3): now], "every tab's clock starts over as Safari's tabs come in")
+    second.runCleanup(after: day)
+    check(closedIds(commands()).isEmpty, "so tabs that were idle before Side Tabs quit don't close right after it starts")
+    now = start
 }
 
 do {
@@ -316,19 +347,21 @@ do {
 
 do {
     // Clocks saved for an instance that never reports again (Safari quit while Side Tabs wasn't running)
-    // are dropped once every live instance has had time to report.
-    now = start
+    // are dropped once every live instance has had time to report. (A quick restart, on today's date, so
+    // the saved clocks are taken back at all.)
+    let t0 = Date()
+    now = t0
     let stateURL = stateFolder.appending(path: "gone.json")
     let (first, _) = makeStore(stateURL: stateURL)
     send(first, simpleSnapshot("old", seq: 1, active: 1))
     first.save()
 
-    now = start + hour
+    now = t0 + hour
     let (second, _) = makeStore(stateURL: stateURL)
     send(second, simpleSnapshot("new", seq: 1, active: 1))
     second.runCleanup(after: day)
     check(second.cleanup.lastViewed.keys.contains(key(2, "old")), "right after launch, an instance that hasn't reported keeps its clocks")
-    now = start + hour + TabCleanup.instanceGracePeriod
+    now = t0 + hour + TabCleanup.instanceGracePeriod
     second.runCleanup(after: day)
     check(!second.cleanup.lastViewed.keys.contains { $0.instance == "old" }, "once every live one has reported, a silent instance's clocks go")
     check(second.cleanup.lastViewed.keys.contains(key(2, "new")), "and the live instance keeps its own")

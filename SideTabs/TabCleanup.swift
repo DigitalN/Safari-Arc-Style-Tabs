@@ -65,6 +65,9 @@ final class TabCleanup {
     /// 5 seconds and is asked for a snapshot on the first one, but under load it has run 20 s late.
     /// After this, clocks of instances that haven't reported belong to a Safari that has quit.
     static let instanceGracePeriod: TimeInterval = 2 * 60
+    /// How long Side Tabs can be away (quit, or restarting into an update) before the clocks it saved
+    /// no longer hold. Nobody sees which tabs are looked at while it isn't running.
+    static let restartAllowance: TimeInterval = 5 * 60
 
     /// Tabs cleanup closed, newest first.
     private(set) var closedTabs: [ClosedTab] = []
@@ -161,25 +164,43 @@ final class TabCleanup {
 
         var lastViewed: [Time]
         var closedTabs: [ClosedTab]
+        /// When the clocks were saved, to tell a quick restart from a longer time away. Nil in a file
+        /// saved before it was kept.
+        var savedAt: Date?
     }
 
     var saved: Saved {
         let times = lastViewed
             .map { Saved.Time(instance: $0.key.instance, tabId: $0.key.tabId, at: $0.value) }
             .sorted { ($0.instance, $0.tabId) < ($1.instance, $1.tabId) }
-        return Saved(lastViewed: times, closedTabs: closedTabs)
+        return Saved(lastViewed: times, closedTabs: closedTabs, savedAt: clock())
     }
 
+    /// Takes back what was saved. The clocks only come back after a quick restart (see
+    /// `clocksStillHold`); otherwise every tab's clock starts over, as when cleanup is turned on.
     func restore(_ saved: Saved?) {
         guard let saved else { return }
-        lastViewed = Dictionary(
-            saved.lastViewed.map { (TabKey(instance: $0.instance, tabId: $0.tabId), $0.at) },
-            uniquingKeysWith: { max($0, $1) }
-        )
-        closedTabs = Self.pruned(saved.closedTabs, now: clock())
+        let now = clock()
+        if Self.clocksStillHold(savedAt: saved.savedAt, now: now) {
+            lastViewed = Dictionary(
+                saved.lastViewed.map { (TabKey(instance: $0.instance, tabId: $0.tabId), $0.at) },
+                uniquingKeysWith: { max($0, $1) }
+            )
+        } else if !saved.lastViewed.isEmpty {
+            log.notice("Side Tabs was away for more than \(Int(Self.restartAllowance / 60)) min; every tab's clock starts over")
+        }
+        closedTabs = Self.pruned(saved.closedTabs, now: now)
     }
 
     // MARK: - Rules
+
+    /// Whether clocks saved at `savedAt` still hold when Side Tabs starts again at `now`. Only after a
+    /// quick restart, such as an update: while Side Tabs isn't running, tabs can be looked at without it
+    /// seeing, and a clock that kept running then could close a tab that was looked at a minute ago.
+    static func clocksStillHold(savedAt: Date?, now: Date) -> Bool {
+        guard let savedAt else { return false }
+        return now.timeIntervalSince(savedAt) <= restartAllowance
+    }
 
     /// Whether a tab is being looked at right now: it's the active tab in its window. A tab playing
     /// sound counts too, so pausing a video or a podcast that played for hours doesn't close its tab a
