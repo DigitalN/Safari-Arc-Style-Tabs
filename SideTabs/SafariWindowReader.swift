@@ -185,64 +185,59 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
 
     // MARK: - Choosing the window
 
-    /// Picks the browser window to dock to: the focused one if it's a browser window,
-    /// otherwise keeps the current one, otherwise the frontmost browser window.
+    /// Picks the browser window to dock to (BrowserWindowRule.choose): the focused one if the
+    /// sidebar can dock to it, otherwise the main one, otherwise the current one, otherwise the
+    /// frontmost one it can dock to. So Settings and the other windows that aren't browser windows
+    /// are never docked to, and while one is in front the sidebar stays where it was.
     private func chooseWindow(_ application: AXUIElement, current: AXUIElement?) -> (window: AXUIElement?, focused: AXUIElement?) {
         let focused = query.element(application, kAXFocusedWindowAttribute)
         if query.timedOut {
             return (nil, nil)
         }
-        if let focused, isBrowserWindow(focused) {
-            return (focused, focused)
-        }
-        if let main = query.element(application, kAXMainWindowAttribute), isBrowserWindow(main) {
-            return (main, focused)
-        }
-        if let focused {
-            let description = describe(focused)
-            if description != lastRejectedDescription {
-                lastRejectedDescription = description
-                log.notice("focused window isn't a browser window: \(description, privacy: .public)")
+        // Each window is read once per choice: the focused window is usually the main one too.
+        var known: [(window: AXUIElement, traits: WindowTraits)] = []
+        func traits(of window: AXUIElement) -> WindowTraits {
+            if let entry = known.first(where: { CFEqual($0.window, window) }) {
+                return entry.traits
             }
+            let traits = WindowTraits.read(window, using: query)
+            known.append((window, traits))
+            return traits
         }
-        if let current, isBrowserWindow(current) {
-            return (current, focused)
-        }
-        let windows = query.elements(application, kAXWindowsAttribute)
-        if let first = windows.first(where: isBrowserWindow) {
-            return (first, focused)
-        }
+        var listed: [AXUIElement] = []
+        let chosen = BrowserWindowRule.choose(
+            focused: focused,
+            main: { query.element(application, kAXMainWindowAttribute) },
+            current: current,
+            windows: {
+                listed = query.elements(application, kAXWindowsAttribute)
+                return listed
+            },
+            canDock: { BrowserWindowRule.canDock(traits(of: $0)) },
+            gaveUp: { query.timedOut }
+        )
         if query.timedOut {
             return (nil, focused)
         }
-        let description = windows.isEmpty ? "Safari reports no windows" : windows.map(describe).joined(separator: "; ")
-        if description != lastWindowDescription {
-            lastWindowDescription = description
-            log.notice("no browser window among: \(description, privacy: .public)")
+        if let focused, chosen.map({ !CFEqual($0, focused) }) ?? true {
+            // Once each time such a window comes to the front, not every second while it stays.
+            let description = traits(of: focused).summary
+            if description != lastRejectedDescription {
+                lastRejectedDescription = description
+                let outcome = chosen == nil ? "nothing to dock to" : "docking to a browser window behind it"
+                log.notice("focused window isn't a browser window: \(description, privacy: .public); \(outcome, privacy: .public)")
+            }
+        } else {
+            lastRejectedDescription = ""
         }
-        return (nil, focused)
-    }
-
-    private func describe(_ window: AXUIElement) -> String {
-        let button = query.element(window, kAXFullScreenButtonAttribute)
-        let buttonState = button.map { query.bool($0, kAXEnabledAttribute).map { $0 ? "enabled" : "disabled" } ?? "unknown" } ?? "missing"
-        // Without the window's title: it is the page's, and the log keeps no browsing history.
-        return "role=\(query.string(window, kAXRoleAttribute) ?? "nil") subrole=\(query.string(window, kAXSubroleAttribute) ?? "nil") minimized=\(query.bool(window, kAXMinimizedAttribute).map(String.init) ?? "nil") fullScreenButton=\(buttonState)"
-    }
-
-    /// Browser windows are standard windows that can go full screen. Safari's Settings
-    /// window has a disabled full-screen button, which is how it's told apart. Safari now and
-    /// then leaves the button out of a browser window for a few seconds, so a missing button
-    /// doesn't count against a window.
-    private func isBrowserWindow(_ window: AXUIElement) -> Bool {
-        guard query.string(window, kAXRoleAttribute) == kAXWindowRole,
-              query.string(window, kAXSubroleAttribute) == kAXStandardWindowSubrole,
-              query.bool(window, kAXMinimizedAttribute) != true else { return false }
-        if query.bool(window, "AXFullScreen") ?? false {
-            return true
+        if chosen == nil {
+            let description = listed.isEmpty ? "Safari reports no windows" : listed.map { traits(of: $0).summary }.joined(separator: "; ")
+            if description != lastWindowDescription {
+                lastWindowDescription = description
+                log.notice("no browser window among: \(description, privacy: .public)")
+            }
         }
-        guard let button = query.element(window, kAXFullScreenButtonAttribute) else { return true }
-        return query.bool(button, kAXEnabledAttribute) ?? true
+        return (chosen, focused)
     }
 
     // MARK: - Geometry
@@ -277,5 +272,37 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
             bottom = max(bottom ?? childFrame.maxY, childFrame.maxY)
         }
         return bottom
+    }
+}
+
+nonisolated extension WindowTraits {
+    /// Reads what BrowserWindowRule goes by from one of Safari's windows, in one round trip. Only a
+    /// window without an identifier costs more: its full-screen button, and its zoom button if it
+    /// has no full-screen button. Call on the queue `query` belongs to; if Safari doesn't answer,
+    /// `query.timedOut` says so.
+    static func read(_ window: AXUIElement, using query: AXQuery) -> WindowTraits {
+        var traits = WindowTraits()
+        let names = [kAXRoleAttribute, kAXSubroleAttribute, kAXIdentifierAttribute, kAXMinimizedAttribute, "AXFullScreen"]
+        guard let values = query.copyMultiple(window, names), values.count == names.count else { return traits }
+        traits.role = values[0] as? String
+        traits.subrole = values[1] as? String
+        traits.identifier = values[2] as? String
+        traits.isMinimized = values[3] as? Bool
+        traits.isFullScreen = values[4] as? Bool
+        guard BrowserWindowRule.needsButtons(traits) else { return traits }
+        traits.fullScreenButton = buttonState(window, kAXFullScreenButtonAttribute, query)
+        if traits.fullScreenButton == .missing {
+            traits.zoomButton = buttonState(window, kAXZoomButtonAttribute, query)
+        }
+        return traits
+    }
+
+    private static func buttonState(_ window: AXUIElement, _ attribute: String, _ query: AXQuery) -> WindowButtonState {
+        guard let button = query.element(window, attribute) else { return .missing }
+        switch query.bool(button, kAXEnabledAttribute) {
+        case true?: return .enabled
+        case false?: return .disabled
+        case nil: return .unknown
+        }
     }
 }
