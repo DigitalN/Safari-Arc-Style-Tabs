@@ -64,7 +64,8 @@ swiftc -o "$WORK/docked-window-checks" Tests/DockedWindowChecks/main.swift SideT
 "$WORK/docked-window-checks"
 
 echo "== sidebar overlay"
-swiftc -o "$WORK/overlay-checks" Tests/SidebarOverlayChecks/main.swift SideTabs/SidebarOverlay.swift
+swiftc -o "$WORK/overlay-checks" Tests/SidebarOverlayChecks/main.swift SideTabs/SidebarOverlay.swift \
+    SideTabs/SafariBars.swift SideTabs/TabBarFinder.swift SideTabs/TabBarMatcher.swift
 "$WORK/overlay-checks"
 
 # A row has one mouse gesture, the one sidebarRowGesture attaches. A press gesture of its own,

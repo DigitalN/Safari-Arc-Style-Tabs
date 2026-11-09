@@ -1,0 +1,12 @@
+{"role":"AXWindow","subrole":"AXStandardWindow","frame":[0,0,1512,982],"children":[
+  {"role":"AXSplitGroup","frame":[0,0,1512,982],"children":[
+    {"role":"AXSplitter","frame":[0,0,0,982]},
+    {"role":"AXTabGroup","frame":[0,0,1512,982],"children":[
+      {"role":"AXGroup","identifier":"BrowserView?tab=1","frame":[0,0,1512,982]}
+    ]}
+  ]},
+  {"role":"AXGroup","frame":[0,0,1512,80],"children":[
+    {"role":"AXToolbar","frame":[0,0,1512,52]},
+    {"role":"AXGroup","identifier":"FavoritesBarView","description":"Favourites Bar","frame":[0,52,1512,28]}
+  ]}
+]}

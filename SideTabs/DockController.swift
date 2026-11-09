@@ -175,8 +175,9 @@ final class DockController {
 
         switch SidebarPlacement.choose(fullScreen: tracker.isFullScreen(window), hidesAutomatically: settings.hidesAutomatically) {
         case .overlay(.fullScreen):
-            note("full screen overlay")
-            showOverlay(.fullScreen, layout: fullScreenLayout(on: screen(containing: axFrame), window: window))
+            let layout = fullScreenLayout(on: screen(containing: axFrame), window: window)
+            showOverlay(.fullScreen, layout: layout)
+            note("full screen overlay: panel at \(layout.panel)")
             return
         case .overlay(.window):
             // Safari keeps its whole window. If the sidebar had made room beside it, give it back.
@@ -236,16 +237,20 @@ final class DockController {
         }
         let wanted = SidebarPlacement.choose(fullScreen: tracker.isFullScreen(window), hidesAutomatically: settings.hidesAutomatically)
         switch (mode, wanted) {
-        case (.overlay(.fullScreen), .overlay(.fullScreen)), (.hidden, _):
+        case (.hidden, _):
             return nil
+        // Safari's bars come and go without the window moving or changing size (the Favourites bar,
+        // the find bar, the tab layout, the full-screen toolbar sliding down), so nothing announces
+        // them: the last read may only now include them (#35). Compared with the layout last applied,
+        // not the panel's frame, so a frame AppKit adjusts can't make this fix it every second.
+        case (.overlay(.fullScreen), .overlay(.fullScreen)):
+            return overlayLayout != fullScreenLayout(on: screen(containing: frame), window: window) ? "sidebar isn't below Safari's bars in full screen" : nil
         case (.overlay(.fullScreen), _):
             return "Safari left full screen"
         case (_, .overlay(.fullScreen)):
             return "Safari is full screen"
         case (.overlay(.window), .overlay(.window)):
-            // Safari's toolbar can change height without the window moving (the favorites bar, the
-            // tab layout), and the last read may only now include it.
-            return panel.frame != windowLayout(for: frame, window: window).panel ? "sidebar isn't where it comes out over Safari's window" : nil
+            return overlayLayout != windowLayout(for: frame, window: window) ? "sidebar isn't where it comes out over Safari's window" : nil
         case (.overlay(.window), .docked):
             return "the sidebar no longer hides automatically"
         case (.docked, .overlay(.window)):
@@ -422,7 +427,7 @@ final class DockController {
         }
     }
 
-    /// Starts below Safari's toolbar and tab bar so the sidebar never covers them.
+    /// Starts below Safari's toolbar and the bars under it, so the sidebar never covers them.
     private func fullScreenLayout(on screen: NSScreen, window: AXUIElement) -> OverlayLayout {
         OverlayLayout.fullScreen(
             screen: screen.frame,
@@ -432,8 +437,8 @@ final class DockController {
         )
     }
 
-    /// Over the page of a normal window at `axFrame`, below its toolbar, with the strip along its
-    /// left edge.
+    /// Over the page of a normal window at `axFrame`, below its toolbar and the bars under it, with
+    /// the strip along its left edge.
     private func windowLayout(for axFrame: CGRect, window: AXUIElement) -> OverlayLayout {
         let screen = screen(containing: axFrame)
         return OverlayLayout.window(

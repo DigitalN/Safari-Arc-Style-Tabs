@@ -346,7 +346,8 @@ final class SafariTracker {
         cachedReading(of: window)?.number
     }
 
-    /// Bottom edge of Safari's toolbar and tab bar in full screen, if Safari reported them.
+    /// Bottom edge of the lowest bar Safari shows above the page, if it reported any. Read in full
+    /// screen, and in normal windows while `readsToolbarInWindows`.
     func toolbarBottom(of window: AXUIElement) -> CGFloat? {
         cachedReading(of: window)?.toolbarBottom
     }

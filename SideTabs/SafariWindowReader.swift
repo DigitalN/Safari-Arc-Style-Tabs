@@ -15,8 +15,9 @@ nonisolated struct WindowReading {
     var isFullScreen = false
     /// The window server's id for the window.
     var number: Int?
-    /// Bottom edge of Safari's toolbar and tab bar. Only read in full screen, and in normal
-    /// windows while the sidebar hides automatically: the overlay has to start below it.
+    /// Bottom edge of the lowest bar Safari shows above the page (SafariBars.swift), nil if none. Only
+    /// read in full screen, and in normal windows while the sidebar hides automatically: the overlay
+    /// has to start below it.
     var toolbarBottom: CGFloat?
 }
 
@@ -50,6 +51,7 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
     private var observedWindow: AXUIElement?
     private var lastWindowDescription = ""
     private var lastRejectedDescription = ""
+    private var lastBarsSummary = ""
 
     static let windowNotifications = DockedWindowNotifications.names
 
@@ -149,9 +151,8 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
             assign(&reading, value)
             return true
         }
-        guard step({ frame(of: window) }, { $0.frame = $1 }),
-              step({ query.string(window, kAXTitleAttribute) }, { $0.title = $1 }),
-              step({ query.bool(window, "AXFullScreen") ?? false }, { $0.isFullScreen = $1 }) else {
+        // In one round trip: this runs every second and after every window event, docked or not.
+        guard step({ basics(of: window) }, { $0.frame = $1.frame; $0.title = $1.title; $0.isFullScreen = $1.isFullScreen }) else {
             return (reading, false)
         }
         if reading.number == nil {
@@ -242,14 +243,25 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
 
     // MARK: - Geometry
 
-    private func frame(of element: AXUIElement) -> CGRect? {
-        guard let positionValue = query.value(element, kAXPositionAttribute),
-              let sizeValue = query.value(element, kAXSizeAttribute) else { return nil }
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(positionValue, .cgPoint, &position),
-              AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
-        return CGRect(origin: position, size: size)
+    /// A window's frame, title and whether it's full screen, in one round trip. What Safari doesn't
+    /// give comes back nil (or not full screen), as the separate reads did.
+    private func basics(of window: AXUIElement) -> (frame: CGRect?, title: String?, isFullScreen: Bool) {
+        let attributes = [kAXPositionAttribute, kAXSizeAttribute, kAXTitleAttribute, "AXFullScreen"]
+        guard let values = query.copyMultiple(window, attributes), values.count == attributes.count else {
+            return (nil, nil, false)
+        }
+        return (Self.frame(position: values[0], size: values[1]), values[2] as? String, values[3] as? Bool ?? false)
+    }
+
+    /// A frame from an element's `AXPosition` and `AXSize` values, if both are there.
+    nonisolated private static func frame(position: CFTypeRef?, size: CFTypeRef?) -> CGRect? {
+        guard let position, let size,
+              CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero
+        var extent = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(size as! AXValue, .cgSize, &extent) else { return nil }
+        return CGRect(origin: origin, size: extent)
     }
 
     private func windowNumber(of window: AXUIElement) -> Int? {
@@ -258,20 +270,55 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
         return Int(id)
     }
 
-    /// Bottom edge (AX coordinates) of Safari's toolbar and tab bar, from the window's direct
-    /// children only so it stays fast. Nil if Safari doesn't report them (e.g. a hidden
-    /// full-screen toolbar).
+    /// Bottom edge (AX coordinates) of the lowest bar Safari shows above the page: its toolbar, the
+    /// Favourites bar, the tab bar, the find bar (SafariBars.swift). Nil if Safari reports none (e.g.
+    /// a hidden full-screen toolbar).
+    ///
+    /// Kept cheap, since it's read every second while the sidebar can slide out: the window's children
+    /// and its own buttons come in one round trip, the buttons aren't read further, each other child
+    /// takes one more, and only the split group's children are read below that.
     private func toolbarBottom(of window: AXUIElement, windowFrame: CGRect) -> CGFloat? {
-        var bottom: CGFloat?
-        for child in query.elements(window, kAXChildrenAttribute) {
-            guard let role = query.string(child, kAXRoleAttribute),
-                  role == kAXToolbarRole || role == kAXTabGroupRole,
-                  let childFrame = frame(of: child),
-                  childFrame.height < 200,
-                  childFrame.minY < windowFrame.minY + 200 else { continue }
-            bottom = max(bottom ?? childFrame.maxY, childFrame.maxY)
+        let attributes = [kAXChildrenAttribute, kAXCloseButtonAttribute, kAXMinimizeButtonAttribute, kAXZoomButtonAttribute, kAXFullScreenButtonAttribute]
+        guard let values = query.copyMultiple(window, attributes) else { return nil }
+        let buttons = values.dropFirst().compactMap { value -> AXUIElement? in
+            guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+            return (value as! AXUIElement)
         }
-        return bottom
+        let children = ((values.first ?? nil) as? [AXUIElement] ?? []).filter { child in
+            !buttons.contains { CFEqual($0, child) }
+        }
+        let bars = SafariBars.bars(among: children.compactMap { BarNode.read($0, using: query) }, windowFrame: windowFrame)
+        guard !query.timedOut else { return nil }
+        // Measured from the window's top, so moving the window doesn't log a line for every read.
+        let summary = SafariBars.summary(bars, windowTop: windowFrame.minY)
+        if summary != lastBarsSummary {
+            lastBarsSummary = summary
+            log.notice("bars above the page, from the window's top: \(summary, privacy: .public)")
+        }
+        return SafariBars.bottom(of: bars)
+    }
+
+    /// An element of the window, with what SafariBars needs read in one round trip. After a read
+    /// Safari didn't answer, the rest aren't made: each would wait as long again.
+    nonisolated private struct BarNode: SafariBarNode {
+        let element: AXUIElement
+        let query: AXQuery
+        let role: String?
+        let identifier: String?
+        let frame: CGRect?
+
+        static func read(_ element: AXUIElement, using query: AXQuery) -> BarNode? {
+            guard !query.timedOut else { return nil }
+            let attributes = [kAXRoleAttribute, kAXIdentifierAttribute, kAXPositionAttribute, kAXSizeAttribute]
+            guard let values = query.copyMultiple(element, attributes), values.count == attributes.count else { return nil }
+            return BarNode(element: element, query: query, role: values[0] as? String, identifier: values[1] as? String,
+                           frame: SafariWindowReader.frame(position: values[2], size: values[3]))
+        }
+
+        func children() -> [BarNode] {
+            guard !query.timedOut else { return [] }
+            return query.elements(element, kAXChildrenAttribute).compactMap { Self.read($0, using: query) }
+        }
     }
 }
 
