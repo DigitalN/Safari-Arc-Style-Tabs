@@ -50,6 +50,11 @@ final class SidebarPanel: NSPanel {
     /// and one on the Settings gear never does (`keepsSafariBehind()`).
     var onMouseDown: (() -> Void)?
 
+    /// Called in place of `onMouseDown` on a left mouse-down on the Settings gear (`keepsSafariBehind()`),
+    /// once the click is handled. Like any click, it ordered the panel in front of Safari's window, where its
+    /// corner fill would show over Safari's corners; this puts it back without bringing Safari forward.
+    var onMouseDownKeepingSafariBehind: (() -> Void)?
+
     /// Called on a middle mouse-down with its position in the window's coordinates (origin at the
     /// top left, like SwiftUI's `.global`), after Safari has been brought forward. Says whether
     /// the click was used; if not, it is passed on.
@@ -63,12 +68,14 @@ final class SidebarPanel: NSPanel {
     private(set) var lastMouseDown = Date.distantPast
 
     override func sendEvent(_ event: NSEvent) {
+        var keepingSafariBehind = false
         if event.type == .leftMouseDown || event.type == .otherMouseDown {
             lastMouseDown = Date(timeIntervalSinceNow: event.timestamp - ProcessInfo.processInfo.systemUptime)
-            // A view that opens a menu on mouse-down (the profile dropdown, #39) runs this itself once the
-            // menu has closed: Safari coming forward now would close the menu as it opens. The Settings gear
-            // (#43) never runs it: it brings Side Tabs' own Settings window forward, and Safari would cover it.
-            if !(event.type == .leftMouseDown && (opensMenu(at: event) || keepsSafariBehind(at: event))) {
+            // The Settings gear (#43) never runs this: it brings Side Tabs' own Settings window forward, and
+            // Safari would cover it. A view that opens a menu on mouse-down (the profile dropdown, #39) runs
+            // it itself once the menu has closed: Safari coming forward now would close the menu as it opens.
+            keepingSafariBehind = event.type == .leftMouseDown && keepsSafariBehind(at: event)
+            if !keepingSafariBehind && !(event.type == .leftMouseDown && opensMenu(at: event)) {
                 onMouseDown?()
             }
         }
@@ -80,6 +87,9 @@ final class SidebarPanel: NSPanel {
             }
         }
         super.sendEvent(event)
+        if keepingSafariBehind {
+            onMouseDownKeepingSafariBehind?()
+        }
     }
 
     /// Runs what a left mouse-down normally does first (`onMouseDown`: bringing Safari forward), for a
