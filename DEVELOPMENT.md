@@ -33,7 +33,8 @@ Runs what can be checked without Safari: `background.js` against a stand-in `bro
 (`Tests/ExtensionChecks`), the Swift logic compiled with small test programs (`TabStore`'s
 handling of messages, where Safari's tab bar is in a window's Accessibility tree and which
 of its buttons a tab matches and which one Safari has selected, checked against trees kept as data in
-`Tests/TabBarFinderChecks/trees`; what a press on a row turns into; which row is under a
+`Tests/TabBarFinderChecks/trees`; which of Safari's windows are browser windows the sidebar
+docks to, and never Settings, against the same trees; what a press on a row turns into; which row is under a
 middle click; which queued
 Accessibility requests are still wanted; which notifications the docked window is watched for;
 where the sidebar slides out over the page in full screen or when it hides automatically, and what
