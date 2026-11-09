@@ -105,6 +105,10 @@ final class TabStore {
         }
     }
     @ObservationIgnored private var lastSnapshotRequest = Date.distantPast
+    /// The docked window's profile, read from its toolbar by SafariProfiles (#33), as `ProfileKey.rawValue`:
+    /// "default", or the profile's UUID as its copy's snapshots carry it. Nil while it isn't known, in a private
+    /// window, and where Safari has no profiles. `currentWindow` takes the docked window from that profile's copy.
+    var dockedWindowProfile: String?
 
     @ObservationIgnored var sendCommand: (([String: Any]) -> Void)?
     @ObservationIgnored var onToggleSidebar: (() -> Void)?
@@ -537,24 +541,53 @@ final class TabStore {
     var currentWindow: WindowSelection? {
         let ordered = snapshots.values.sorted { $0.focusChangedAt > $1.focusChangedAt }
         var best: WindowSelection?
-        for snapshot in ordered {
+        // Not simply the newest focus change: a copy that lost focus reports that too (#36).
+        let ranked = Self.ranked(ordered, dockedProfile: dockedWindowProfile)
+        for snapshot in ranked {
             let focused = (snapshot.focusedWindowId ?? -1) >= 0 ? snapshot.focusedWindowId : snapshot.lastFocusedWindowId
             if let focused, let window = snapshot.windows.first(where: { $0.id == focused }) {
                 best = WindowSelection(instance: snapshot.instance, window: window)
                 break
             }
         }
-        if best == nil, let snapshot = ordered.first(where: { !$0.windows.isEmpty }) {
+        if best == nil, let snapshot = ranked.first(where: { !$0.windows.isEmpty }) {
             best = WindowSelection(instance: snapshot.instance, window: snapshot.windows[0])
         }
 
         if let title = dockedWindowTitle, !title.isEmpty, let current = best {
-            let matches = dockedWindows(title: title)
+            // Another profile's window on the same page isn't the docked one, once its profile is known.
+            let dockedCopies = Set(ranked.filter { Self.isCopy($0, of: dockedWindowProfile) }.map(\.instance))
+            let matches = dockedWindows(title: title).filter { dockedCopies.isEmpty || dockedCopies.contains($0.instance) }
             if matches.count == 1, matches[0] != current {
                 return matches[0]
             }
         }
         return best
+    }
+
+    /// The order `currentWindow` tries the extension copies in (#36), from `ordered`, newest focus change first:
+    ///
+    /// 1. The copy of the docked window's profile, which is known from the window's toolbar
+    ///    (`dockedWindowProfile`), whatever the copies' focus reports say.
+    /// 2. Copies that have a focused window. A copy that loses focus to another profile's window can't see that
+    ///    window, so it reports none, often with a newer time than the copy that gained it. It mustn't come first.
+    /// 3. The rest, whose last focused window decides only when no copy has a focused one (Safari in the
+    ///    background, or the gaining copy's report still on its way).
+    static func ranked(_ ordered: [Snapshot], dockedProfile: String?) -> [Snapshot] {
+        func rank(_ snapshot: Snapshot) -> Int {
+            if isCopy(snapshot, of: dockedProfile) { return 0 }
+            return (snapshot.focusedWindowId ?? -1) >= 0 ? 1 : 2
+        }
+        return ordered.enumerated()
+            .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
+            .map(\.element)
+    }
+
+    /// Whether `snapshot` is from the copy of `profile` (a `ProfileKey.rawValue`; the default profile's copy sends
+    /// no profile).
+    private static func isCopy(_ snapshot: Snapshot, of profile: String?) -> Bool {
+        guard let profile else { return false }
+        return (snapshot.profile ?? "default") == profile
     }
 
     private func activeTitle(of window: BrowserWindow) -> String? {

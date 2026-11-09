@@ -235,11 +235,22 @@ final class SafariProfiles {
         dockedToolbar = .unknown
         dockedResolved = false
         toolbarRetries = 0
+        // Until the new window's profile is read, the store mustn't prefer the previous one's copy.
+        tellStoreDockedProfile()
         guard let window else {
             setDocked(nil)
             return
         }
         readDockedToolbar(window)
+    }
+
+    /// Tells the store the docked window's profile, so it takes the docked window from that profile's copy
+    /// rather than going by the copies' focus reports alone (#36).
+    private func tellStoreDockedProfile() {
+        let key = dockedResolved ? dockedProfileID.flatMap { id in profiles.first { $0.id == id }?.key } : nil
+        if store.dockedWindowProfile != key?.rawValue {
+            store.dockedWindowProfile = key?.rawValue
+        }
     }
 
     private func readDockedToolbar(_ window: AXUIElement) {
@@ -322,6 +333,7 @@ final class SafariProfiles {
         if let pending = pendingSwitch, pending.id == id {
             pendingSwitch = nil
         }
+        tellStoreDockedProfile()
         evaluateOff()
     }
 
@@ -341,6 +353,7 @@ final class SafariProfiles {
         if updated != profiles {
             profiles = updated
             scheduleSave()
+            tellStoreDockedProfile()
         }
     }
 

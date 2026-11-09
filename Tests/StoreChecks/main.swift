@@ -952,6 +952,102 @@ do {
     check(snapshotRequests(commands()) == 0, "a private window's title only has to contain the page title")
 }
 
+// MARK: - Focus moving to another profile's window (#36)
+
+/// A snapshot from extension copy `copy` (of profile `profile`; the default profile's copy sends none) with one
+/// window, whose active tab is titled `title`. `focused` says whether that window has focus, as of `at`
+/// (`focusChangedAt`). A copy that loses focus to another profile's window reports none.
+func copySnapshot(_ copy: String, profile: String?, seq: Int, window: Int, title: String, focused: Bool, at: Double) -> [String: Any] {
+    var object: [String: Any] = [
+        "type": "snapshot", "instance": copy, "seq": seq,
+        "focusedWindowId": focused ? window : -1, "lastFocusedWindowId": window, "focusChangedAt": at,
+        "windows": [["id": window, "focused": focused, "incognito": false,
+                     "tabs": [["id": window * 100, "windowId": window, "index": 0, "title": title,
+                               "url": "https://example.com/\(window)", "active": true, "pinned": false, "audible": false,
+                               "muted": false, "loading": false] as [String: Any]]]],
+    ]
+    if let profile { object["profile"] = profile }
+    return object
+}
+
+let workProfile = "WWWWWWWW-0000-0000-0000-000000000000"
+
+/// A store with no extension copy yet (makeStore's has one, whose window has focus).
+func storeWithoutCopies() -> TabStore {
+    storeCount += 1
+    return TabStore(stateURL: stateFolder.appending(path: "state-\(storeCount).json"))
+}
+
+do {
+    // A (the default profile's copy) had focus; it moves to B's window (Work). B reports the gain, then A
+    // reports the loss, with a newer time.
+    let store = storeWithoutCopies()
+    send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: true, at: 100))
+    send(store, copySnapshot("B", profile: workProfile, seq: 1, window: 7, title: "Docs", focused: false, at: 50))
+    store.dockedWindowTitle = nil
+    check(store.currentWindow?.instance == "A", "A's window has focus to begin with")
+    send(store, copySnapshot("B", profile: workProfile, seq: 2, window: 7, title: "Docs", focused: true, at: 200))
+    send(store, copySnapshot("A", profile: nil, seq: 2, window: 1, title: "Mail", focused: false, at: 201))
+    check(store.currentWindow?.instance == "B", "A losing focus after B gained it: B's window is shown")
+}
+
+do {
+    // The same reports in the other order: A's loss arrives first, then B's gain.
+    let store = storeWithoutCopies()
+    send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: true, at: 100))
+    send(store, copySnapshot("B", profile: workProfile, seq: 1, window: 7, title: "Docs", focused: false, at: 50))
+    store.dockedWindowTitle = nil
+    send(store, copySnapshot("A", profile: nil, seq: 2, window: 1, title: "Mail", focused: false, at: 201))
+    send(store, copySnapshot("B", profile: workProfile, seq: 2, window: 7, title: "Docs", focused: true, at: 200))
+    check(store.currentWindow?.instance == "B", "B gaining focus after A reported losing it: B's window is shown")
+
+    // Both still claim focus (A's loss not in yet): the newer focus change wins.
+    send(store, copySnapshot("A", profile: nil, seq: 3, window: 1, title: "Mail", focused: true, at: 300))
+    check(store.currentWindow?.instance == "A", "of two copies with a focused window, the newer focus change")
+    // Safari in the background: no copy has a focused window, and the one that lost focus last decides, as before.
+    send(store, copySnapshot("A", profile: nil, seq: 4, window: 1, title: "Mail", focused: false, at: 400))
+    send(store, copySnapshot("B", profile: workProfile, seq: 3, window: 7, title: "Docs", focused: false, at: 350))
+    check(store.currentWindow?.instance == "A", "no copy with a focused window: the newest focus change's last focused window")
+}
+
+do {
+    // B's gain hasn't arrived, but the docked window's toolbar says it's in Work: Work's copy is used.
+    let store = storeWithoutCopies()
+    send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: false, at: 201))
+    send(store, copySnapshot("B", profile: workProfile, seq: 1, window: 7, title: "Docs", focused: false, at: 50))
+    store.dockedWindowTitle = nil
+    check(store.currentWindow?.instance == "A", "without the docked window's profile, A (the newest report) is shown")
+    store.dockedWindowProfile = workProfile
+    check(store.currentWindow?.instance == "B", "with it, Work's copy is shown")
+    send(store, copySnapshot("A", profile: nil, seq: 2, window: 1, title: "Mail", focused: true, at: 300))
+    check(store.currentWindow?.instance == "B", "even while A still claims focus")
+    store.dockedWindowProfile = "default"
+    check(store.currentWindow?.instance == "A", "the default profile's copy is the one that sends no profile")
+    store.dockedWindowProfile = "XXXXXXXX-0000-0000-0000-000000000000"
+    check(store.currentWindow?.instance == "A", "a profile with no copy (Side Tabs off there): the focus reports decide")
+    store.dockedWindowProfile = nil
+    check(store.currentWindow?.instance == "A", "and in a private window, too")
+}
+
+do {
+    // The docked window's title fits another profile's window: once the docked window's profile is known, only
+    // its copy's windows can be the docked one.
+    let store = storeWithoutCopies()
+    send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Google", focused: true, at: 300))
+    send(store, copySnapshot("B", profile: workProfile, seq: 1, window: 7, title: "Mail", focused: false, at: 200))
+    store.dockedWindowTitle = "Work — Google"
+    check(store.currentWindow?.instance == "A", "without the profile, the title picks A's Google window")
+    store.dockedWindowProfile = workProfile
+    check(store.currentWindow?.instance == "B", "with it, A's window on the same page isn't taken")
+
+    // Two profiles named alike, on the same page: the title fits both, the docked window's profile decides.
+    send(store, copySnapshot("B", profile: workProfile, seq: 2, window: 7, title: "Google", focused: false, at: 200))
+    store.dockedWindowTitle = "Personal — Google"
+    check(store.currentWindow?.instance == "B", "two windows on the same page: the docked profile's")
+    store.dockedWindowProfile = "default"
+    check(store.currentWindow?.instance == "A", "and the other way round")
+}
+
 do {
     // Item 2: the icon changes at once, and the snapshot that follows settles it.
     let (store, commands) = makeStore()
