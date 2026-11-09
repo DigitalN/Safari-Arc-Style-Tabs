@@ -77,6 +77,45 @@ nonisolated final class TabBarPresser: @unchecked Sendable {
         }
     }
 
+    /// The window's tabs as its tab bar shows them, left to right, or nil if it has no tab bar or Safari
+    /// didn't answer. For a window the extension can't see (#41). `completion` runs on a background queue.
+    func readTabs(in window: AXUIElement, then completion: @escaping @Sendable ([TabBarItem]?) -> Void) {
+        queue.async { [self] in
+            query.clearTimedOut()
+            guard let bar = tabBar(in: window) else {
+                completion(nil)
+                return
+            }
+            let tabs = TabBarFinder.tabs(in: bar)
+            completion(query.timedOut ? nil : tabs)
+        }
+    }
+
+    /// Closes the tab `target` with its button's close action, for a window the extension can't see (#41).
+    /// Never guesses which button it is (TabBarMatcher). `completion` runs on a background queue, with why
+    /// not if it didn't.
+    func close(_ target: TabBarTarget, in window: AXUIElement, then completion: @escaping @Sendable (String?) -> Void) {
+        queue.async { [self] in
+            query.clearTimedOut()
+            guard let bar = tabBar(in: window) else {
+                completion("the window has no tab bar")
+                return
+            }
+            let buttons = TabBarFinder.buttons(in: bar)
+            guard case .press(let index) = TabBarMatcher.match(target, items: buttons.map(\.item)) else {
+                completion("not sure which button is the tab")
+                return
+            }
+            let node = buttons[index].node
+            guard let action = TabBarFinder.closeAction(among: node.actions) else {
+                completion("the tab's button offers no close action")
+                return
+            }
+            let error = query.perform(node.element, action)
+            completion(error == .success ? nil : "the close action failed (error \(error.rawValue))")
+        }
+    }
+
     private func attempt(
         _ target: TabBarTarget,
         in window: AXUIElement,

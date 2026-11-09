@@ -39,6 +39,7 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
     const updates = [];
     const created = [];
     const windowUpdates = [];
+    const windowsCreated = [];
     const intervals = [];
     const ports = [];
     const listeners = {};
@@ -52,6 +53,7 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
             getAll: async () => [{ id: 1, focused: true }],
             getLastFocused: () => (hangLastFocused ? new Promise(() => {}) : Promise.resolve({ id: 1, focused: true })),
             update: async (id, props) => { windowUpdates.push({ id, props }); return { id, ...props }; },
+            create: async (props) => { windowsCreated.push(props); return { id: 9, focused: !!props.focused, tabs: [{ id: 900, windowId: 9 }] }; },
             onCreated: event("windows.created"), onRemoved: event("windows.removed"), onFocusChanged: event("windows.focus"),
         },
         tabs: {
@@ -108,7 +110,7 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
     const heartbeat = () => intervals.filter((entry) => entry.ms === 5000).forEach((entry) => entry.fn());
     // Reads one of background.js's top-level variables.
     const state = (name) => vm.runInContext(name, context);
-    return { sent, tabs, updates, created, windowUpdates, intervals, ports, fire, ofType, run, heartbeat, state };
+    return { sent, tabs, updates, created, windowUpdates, windowsCreated, intervals, ports, fire, ofType, run, heartbeat, state };
 }
 
 // Waits for the first startup snapshot and forgets what was sent so far.
@@ -316,6 +318,16 @@ async function settled(page) {
             "and, asked to, brings that window forward");
         await page.run({ action: "create", windowId: 1, url: "https://example.com/here" });
         check(page.created.length === 2 && page.windowUpdates.length === 1, "otherwise no window is brought forward");
+    }
+
+    // --- #41: a pinned item clicked in a window Safari doesn't share with the copy opens in a new window ---
+    {
+        const page = load();
+        await settled(page);
+        await page.run({ action: "openWindow", url: "https://example.com/pinned" });
+        check(page.windowsCreated.length === 1 && page.windowsCreated[0].url === "https://example.com/pinned" && page.windowsCreated[0].focused === true,
+            "the openWindow command opens a new, focused window with the page");
+        check(page.created.length === 0, "and no tab in another window");
     }
 
     // --- #31: no lost reply can stop a copy ---

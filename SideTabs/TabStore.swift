@@ -112,6 +112,15 @@ final class TabStore {
     /// "default", or the profile's UUID as its copy's snapshots carry it. Nil while it isn't known, in a private
     /// window, and where Safari has no profiles. `currentWindow` takes the docked window from that profile's copy.
     var dockedWindowProfile: String?
+    /// The docked window is a private window: in a Safari with profiles, the one kind of window without a
+    /// profile button (SafariProfiles). Its copy is the default profile's.
+    var dockedWindowIsPrivate = false
+    /// How many of Safari's windows are like the docked one, from their toolbars (SafariProfiles): of its
+    /// profile, or private. A copy that lists that many can see them all, and is only behind on a title.
+    var dockedLikeWindowCount: Int?
+    /// The docked window has been open long enough for its copy to have reported it: about 2 s, and longer
+    /// right after Side Tabs starts (SafariProfiles). Before that, a copy that doesn't list it yet says nothing.
+    var dockedWindowSettled = false
 
     @ObservationIgnored var sendCommand: (([String: Any]) -> Void)?
     @ObservationIgnored var onToggleSidebar: (() -> Void)?
@@ -761,6 +770,8 @@ final class TabStore {
     /// The Safari window the sidebar shows: the one most recently focused, cross-checked
     /// against the title of the window the panel is docked to. Only live copies' windows count.
     var currentWindow: WindowSelection? {
+        // Another profile's window is never shown for one its own copy can't see (#41).
+        if unseenDockedWindow != nil { return nil }
         let ordered = liveSnapshots.values.sorted { $0.focusChangedAt > $1.focusChangedAt }
         var best: WindowSelection?
         // Not simply the newest focus change: a copy that lost focus reports that too (#36).
@@ -785,6 +796,56 @@ final class TabStore {
             }
         }
         return best
+    }
+
+    /// The docked window, when the extension copy it belongs to can't see it (#41).
+    struct UnseenWindow: Equatable {
+        /// Its profile; nil for a private window.
+        let profile: ProfileKey?
+        /// The copy that should list it, but doesn't.
+        let instance: String
+    }
+
+    /// The docked window, while its profile's live copy lists no window that matches it. After the extension
+    /// reloads (every update), Safari keeps a non-default profile's windows that were already open from that
+    /// profile's copy (#41, and #28 before it). The sidebar then lists the window's tabs from its tab bar
+    /// rather than another window's (UnseenWindowTabs). Nil while its profile isn't known, while it has no
+    /// live copy (Side Tabs is off there, which SafariProfiles handles), and when the copy can see it.
+    var unseenDockedWindow: UnseenWindow? {
+        guard dockedWindowSettled, let copy = Self.copyMissingDockedWindow(
+            profile: dockedWindowProfile, isPrivate: dockedWindowIsPrivate, title: dockedWindowTitle,
+            likeWindows: dockedLikeWindowCount, among: Array(liveSnapshots.values)
+        ) else { return nil }
+        return UnseenWindow(profile: dockedWindowIsPrivate ? nil : dockedWindowProfile.map(ProfileKey.init(rawValue:)), instance: copy.instance)
+    }
+
+    /// The live copy that should list the docked window but doesn't, if there is one: the copy of `profile`
+    /// (the default profile's for a private window) lists none of its windows (private ones for a private
+    /// window), or none whose tabs fit `title`, the docked window's, while Safari has more windows like it
+    /// (`likeWindows`) than the copy lists. One that lists as many can see them all and is only behind on a
+    /// title (a page that has just loaded). Any tab counts, not only the active one, for the same reason.
+    static func copyMissingDockedWindow(profile: String?, isPrivate: Bool, title: String?, likeWindows: Int?, among copies: [Snapshot]) -> Snapshot? {
+        guard let profile = isPrivate ? "default" : profile else { return nil }
+        let own = copies.filter { isCopy($0, of: profile) }.sorted { $0.focusChangedAt > $1.focusChangedAt }
+        guard let newest = own.first else { return nil }
+        let windows = own.flatMap(\.windows).filter { $0.incognito == isPrivate }
+        if windows.isEmpty {
+            return newest
+        }
+        guard let title, !title.isEmpty else { return nil }
+        let fits = windows.contains { window in
+            window.tabs.contains { tab in
+                guard let page = tab.title, !page.isEmpty else { return false }
+                return isPrivate ? title.contains(page) : page == title || title.hasSuffix(" — " + page)
+            }
+        }
+        if fits {
+            return nil
+        }
+        if let likeWindows, windows.count >= likeWindows {
+            return nil
+        }
+        return newest
     }
 
     /// The order `currentWindow` tries the extension copies in (#36), from `ordered`, newest focus change first:
@@ -1225,7 +1286,8 @@ final class TabStore {
     /// The profile of the window the sidebar shows (`currentWindow`), whose Favorites and Pinned list it
     /// shows. Nil while that's a private window, and while no window is shown.
     var currentWindowProfile: ProfileKey? {
-        currentWindow.flatMap { profile(of: $0.window, instance: $0.instance) }
+        // A window its copy can't see shows its own profile's lists too (#41).
+        currentWindow.flatMap { profile(of: $0.window, instance: $0.instance) } ?? unseenDockedWindow?.profile
     }
 
     /// The Favorites the sidebar shows: those of the current window's profile (#38). Nil in a private
@@ -1296,7 +1358,11 @@ final class TabStore {
     /// opens its saved page in a new tab of that window, which becomes its tab.
     func open(_ bookmark: Bookmark, inNewTab: Bool = false) {
         guard let selection = currentWindow else {
-            openInSafari(bookmark.url)
+            if let unseen = unseenDockedWindow, unseen.profile != nil {
+                openOutside(unseen, bookmark)
+            } else {
+                openInSafari(bookmark.url)
+            }
             return
         }
         if !inNewTab, let tab = openTab(for: bookmark) {
@@ -1329,6 +1395,24 @@ final class TabStore {
             "url": bookmark.url,
             "requestId": requestId,
         ], to: selection.instance)
+    }
+
+    /// Opens a favorite or pinned item clicked in a window its profile's copy can't see (#41). The copy can't
+    /// name that window, so the page opens through it in one it can: its most recent window, brought forward,
+    /// or a new window of the profile when it sees none. Either way it's in the right profile, and the sidebar
+    /// follows to a window it lists in full.
+    private func openOutside(_ unseen: UnseenWindow, _ bookmark: Bookmark) {
+        let windows = liveSnapshots[unseen.instance]?.windows.filter { !$0.incognito } ?? []
+        let last = liveSnapshots[unseen.instance]?.lastFocusedWindowId
+        if let window = windows.first(where: { $0.id == last }) ?? windows.first {
+            let requestId = UUID().uuidString
+            pendingBookmarkOpens[requestId] = (bookmark.id, window.id, Date(), nil)
+            log.notice("opening a bookmark from a window its copy can't see: in another window of the profile")
+            send(["action": "create", "windowId": window.id, "url": bookmark.url, "requestId": requestId, "focus": true], to: unseen.instance)
+        } else {
+            log.notice("opening a bookmark from a window its copy can't see: in a new window of the profile")
+            send(["action": "openWindow", "url": bookmark.url], to: unseen.instance)
+        }
     }
 
     /// Makes a favorite or pinned item of the tab's page, at `index` in `list` (at the end without

@@ -92,11 +92,17 @@ final class SafariProfiles {
     /// quiet, the menu is read again.
     @ObservationIgnored private var keysKeptForCopies: Set<ProfileKey> = []
 
+    /// The docked window's tabs from its tab bar, while its profile's copy can't see it (#41).
+    @ObservationIgnored let unseenTabs: UnseenWindowTabs
+    /// A one-off look when the docked window has been open long enough to call it unseen.
+    @ObservationIgnored private var settleCheck: DispatchWorkItem?
+
     init(tracker: SafariTracker, store: TabStore, fileURL: URL = ProfilesFile.defaultURL) {
         self.tracker = tracker
         self.store = store
         self.fileURL = fileURL
         profiles = ProfilesFile.load(from: fileURL)
+        unseenTabs = UnseenWindowTabs(tracker: tracker, store: store)
     }
 
     // MARK: - Lifecycle
@@ -126,6 +132,7 @@ final class SafariProfiles {
         })
 
         observeStore()
+        unseenTabs.start()
         readMenu(because: "launch", attempts: 3)
         dockedWindowChanged()
     }
@@ -323,6 +330,7 @@ final class SafariProfiles {
         }
         resolveDocked()
         learnSymbols(from: toolbars)
+        countLikeWindows(from: toolbars)
     }
 
     /// Reads again after a read that didn't agree with what else is known: after 0.5, 1, 2 and 4 s, then
@@ -366,6 +374,7 @@ final class SafariProfiles {
         toolbarRetries = 0
         // Until the new window's profile is read, the store mustn't prefer the previous one's copy.
         tellStoreDockedProfile()
+        unseenTabs.dockedWindowChanged()
         guard let window else {
             setDocked(nil)
             return
@@ -379,6 +388,64 @@ final class SafariProfiles {
         let key = dockedResolved ? dockedProfileID.flatMap { id in profiles.first { $0.id == id }?.key } : nil
         if store.dockedWindowProfile != key?.rawValue {
             store.dockedWindowProfile = key?.rawValue
+        }
+        tellStoreWhetherSettled()
+    }
+
+    /// Tells the store what it needs to tell a docked window its copy can't see (#41): whether it's private,
+    /// and whether it has been open long enough (`ProfileRules.offAfter`, as for the off rule) for its copy to
+    /// have reported it. A window opened a moment ago isn't unseen just because its report is on its way.
+    private func tellStoreWhetherSettled() {
+        settleCheck?.cancel()
+        settleCheck = nil
+        // A window without a profile button, in a Safari with profiles. Right after a window opens its button
+        // may not be there yet, but nothing is decided from this until the window has settled, and by then
+        // the toolbar has been read again.
+        let isPrivate = dockedResolved && dockedToolbar == .noProfileButton && profiles.count > 1
+        if store.dockedWindowIsPrivate != isPrivate {
+            store.dockedWindowIsPrivate = isPrivate
+        }
+        var settled = false
+        if dockedResolved, dockedProfileID != nil || isPrivate, let since = dockedOpenSince {
+            let openFor = Date().timeIntervalSince(since)
+            settled = openFor >= ProfileRules.offAfter
+            if !settled {
+                let work = DispatchWorkItem { [weak self] in
+                    self?.tellStoreWhetherSettled()
+                    self?.countLikeWindows()
+                }
+                settleCheck = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + ProfileRules.offAfter - openFor + 0.05, execute: work)
+            }
+        }
+        if store.dockedWindowSettled != settled {
+            store.dockedWindowSettled = settled
+        }
+    }
+
+    /// Counts Safari's windows like the docked one (of its profile, or private), for the store to tell a
+    /// copy that's behind on a title from one that can't see the window (#41). Each window's profile is read
+    /// once and kept, so this is cheap.
+    private func countLikeWindows() {
+        guard let element = application?.element else { return }
+        let reader = reader
+        reader.queue.async { [weak self] in
+            let toolbars = reader.windows(application: element).map(\.toolbar)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.countLikeWindows(from: toolbars) }
+            }
+        }
+    }
+
+    private func countLikeWindows(from toolbars: [ToolbarProfile]) {
+        var count: Int?
+        if store.dockedWindowIsPrivate {
+            count = toolbars.filter { $0 == .noProfileButton }.count
+        } else if let id = dockedProfileID, dockedResolved {
+            count = toolbars.filter { ProfileRules.resolve($0, windowTitle: nil, profiles: profiles, copyWindows: []).profileID == id }.count
+        }
+        if store.dockedLikeWindowCount != count {
+            store.dockedLikeWindowCount = count
         }
     }
 
@@ -463,6 +530,7 @@ final class SafariProfiles {
             pendingSwitch = nil
         }
         tellStoreDockedProfile()
+        countLikeWindows()
         evaluateOff()
     }
 
@@ -680,6 +748,8 @@ final class SafariProfiles {
             }
         case kAXFocusedWindowChangedNotification:
             checkSettingsClosed()
+            // A window closed, or another came forward: the windows like the docked one may have changed.
+            countLikeWindows()
         default:
             break
         }
@@ -692,7 +762,9 @@ final class SafariProfiles {
             let toolbar = reader.toolbarProfile(of: window).profile
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, case .profile(let name, _) = toolbar, !name.isEmpty else { return }
+                    guard let self else { return }
+                    self.countLikeWindows()
+                    guard case .profile(let name, _) = toolbar, !name.isEmpty else { return }
                     if self.profiles.contains(where: { ProfileIdentifiers.sameName($0.name, name) }) {
                         self.learnSymbols(from: [toolbar])
                     } else {

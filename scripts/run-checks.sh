@@ -88,6 +88,13 @@ if grep -nE '(\blog\.(notice|info|error|debug|warning|fault)|\bnote)\(.*\\\([^)]
 fi
 echo "no profile names in the log"
 
+# A window the extension can't see (#41): its tabs read from its tab bar, in order, with the selected one,
+# its tab buttons' close actions, and presses made from what was read, against the recorded trees.
+echo "== windows Safari doesn't share"
+swiftc -o "$WORK/unseen-checks" \
+    Tests/UnseenWindowChecks/main.swift SideTabs/TabBarFinder.swift SideTabs/TabBarMatcher.swift
+"$WORK/unseen-checks"
+
 # A row has one mouse gesture, the one sidebarRowGesture attaches. A press gesture of its own,
 # inside the reorder gesture, wins every press and the reorder never starts (#20).
 # How the favorites' grid lays out tiles, at every width SwiftUI proposes (#34).

@@ -18,7 +18,7 @@ struct SidebarView: View {
                 TurnOnSideTabsRow()
                     .replaced(by: ClosedTabsList(isShown: $showsClosedTabs), when: showsClosedTabs && settings.closesUnviewedTabs)
                 BottomBar(showsClosedTabs: $showsClosedTabs)
-            } else if let selection = store.currentWindow {
+            } else if store.currentWindow != nil || store.unseenDockedWindow != nil {
                 // Centered on the same line as Safari's toolbar when docked.
                 AddressBar()
                     .padding(.horizontal, 8)
@@ -30,7 +30,7 @@ struct SidebarView: View {
                             WebsiteAccessBanner()
                                 .padding(.bottom, 8)
                         }
-                        SidebarSections(selection: selection)
+                        SidebarSections(selection: store.currentWindow)
                     }
                     .coordinateSpace(.named(SidebarDrag.coordinateSpace))
                     .overlay(alignment: .topLeading) {
@@ -63,20 +63,34 @@ struct SidebarView: View {
 /// private window belongs to no profile and shows Tabs only, and so does every window with Favorites and
 /// Pinned turned off in Settings.
 private struct SidebarSections: View {
-    let selection: TabStore.WindowSelection
+    /// The window shown, or nil while the docked window is one its profile's copy can't see (#41).
+    let selection: TabStore.WindowSelection?
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        // A private window belongs to no profile, so it shows Tabs only (#38).
-        if settings.showBookmarks, let profile = store.profile(of: selection.window, instance: selection.instance) {
-            FavoritesSection(list: .favorites(profile))
-            PinnedSection(list: .pinned(profile))
-            Divider()
-                .padding(.horizontal, 8)
-                .padding(.vertical, 7)
+        if let selection {
+            // A private window belongs to no profile, so it shows Tabs only (#38).
+            if settings.showBookmarks, let profile = store.profile(of: selection.window, instance: selection.instance) {
+                FavoritesSection(list: .favorites(profile))
+                PinnedSection(list: .pinned(profile))
+                Divider()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+            }
+            TabsSection(selection: selection)
+        } else if let unseen = store.unseenDockedWindow {
+            // Its own profile's lists as usual, and its tabs as the tab bar shows them: never another
+            // profile's window's (#41).
+            if settings.showBookmarks, let profile = unseen.profile {
+                FavoritesSection(list: .favorites(profile))
+                PinnedSection(list: .pinned(profile))
+                Divider()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+            }
+            UnseenWindowTabsSection(isPrivate: unseen.profile == nil)
         }
-        TabsSection(selection: selection)
     }
 }
 

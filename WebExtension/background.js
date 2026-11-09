@@ -352,6 +352,12 @@ async function runCommand(command, via = "unknown") {
             break;
         }
 
+        case "openWindow":
+            // A favorite or pinned item clicked in a window Safari doesn't share with this copy (#41): a new
+            // window of this profile, which it does share, with the page.
+            await browser.windows.create({ url: command.url, focused: true });
+            break;
+
         case "move":
             await browser.tabs.move(command.tabId, { index: command.index });
             break;

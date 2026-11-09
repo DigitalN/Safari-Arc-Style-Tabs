@@ -1049,6 +1049,116 @@ do {
     check(store.currentWindow?.instance == "A", "and the other way round")
 }
 
+// MARK: - A docked window its profile's copy can't see (#41)
+
+/// A snapshot from copy `copy` with these windows, each with tabs titled as given (the first active unless
+/// `active` says otherwise). `focused` is the focused window's id, or -1.
+func windowsOf(_ copy: String, profile: String?, seq: Int, focused: Int = -1, at: Double = 100,
+               _ windows: [(id: Int, tabs: [String], incognito: Bool)]) -> [String: Any] {
+    var object: [String: Any] = [
+        "type": "snapshot", "instance": copy, "seq": seq,
+        "focusedWindowId": focused, "lastFocusedWindowId": windows.first?.id ?? -1, "focusChangedAt": at,
+        "windows": windows.map { window -> [String: Any] in
+            ["id": window.id, "focused": window.id == focused, "incognito": window.incognito,
+             "tabs": window.tabs.enumerated().map { index, title -> [String: Any] in
+                ["id": window.id * 100 + index, "windowId": window.id, "index": index, "title": title,
+                 "url": "https://example.com/\(window.id)/\(index)", "active": index == 0, "pinned": false,
+                 "audible": false, "muted": false, "loading": false]
+             }]
+        },
+    ]
+    if let profile { object["profile"] = profile }
+    return object
+}
+
+/// A store docked to a Work window titled `title`, settled, with the default profile's copy (A) showing
+/// its own focused window.
+func dockedToWork(_ title: String, likeWindows: Int? = 1) -> (TabStore, sent: () -> [[String: Any]]) {
+    let store = storeWithoutCopies()
+    var commands: [[String: Any]] = []
+    store.sendCommand = { commands.append($0) }
+    send(store, windowsOf("A", profile: nil, seq: 1, focused: 1, at: 300, [(1, ["Mail"], false)]))
+    store.dockedWindowProfile = workProfile
+    store.dockedWindowTitle = title
+    store.dockedLikeWindowCount = likeWindows
+    store.dockedWindowSettled = true
+    return (store, { commands })
+}
+
+do {
+    // After a reload, Work's copy (B) gets no windows at all, though its window is open and in front.
+    let (store, _) = dockedToWork("Work — Docs")
+    send(store, windowsOf("B", profile: workProfile, seq: 1, at: 200, []))
+    let work = ProfileKey(rawValue: workProfile)
+    check(store.unseenDockedWindow == TabStore.UnseenWindow(profile: work, instance: "B"), "Work's copy lists no window: the docked window is unseen")
+    check(store.currentWindow == nil, "no other profile's window is shown for it, though A reports a focused one")
+    check(store.currentWindowProfile == work && store.currentPinnedList == .pinned(work), "its own profile's Favorites and Pinned are")
+    store.dockedWindowSettled = false
+    check(store.unseenDockedWindow == nil, "not before it has been open long enough for its copy to report it")
+    store.dockedWindowSettled = true
+
+    // The copy starts listing it: the full list comes back at once.
+    send(store, windowsOf("B", profile: workProfile, seq: 2, focused: 7, at: 400, [(7, ["Docs"], false)]))
+    check(store.unseenDockedWindow == nil && store.currentWindow?.instance == "B" && store.currentWindow?.window.id == 7,
+          "once the copy lists the window, its own tabs are shown")
+}
+
+do {
+    // B sees a window opened after the reload, but not the docked one, which was open before.
+    let (store, _) = dockedToWork("Work — Docs", likeWindows: 2)
+    send(store, windowsOf("B", profile: workProfile, seq: 1, focused: 8, at: 400, [(8, ["New"], false)]))
+    check(store.unseenDockedWindow?.instance == "B" && store.currentWindow == nil, "two Work windows, the copy lists one that isn't this: unseen")
+    store.dockedLikeWindowCount = 1
+    check(store.unseenDockedWindow == nil, "the copy lists every Work window: only behind on a title")
+    store.dockedLikeWindowCount = nil
+    check(store.unseenDockedWindow != nil, "without a count, a title that fits none of its windows is unseen")
+
+    // A tab switch in a window the copy can see, before its report: another of its tabs has the title.
+    send(store, windowsOf("B", profile: workProfile, seq: 2, focused: 7, at: 500, [(7, ["Docs", "Mail"], false)]))
+    store.dockedWindowTitle = "Work — Mail"
+    check(store.unseenDockedWindow == nil && store.currentWindow?.instance == "B", "any tab's title fits, not only the active one's")
+}
+
+do {
+    // Work has no live copy (Side Tabs is off there): not unseen; SafariProfiles shows its row to turn it on.
+    let (store, _) = dockedToWork("Work — Docs")
+    check(store.unseenDockedWindow == nil, "a profile without a live copy isn't unseen")
+    store.dockedWindowProfile = nil
+    check(store.unseenDockedWindow == nil, "nor a window whose profile isn't known")
+}
+
+do {
+    // A private window: the default profile's copy is the one that should list it.
+    let store = storeWithoutCopies()
+    send(store, windowsOf("A", profile: nil, seq: 1, focused: 1, at: 300, [(1, ["Mail"], false)]))
+    store.dockedWindowIsPrivate = true
+    store.dockedWindowTitle = "Apple, Private Browsing"
+    store.dockedLikeWindowCount = 1
+    store.dockedWindowSettled = true
+    check(store.unseenDockedWindow == TabStore.UnseenWindow(profile: nil, instance: "A"), "the default copy lists no private window: unseen")
+    check(store.currentWindow == nil && store.currentWindowProfile == nil, "and the default profile's window isn't shown for it, nor its lists")
+    send(store, windowsOf("A", profile: nil, seq: 2, focused: 2, at: 400, [(1, ["Mail"], false), (2, ["Apple"], true)]))
+    check(store.unseenDockedWindow == nil && store.currentWindow?.window.id == 2, "once it lists the private window, that's shown")
+}
+
+do {
+    // A pinned item clicked in an unseen window opens through its profile's copy, in a window it can see.
+    let (store, sent) = dockedToWork("Work — Docs", likeWindows: 2)
+    send(store, windowsOf("B", profile: workProfile, seq: 1, at: 400, [(8, ["New"], false)]))
+    store.open(Bookmark(title: "Docs", url: "https://example.com/docs"))
+    let create = sent().last
+    check(create?["action"] as? String == "create" && create?["windowId"] as? Int == 8 && create?["focus"] as? Bool == true
+          && create?["instance"] as? String == "B", "in Work's window its copy can see, brought forward")
+
+    // And when it sees none, in a new window of the profile.
+    let (alone, sentAlone) = dockedToWork("Work — Docs")
+    send(alone, windowsOf("B", profile: workProfile, seq: 1, at: 200, []))
+    alone.open(Bookmark(title: "Docs", url: "https://example.com/docs"))
+    let open = sentAlone().last
+    check(open?["action"] as? String == "openWindow" && open?["instance"] as? String == "B" && open?["url"] as? String == "https://example.com/docs",
+          "with no window it can see, a new window of the profile")
+}
+
 do {
     // Item 2: the icon changes at once, and the snapshot that follows settles it.
     let (store, commands) = makeStore()

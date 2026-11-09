@@ -495,6 +495,30 @@ final class SafariTracker {
         }
     }
 
+    /// Reads the docked window's tabs from its tab bar, for a window the extension can't see (#41).
+    /// `completion` runs on the main thread, with nil if there's no tab bar or Safari didn't answer.
+    func readTabs(then completion: @escaping ([TabBarItem]?) -> Void) {
+        guard isTrusted, let window else {
+            completion(nil)
+            return
+        }
+        tabBar.readTabs(in: window) { tabs in
+            DispatchQueue.main.async { completion(tabs) }
+        }
+    }
+
+    /// Closes a tab of the docked window with its tab button's close action (#41). `completion` runs on the
+    /// main thread, with why not if it didn't.
+    func closeTab(_ target: TabBarTarget, then completion: @escaping (String?) -> Void) {
+        guard isTrusted, let window else {
+            completion("there is no docked Safari window")
+            return
+        }
+        tabBar.close(target, in: window) { problem in
+            DispatchQueue.main.async { completion(problem) }
+        }
+    }
+
     /// When Safari is in front but another of its windows has focus (Settings, a second
     /// window), makes the window the sidebar is docked to the focused one.
     ///

@@ -187,6 +187,8 @@ separate window that the app keeps attached to Safari's window:
     `ProfileSwitcher` brings a profile's window forward in place of the current one, and
     `ProfileRules` decides which profile a window is in and when Side Tabs counts as off in one.
     `ProfileBarLayout` keeps the buttons centred and says when a dropdown takes their place.
+    When the docked window is one its profile's extension copy can't see (Safari keeps windows that were
+    open when the extension reloaded from it), `UnseenWindowTabs` lists its tabs from its tab bar instead.
     What it learns (names, symbols, order, each profile's extension copy) is kept in
     `profiles.json`, beside `state.json`.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
