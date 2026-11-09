@@ -133,11 +133,17 @@ private struct BookmarksSection: View {
 private struct TabsSection: View {
     let selection: TabStore.WindowSelection
     @Environment(TabStore.self) private var store
+    @Environment(AppSettings.self) private var settings
     @Environment(SidebarDrag.self) private var drag
+
+    /// The window's tabs except bookmarks' tabs, which are listed under their bookmarks.
+    private var listed: [BrowserTab] {
+        store.tabsListed(in: selection.window, instance: selection.instance, bookmarksShown: settings.showBookmarks)
+    }
 
     /// Tabs in display order; a tab dragged within the list moves to the target slot.
     private var tabs: [BrowserTab] {
-        var tabs = selection.window.tabs
+        var tabs = listed
         if case .tab(let dragged, _)? = drag.item, case .tabs(let index) = drag.target,
            let from = tabs.firstIndex(where: { $0.id == dragged.id }) {
             let moved = tabs.remove(at: from)
@@ -148,7 +154,7 @@ private struct TabsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-            SectionHeader(title: "Tabs", detail: "\(selection.window.tabs.count)") {
+            SectionHeader(title: "Tabs", detail: "\(listed.count)") {
                 SidebarIconButton(systemImage: "plus", help: "New Tab") {
                     store.newTab()
                 }

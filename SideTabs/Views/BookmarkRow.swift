@@ -6,29 +6,41 @@ struct BookmarkRow: View {
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
     @Environment(SidebarDrag.self) private var drag
+    @Environment(SidebarRows.self) private var rows
     @State private var hovering = false
     @State private var rowTop: CGFloat = 0
-    /// Whether the press in progress already switched to the open tab. Every press the row takes
-    /// sets it, so a cancelled one leaves nothing behind for the next to depend on.
-    @State private var switchedOnPress = false
+    /// Whether the press in progress opens the bookmark when the button goes up, because it didn't
+    /// switch to the bookmark's tab on mouse-down. Every press the row sees sets it, so a cancelled
+    /// or declined one leaves nothing behind for the next to depend on.
+    @State private var opensOnRelease = false
+    /// Where the "−" is, in sidebar coordinates (the space the row's gesture reports presses in).
+    /// Presses on it belong to the button, not the row. Only trusted while the button is showing.
+    @State private var closeFrame = CGRect.zero
 
     private var isRenaming: Bool { store.renaming == .bookmark(bookmark.id) }
     private var isSlot: Bool { drag.isSlot(bookmark: bookmark) }
 
-    /// The first event of a press. Says whether the row took it.
-    private func pressBegan() -> Bool {
+    /// The first event of a press, with where it landed (sidebar coordinates). Says whether the
+    /// row took it.
+    private func pressBegan(at point: CGPoint) -> Bool {
+        opensOnRelease = false
         guard !isRenaming else { return false }
-        let inNewTab = NSEvent.modifierFlags.contains(.command)
-        switchedOnPress = !inNewTab && store.openTab(for: bookmark) != nil
-        if switchedOnPress {
+        let isOpen = store.openTab(for: bookmark) != nil
+        if isOpen && closeFrame.containsCircle(point) {
+            return false
+        }
+        if isOpen && !NSEvent.modifierFlags.contains(.command) {
             store.open(bookmark)
+        } else {
+            opensOnRelease = true
         }
         return true
     }
 
     /// The button went up without the press having turned into a drag.
     private func released() {
-        guard !switchedOnPress, !isRenaming else { return }
+        guard opensOnRelease, !isRenaming else { return }
+        opensOnRelease = false
         store.open(bookmark, inNewTab: NSEvent.modifierFlags.contains(.command))
     }
 
@@ -53,16 +65,19 @@ struct BookmarkRow: View {
 
             Spacer(minLength: 0)
 
-            if openTab != nil {
-                Circle()
-                    .fill(Color.secondary)
-                    .frame(width: 5, height: 5)
-                    .padding(.trailing, 6)
-                    .help("Open in this window")
+            if openTab != nil && !isRenaming {
+                // Closes the bookmark's tab, like a tab row's close button, and puts the bookmark
+                // back to closed.
+                SidebarIconButton(systemImage: "minus", help: "Close Tab", size: 10) {
+                    store.closeBookmarkTab(bookmark.id)
+                }
+                .onSidebarFrame { closeFrame = $0 }
             }
         }
         .font(.system(size: 13))
-        .padding(.horizontal, 8)
+        .padding(.leading, 8)
+        // The "−" lines up with the close buttons of the tab rows.
+        .padding(.trailing, openTab != nil && !isRenaming ? 4 : 8)
         .frame(height: SidebarDrag.rowHeight)
         .background(RowBackground(isActive: openTab?.active == true, isHovering: hovering && !drag.isActive))
         .background(MouseTracking(onHover: { hovering = $0 }))
@@ -73,9 +88,9 @@ struct BookmarkRow: View {
             }
         }
         .contentShape(Rectangle())
-        // A pinned site that's already open is a tab switch, so it switches on mouse-down like
-        // the tab rows. One that isn't open opens a tab on mouse-up instead: on mouse-down, starting
-        // a drag to reorder would create a tab, and a press that turned into a drag never opens one.
+        // A bookmark whose tab is open is a tab switch, so it switches on mouse-down like the tab
+        // rows. One that isn't open opens a tab on mouse-up instead: on mouse-down, starting a drag
+        // to reorder would create a tab, and a press that turned into a drag never opens one.
         .sidebarRowGesture(
             .bookmark(bookmark),
             drag: drag,
@@ -83,11 +98,14 @@ struct BookmarkRow: View {
             settings: settings,
             rowTop: rowTop,
             dragEnabled: !isRenaming,
-            onPress: { _ in pressBegan() },
+            onPress: pressBegan(at:),
             onClick: released
         )
         .accessibilityAction { openFromAccessibility() }
         .onSidebarTop { rowTop = $0 }
+        // Where the row is, so a middle click on it can be found (SidebarPanel.sendEvent).
+        .onWindowFrame { rows.setFrame($0, forBookmark: bookmark.id) }
+        .onDisappear { rows.removeBookmark(bookmark.id) }
         .contextMenu {
             Button("Open") { store.open(bookmark) }
             Button("Open in New Tab") { store.open(bookmark, inNewTab: true) }
@@ -96,10 +114,13 @@ struct BookmarkRow: View {
             Button("Replace with Current Page") { store.replaceBookmarkWithCurrentPage(bookmark) }
             Button("Copy Link") { store.copyLink(bookmark.url) }
             Divider()
+            if openTab != nil {
+                Button("Close Tab") { store.closeBookmarkTab(bookmark.id) }
+            }
             Button("Remove Bookmark") { store.removeBookmark(bookmark) }
         }
         .help("\(bookmark.title)\n\(bookmark.url)")
         .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
+        .accessibilityAddTraits(openTab?.active == true ? [.isButton, .isSelected] : .isButton)
     }
 }
