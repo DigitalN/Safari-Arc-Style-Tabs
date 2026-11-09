@@ -79,7 +79,14 @@ final class TabStore {
         var atMilliseconds: Double { (at.timeIntervalSince1970 * 1000).rounded(.down) }
     }
 
-    private(set) var snapshots: [String: Snapshot] = [:]
+    private(set) var snapshots: [String: Snapshot] = [:] {
+        // Any change to which tab is active (a snapshot, a report of a switch, a click) starts or
+        // stops a tab's cleanup clock.
+        didSet { cleanup.snapshotsChanged(from: oldValue, to: snapshots) }
+    }
+    /// Closes tabs nobody has looked at for a while, when that's turned on, and keeps the list for
+    /// reopening them (TabCleanup.swift).
+    let cleanup = TabCleanup()
     private(set) var lastMessageAt: Date?
     private(set) var bookmarks: [Bookmark] = []
     private(set) var customNames: [TabKey: CustomName] = [:]
@@ -142,6 +149,7 @@ final class TabStore {
     init(stateURL: URL = TabStore.defaultStateURL) {
         self.stateURL = stateURL
         load()
+        cleanup.onChange = { [weak self] in self?.scheduleSave() }
     }
 
     // MARK: - Messages from the extension
@@ -1100,6 +1108,8 @@ final class TabStore {
     }
 
     private struct SavedState: Codable {
+        /// Cleanup's clocks and its list of closed tabs. Missing from files saved before it existed.
+        var cleanup: TabCleanup.Saved?
         var bookmarks: [Bookmark]
         var names: [SavedName]
         var orphanNames: [String: String]
@@ -1117,6 +1127,7 @@ final class TabStore {
     private func load() {
         guard let data = try? Data(contentsOf: stateURL),
               let state = try? JSONDecoder().decode(SavedState.self, from: data) else { return }
+        cleanup.restore(state.cleanup)
         bookmarks = state.bookmarks
         orphanNames = state.orphanNames
         customNames = Dictionary(
@@ -1135,6 +1146,7 @@ final class TabStore {
 
     func save() {
         let state = SavedState(
+            cleanup: cleanup.saved,
             bookmarks: bookmarks,
             names: customNames.map { SavedName(instance: $0.key.instance, tabId: $0.key.tabId, name: $0.value) },
             orphanNames: orphanNames,

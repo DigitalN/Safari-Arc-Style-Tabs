@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let favicons = FaviconStore()
     let rows = SidebarRows()
     private(set) lazy var updater = Updater(settings: settings)
+    private lazy var tabCleanup = TabCleanupScheduler(store: store, settings: settings)
 
     private let bridge = ExtensionBridge()
     private let tracker = SafariTracker()
@@ -112,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         dock.start()
         store.requestSnapshot()
+        tabCleanup.start()
 
         accessibilityWatcher.onGranted = { AccessibilityWatcher.relaunch() }
         accessibilityWatcher.start()

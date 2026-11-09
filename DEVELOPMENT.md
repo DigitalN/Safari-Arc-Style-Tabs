@@ -37,8 +37,9 @@ of its buttons a tab matches and which one Safari has selected, checked against 
 middle click; which queued
 Accessibility requests are still wanted; which notifications the docked window is watched for;
 where the sidebar slides out over the page in full screen or when it hides automatically, and what
-brings it out and puts it away),
-a check that no log line carries a window or tab title, and a compile check of the app's sources. It doesn't touch the
+brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
+and where they reopen),
+a check that no log line carries a window or tab title or a page's URL, and a compile check of the app's sources. It doesn't touch the
 installed app, Safari, or your saved bookmarks and names. Anything that needs the real
 Safari (clicks, windows, timing) still has to be tried by hand.
 
@@ -168,6 +169,9 @@ separate window that the app keeps attached to Safari's window:
     automatically* is on, the sidebar is an overlay that slides out from the left edge;
     `SidebarOverlay` holds where it goes and when it comes out and goes away.
   - `TabStore` holds tabs, bookmarks and custom names.
+  - `TabCleanup` closes tabs nobody has looked at for a while, when that's turned on, and keeps
+    the list of them for reopening. `TabCleanupScheduler` runs it every few minutes and when
+    Safari comes forward.
   - `FaviconStore` asks the extension for icons and keeps them.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
   - `AppLocation` offers to move the app into Applications.
@@ -179,7 +183,16 @@ separate window that the app keeps attached to Safari's window:
   image (with artwork from `make-dmg-background.swift`), `build.sh` is shared by both,
   and `make-icons.swift` regenerates the icons.
 
-Bookmarks and tab names are stored in `~/Library/Application Support/Side Tabs/state.json`.
+Bookmarks and tab names are stored in `~/Library/Application Support/Side Tabs/state.json`,
+and so are tab cleanup's clocks (when each tab was last looked at) and its list of closed tabs.
+The list holds titles and URLs, so it stays out of the log.
+
+To try cleanup without waiting 12 hours, leave Safari open (tab ids are only good until it
+restarts), quit Side Tabs, move times in `cleanup.lastViewed` back by a day or more (they're
+seconds since 2001), and start Side Tabs again within five minutes, or set `cleanup.savedAt` to
+the present too: after longer away, Side Tabs starts every clock over, because tabs may have been
+looked at meanwhile. The next run, within five minutes or a few seconds after Safari comes
+forward, closes those tabs.
 
 To watch live logs from the app and the extension, run the command below. In zsh, plain
 `log` is a shell built-in, so use the full path:

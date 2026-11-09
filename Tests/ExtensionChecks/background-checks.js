@@ -27,6 +27,8 @@ function check(condition, message) {
 function load({ queryDelay = 20, tabCount = 5 } = {}) {
     const sent = [];
     const updates = [];
+    const created = [];
+    const windowUpdates = [];
     const listeners = {};
     const event = (name) => ({ addListener: (fn) => (listeners[name] ||= []).push(fn) });
     const tabs = Array.from({ length: tabCount }, (_, i) => ({
@@ -37,12 +39,14 @@ function load({ queryDelay = 20, tabCount = 5 } = {}) {
             WINDOW_ID_NONE: -1,
             getAll: async () => [{ id: 1, focused: true }],
             getLastFocused: async () => ({ id: 1, focused: true }),
+            update: async (id, props) => { windowUpdates.push({ id, props }); return { id, ...props }; },
             onCreated: event("windows.created"), onRemoved: event("windows.removed"), onFocusChanged: event("windows.focus"),
         },
         tabs: {
             query: async () => { await sleep(queryDelay); return tabs.map((tab) => ({ ...tab })); },
             executeScript: async () => {},
             update: async (id, props) => { updates.push({ id, props }); return { ...tabs[id - 1], ...props }; },
+            create: async (props) => { created.push(props); return { id: 100 + created.length, windowId: props.windowId ?? 1, index: 0, url: props.url }; },
             onCreated: event("created"), onActivated: event("activated"), onMoved: event("moved"),
             onAttached: event("attached"), onDetached: event("detached"), onUpdated: event("updated"),
             onRemoved: event("removed"), onReplaced: event("replaced"),
@@ -69,7 +73,7 @@ function load({ queryDelay = 20, tabCount = 5 } = {}) {
     const ofType = (type) => sent.filter((entry) => entry.message.type === type).map((entry) => entry.message);
     // Carries out a command from the app, as the port or a reply would deliver it.
     const run = (command) => context.runCommand({ instance: "test-instance", ...command });
-    return { sent, tabs, updates, fire, ofType, run };
+    return { sent, tabs, updates, created, windowUpdates, fire, ofType, run };
 }
 
 // Waits for the first startup snapshot and forgets what was sent so far.
@@ -264,6 +268,19 @@ async function settled(page) {
         await sleep(100);
         check(page.updates.length === 1 && page.updates[0].props.active === true, "the activate command switches the tab");
         check(page.ofType("snapshot").length === 0, "and sends no snapshot of its own: Safari reports the switch");
+    }
+
+    // --- #27: a tab reopened from cleanup's list in another profile's window brings that window forward ---
+    {
+        const page = load();
+        await settled(page);
+        await page.run({ action: "create", windowId: 5, url: "https://example.com/back", focus: true });
+        check(page.created.length === 1 && page.created[0].windowId === 5 && page.created[0].url === "https://example.com/back",
+            "the create command opens the page in the window it names");
+        check(page.windowUpdates.length === 1 && page.windowUpdates[0].id === 5 && page.windowUpdates[0].props.focused === true,
+            "and, asked to, brings that window forward");
+        await page.run({ action: "create", windowId: 1, url: "https://example.com/here" });
+        check(page.created.length === 2 && page.windowUpdates.length === 1, "otherwise no window is brought forward");
     }
 
     if (failures === 0) {
