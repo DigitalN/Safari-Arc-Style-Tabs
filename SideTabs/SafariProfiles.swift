@@ -149,6 +149,8 @@ final class SafariProfiles {
         withObservationTracking {
             _ = store.snapshots
             _ = store.dockedWindowTitle
+            // A copy going quiet changes no snapshot, but can turn its profile off.
+            _ = store.liveInstances
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -397,13 +399,11 @@ final class SafariProfiles {
         }
     }
 
-    /// The extension copies sending heartbeats.
-    ///
-    /// #31 adds a way to ask the store whether a copy has gone quiet (Side Tabs turned off in its
-    /// profile, or replaced after a reinstall). Until it's merged, every copy with a snapshot counts
-    /// as live; with it, leave out the quiet ones here. That's what lets an "on" profile become "off".
+    /// The extension copies sending heartbeats: the store leaves out a copy that has gone quiet (Side
+    /// Tabs turned off in its profile) or been replaced by a newer copy of its profile (#31). That's
+    /// what lets an "on" profile become "off".
     private var liveInstances: Set<String> {
-        Set(store.snapshots.keys)
+        store.liveInstances
     }
 
     private func evaluateOff() {
