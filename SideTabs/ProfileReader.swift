@@ -81,29 +81,34 @@ nonisolated final class ProfileReader: @unchecked Sendable {
 
     struct MenuReading: Sendable {
         let profiles: [MenuProfile]
+        /// What the File menu looked like, without names (ProfileTree.shape), for the log.
+        let shape: String
         let milliseconds: Int
     }
 
     // MARK: - Menus
 
-    /// File → New Window, in Safari's order, or nil if Safari didn't answer or has no File menu yet.
-    /// Call on `queue`.
+    /// The profiles' items in the File menu, in Safari's order, or nil if Safari didn't answer or has no
+    /// File menu yet. Call on `queue`.
     func readMenu(application: AXUIElement) -> MenuReading? {
         let started = Date()
         query.clearTimedOut()
-        guard let menuBar = query.element(application, kAXMenuBarAttribute) else { return nil }
-        let result = ProfileTree.newWindowMenu(in: AXProfileNode(menuBar, query: query))
-        guard let result, !query.timedOut else { return nil }
+        guard let menuBar = query.element(application, kAXMenuBarAttribute),
+              let items = ProfileTree.fileMenuItems(in: AXProfileNode(menuBar, query: query)) else { return nil }
+        let result = ProfileTree.newWindowMenu(in: items)
+        let shape = ProfileTree.shape(of: items)
+        guard !query.timedOut else { return nil }
         let profiles: [MenuProfile]
         switch result {
-        case .profiles(let items):
-            newWindowItems = items
-            profiles = items.map(\.profile)
+        case .profiles(let found):
+            newWindowItems = found
+            profiles = found.map(\.profile)
         case .singleProfile:
-            newWindowItems = []
+            // The items from the last read that had any stay for pressing: if they're gone, pressing fails
+            // and the menu is read again.
             profiles = [MenuProfile(name: "", isDefault: true)]
         }
-        return MenuReading(profiles: profiles, milliseconds: Int(Date().timeIntervalSince(started) * 1000))
+        return MenuReading(profiles: profiles, shape: shape, milliseconds: Int(Date().timeIntervalSince(started) * 1000))
     }
 
     /// Safari → Manage Profiles…, found once per Safari launch. Call on `queue`.

@@ -151,7 +151,10 @@ nonisolated enum ProfileList {
 
         func take(_ menuIndex: Int, _ rememberedIndex: Int, keepKey: Bool = true) {
             var profile = remembered[rememberedIndex]
-            profile.name = menu[menuIndex].name
+            // A single-profile menu names no profile; the default keeps the name it had.
+            if !menu[menuIndex].name.isEmpty || profile.name.isEmpty {
+                profile.name = menu[menuIndex].name
+            }
             profile.isDefault = menu[menuIndex].isDefault
             if profile.isDefault {
                 profile.key = .defaultProfile
@@ -202,6 +205,110 @@ nonisolated enum ProfileList {
         }
         profiles[index].key = key
         return true
+    }
+}
+
+// MARK: - Checking a read against what else is known (#40)
+
+/// What else says which profiles exist, to check a read of the menu against.
+nonisolated struct ProfileEvidence: Equatable, Sendable {
+    /// What the open windows' toolbars say.
+    var toolbars: [ToolbarProfile] = []
+    /// The profiles of the extension copies sending heartbeats.
+    var liveKeys: Set<ProfileKey> = []
+}
+
+/// The list after a read of the menu, and how the read compared with the evidence.
+nonisolated struct ProfileListUpdate: Equatable {
+    var profiles: [SafariProfile]
+    /// When each profile the read lacked, and nothing else showed, was first missed.
+    var missingSince: [UUID: Date] = [:]
+    /// The read lacked them, but an open window shows them: kept.
+    var keptForWindows: [UUID] = []
+    /// The read lacked them, but their extension copy is live: kept.
+    var keptForCopies: [UUID] = []
+    /// Open windows show them, and neither the read nor the list had them: added.
+    var addedFromWindows: [UUID] = []
+    /// The read lacked them and nothing else shows them: kept until a second read agrees.
+    var awaitingSecondRead: [UUID] = []
+    /// Gone: two reads agree, and nothing else shows them.
+    var removed: [UUID] = []
+
+    /// The read agrees with everything else known; otherwise it's read again.
+    var agrees: Bool {
+        keptForWindows.isEmpty && keptForCopies.isEmpty && addedFromWindows.isEmpty && awaitingSecondRead.isEmpty
+    }
+}
+
+extension ProfileList {
+    /// How long after the first read that lacked a profile a second one has to be, to agree it's gone.
+    static let secondReadAfter: TimeInterval = 0.8
+
+    /// The list after a read of the menu (`menu`), checked against open windows and live extension
+    /// copies. The bar never loses a profile because of one read:
+    ///
+    /// - A profile the read has, or a new one it lists, is taken as the menu says (`reconcile`).
+    /// - A profile the read lacks that an open window's toolbar or a live copy still shows is kept, in
+    ///   its place, with its symbol and key: the read came up short.
+    /// - A profile windows show that neither the read nor the list has is added at the end, from what
+    ///   its toolbar says. That repairs a profiles.json left with too few profiles.
+    /// - A profile the read lacks that nothing else shows goes only when a read at least
+    ///   `secondReadAfter` after the first that lacked it agrees (`missingSince`), and `mayDrop` (not
+    ///   while Safari or Side Tabs is starting). Until then it's kept.
+    static func update(_ remembered: [SafariProfile], read menu: [MenuProfile], evidence: ProfileEvidence,
+                       missingSince: [UUID: Date], now: Date, mayDrop: Bool) -> ProfileListUpdate {
+        var profiles = reconcile(remembered: remembered, menu: menu)
+        var update = ProfileListUpdate(profiles: [])
+
+        // A window shows a profile when its toolbar names it, with the same symbol once both are known.
+        func shows(_ name: String, _ symbol: String?, _ profile: SafariProfile) -> Bool {
+            ProfileIdentifiers.sameName(name, profile.name) && (symbol == nil || profile.symbol == nil || symbol == profile.symbol)
+        }
+        var windowsShow = Set<UUID>()
+        var unknown: [(name: String, symbol: String?)] = []
+        for toolbar in evidence.toolbars {
+            guard case .profile(let name, let symbol) = toolbar, !name.isEmpty,
+                  !profiles.contains(where: { shows(name, symbol, $0) }) else { continue }
+            let before = remembered.filter { shows(name, symbol, $0) }
+            if before.isEmpty {
+                if !unknown.contains(where: { ProfileIdentifiers.sameName($0.name, name) && $0.symbol == symbol }) {
+                    unknown.append((name, symbol))
+                }
+            } else {
+                before.forEach { windowsShow.insert($0.id) }
+            }
+        }
+
+        let readIDs = Set(profiles.map(\.id))
+        for (index, profile) in remembered.enumerated() where !readIDs.contains(profile.id) {
+            let keep: Bool
+            if windowsShow.contains(profile.id) {
+                update.keptForWindows.append(profile.id)
+                keep = true
+            } else if let key = profile.key, evidence.liveKeys.contains(key) {
+                update.keptForCopies.append(profile.id)
+                keep = true
+            } else if mayDrop, let since = missingSince[profile.id], now.timeIntervalSince(since) >= secondReadAfter {
+                update.removed.append(profile.id)
+                keep = false
+            } else {
+                update.awaitingSecondRead.append(profile.id)
+                update.missingSince[profile.id] = missingSince[profile.id] ?? now
+                keep = true
+            }
+            guard keep else { continue }
+            // Back in its place: after the nearest profile before it that's still listed.
+            let previous = remembered[..<index].last { candidate in profiles.contains { $0.id == candidate.id } }
+            let at = previous.flatMap { candidate in profiles.firstIndex { $0.id == candidate.id } }.map { $0 + 1 } ?? 0
+            profiles.insert(profile, at: at)
+        }
+        for found in unknown {
+            let profile = SafariProfile(name: found.name, isDefault: false, symbol: found.symbol)
+            update.addedFromWindows.append(profile.id)
+            profiles.append(profile)
+        }
+        update.profiles = profiles
+        return update
     }
 }
 

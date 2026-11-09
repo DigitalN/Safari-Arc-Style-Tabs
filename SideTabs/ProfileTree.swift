@@ -46,28 +46,86 @@ nonisolated enum ProfileTree {
         return nil
     }
 
-    /// What File → New Window says, or nil if the File menu can't be found.
+    /// What the File menu says about profiles.
     enum NewWindowMenu<Node: ProfileTreeNode> {
         /// One item per profile, in order.
         case profiles([(node: Node, profile: MenuProfile)])
-        /// File → New Window is a plain item: Safari has only the default profile.
+        /// No profile's item anywhere: Safari has only the default profile, or the menu wasn't all there
+        /// (SafariProfiles checks that against what else it knows).
         case singleProfile
     }
 
-    static func newWindowMenu<Node: ProfileTreeNode>(in menuBar: Node) -> NewWindowMenu<Node>? {
+    /// An item of the File menu, with the items of its submenu, if it has one.
+    struct FileMenuItem<Node: ProfileTreeNode> {
+        let node: Node
+        /// The `AXMenu` under it.
+        let submenu: Node?
+        let submenuItems: [Node]
+    }
+
+    /// The File menu's items, each with its submenu's items (one level down), or nil if there's no File
+    /// menu. Profiles' items have been seen in a New Window submenu (#28, three profiles); with two
+    /// profiles, Safari may put them elsewhere (#40), so every item's submenu is read.
+    static func fileMenuItems<Node: ProfileTreeNode>(in menuBar: Node) -> [FileMenuItem<Node>]? {
         guard let fileMenu = menu(ProfileIdentifiers.fileMenu, usually: fileMenuIndex, in: menuBar) else { return nil }
-        guard let submenuItem = fileMenu.children().first(where: { $0.identifier == ProfileIdentifiers.newWindowSubmenuItem }),
-              let submenu = submenuItem.children().first(where: { $0.role == "AXMenu" }) else {
-            return .singleProfile
+        return fileMenu.children().map { item in
+            let submenu = item.children().first { $0.role == "AXMenu" }
+            return FileMenuItem(node: item, submenu: submenu, submenuItems: submenu?.children() ?? [])
         }
+    }
+
+    /// The profiles' items, found by identifier (`New<name>Window?isDefaultProfile=…`) wherever they are:
+    /// at the File menu's top level or in a submenu, in menu order. Single profile when there are none.
+    static func newWindowMenu<Node: ProfileTreeNode>(in items: [FileMenuItem<Node>]) -> NewWindowMenu<Node> {
         var entries: [(node: Node, profile: MenuProfile)] = []
-        for item in submenu.children() {
-            let parsed = ProfileIdentifiers.menuProfiles([(item.identifier, item.commandCharacter, item.commandModifiers)])
-            if let profile = parsed.first {
-                entries.append((item, profile))
+        func take(_ node: Node) {
+            if let profile = ProfileIdentifiers.menuProfiles([(node.identifier, node.commandCharacter, node.commandModifiers)]).first {
+                entries.append((node, profile))
             }
         }
+        for item in items {
+            take(item.node)
+            item.submenuItems.forEach(take)
+        }
         return entries.isEmpty ? .singleProfile : .profiles(entries)
+    }
+
+    /// The same, from the menu bar, or nil if the File menu can't be found.
+    static func newWindowMenu<Node: ProfileTreeNode>(in menuBar: Node) -> NewWindowMenu<Node>? {
+        fileMenuItems(in: menuBar).map(newWindowMenu(in:))
+    }
+
+    /// What the File menu looked like, for the log when a read comes up short: each item's identifier
+    /// (and role, if it isn't a menu item), a submenu's items in brackets. Never a profile's name:
+    /// identifiers are cut at the first "?", and a profile's item, or anything shaped like one, is
+    /// written without its name.
+    static func shape<Node: ProfileTreeNode>(of items: [FileMenuItem<Node>]) -> String {
+        func describe(_ node: Node) -> String {
+            let role = node.role == "AXMenuItem" ? "" : "\(node.role ?? "?") "
+            return role + loggable(node.identifier)
+        }
+        return items.map { item in
+            var text = describe(item.node)
+            if let submenu = item.submenu {
+                text += " [\(describe(submenu)): \(item.submenuItems.map(describe).joined(separator: ", "))]"
+            }
+            return text
+        }.joined(separator: ", ")
+    }
+
+    /// An identifier for the log.
+    static func loggable(_ identifier: String?) -> String {
+        guard let identifier, !identifier.isEmpty else { return "-" }
+        if ProfileIdentifiers.menuItem(identifier) != nil {
+            return "New<profile>Window?…"
+        }
+        let parts = identifier.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let head = String(parts[0])
+        // A profile's item in a form nobody has seen yet ("New<name>Window") keeps its name out too.
+        if head.hasPrefix("New"), head.hasSuffix("Window"), !["NewWindow", "NewPrivateWindow"].contains(head) {
+            return "New<?>Window" + (parts.count > 1 ? "?…" : "")
+        }
+        return head + (parts.count > 1 ? "?…" : "")
     }
 
     /// Safari → Manage Profiles…

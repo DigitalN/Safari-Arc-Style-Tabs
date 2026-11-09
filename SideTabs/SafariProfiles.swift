@@ -74,6 +74,24 @@ final class SafariProfiles {
     @ObservationIgnored private var offCheck: DispatchWorkItem?
     @ObservationIgnored private var workspaceTokens: [NSObjectProtocol] = []
 
+    // Reading the menu (#40).
+    /// When each profile a read lacked, with nothing else showing it, was first missed.
+    @ObservationIgnored private var missingSince: [UUID: Date] = [:]
+    /// The next read after one that didn't agree with what else is known, and how many came before it.
+    @ObservationIgnored private var rereadWork: DispatchWorkItem?
+    @ObservationIgnored private var rereadStep = 0
+    private static let rereadDelays: [TimeInterval] = [0.5, 1, 2, 4]
+    /// A read for when the start-up grace is over, if one is waiting to drop a profile.
+    @ObservationIgnored private var graceWork: DispatchWorkItem?
+    /// When Safari last launched while Side Tabs was running.
+    @ObservationIgnored private var safariLaunchedAt: Date?
+    /// For this long after Side Tabs starts or Safari launches, no profile is dropped: the menu and the
+    /// extension copies may not all be there yet.
+    private static let dropGrace: TimeInterval = 10
+    /// The keys of profiles kept because their copy was live while the menu lacked them. When one goes
+    /// quiet, the menu is read again.
+    @ObservationIgnored private var keysKeptForCopies: Set<ProfileKey> = []
+
     init(tracker: SafariTracker, store: TabStore, fileURL: URL = ProfilesFile.defaultURL) {
         self.tracker = tracker
         self.store = store
@@ -94,9 +112,10 @@ final class SafariProfiles {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             guard app?.bundleIdentifier == SafariTracker.safariBundleID else { return }
             MainActor.assumeIsolated {
+                self?.safariLaunchedAt = Date()
                 // The tracker attaches half a second after launch; the menus take a moment longer.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                    self?.readMenu(because: "Safari launched", attempts: 5, readingWindows: true)
+                    self?.readMenu(because: "Safari launched", attempts: 5)
                 }
             }
         })
@@ -107,7 +126,7 @@ final class SafariProfiles {
         })
 
         observeStore()
-        readMenu(because: "launch", attempts: 3, readingWindows: true)
+        readMenu(because: "launch", attempts: 3)
         dockedWindowChanged()
     }
 
@@ -141,6 +160,14 @@ final class SafariProfiles {
         newWindowShortcut = nil
         settingsFocused = false
         pendingSwitch = nil
+        // Reads made while it quit say nothing; the next launch starts over.
+        rereadWork?.cancel()
+        rereadWork = nil
+        graceWork?.cancel()
+        graceWork = nil
+        missingSince = [:]
+        keysKeptForCopies = []
+        safariLaunchedAt = nil
     }
 
     /// Changes to the store's snapshots or the docked window's title can tell which copy lists the
@@ -155,6 +182,11 @@ final class SafariProfiles {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    if !self.keysKeptForCopies.isEmpty, !self.keysKeptForCopies.isSubset(of: self.liveKeys) {
+                        // A profile the menu lacked was kept for its copy, which has now gone quiet.
+                        self.keysKeptForCopies = []
+                        self.readMenu(because: "the extension copy of a profile the menu lacked went quiet")
+                    }
                     if let id = self.dockedProfileID, self.dockedResolved {
                         self.learn(about: id)
                     } else if case .profile = self.dockedToolbar {
@@ -175,53 +207,148 @@ final class SafariProfiles {
         return (AXUIElementCreateApplication(app.processIdentifier), app.processIdentifier)
     }
 
-    /// Reads File → New Window off the main thread. `readingWindows` also reads every window's
-    /// profile, which is kept, so the first switch after a launch doesn't have to.
-    private func readMenu(because reason: String, attempts: Int = 1, readingWindows: Bool = false) {
-        guard let element = application?.element else { return }
+    /// Reads the File menu and every window's profile, off the main thread, and checks the one against
+    /// the other (`menuRead`). `trigger`: something happened that may have changed the profiles, which
+    /// starts the reads again from the shortest wait; reads again after one that didn't agree aren't.
+    private func readMenu(because reason: String, attempts: Int = 1, trigger: Bool = true, again: Int = 0) {
+        guard let app = application else { return }
+        if trigger {
+            rereadWork?.cancel()
+            rereadWork = nil
+            rereadStep = 0
+        }
         let window = dockedNumber
         let reader = reader
+        let element = app.element
+        let pid = app.pid
         reader.queue.async { [weak self] in
             let reading = reader.readMenu(application: element)
-            let toolbars = reading != nil && readingWindows ? reader.windows(application: element).map(\.toolbar) : []
+            // What the windows say, to check the read against. Each window's profile is read once and
+            // kept, so this is cheap after the first time, and the first switch after a launch is quick.
+            let toolbars = reading != nil ? reader.windows(application: element).map(\.toolbar) : []
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    let label = again > 0 ? "\(reason), read again \(again)" : reason
+                    // Safari quit, or quit and launched again, while this was read: it says nothing now.
+                    guard let current = self.tracker.app, !current.isTerminated, current.processIdentifier == pid else {
+                        self.log.notice("ignoring a read of File → New Window from before Safari quit (\(label, privacy: .public))")
+                        return
+                    }
                     guard let reading else {
                         if attempts > 1 {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                                self?.readMenu(because: reason, attempts: attempts - 1, readingWindows: readingWindows)
+                                self?.readMenu(because: reason, attempts: attempts - 1, trigger: false, again: again)
                             }
                         } else {
-                            self.log.notice("couldn't read File → New Window (\(reason, privacy: .public))")
+                            self.log.notice("couldn't read File → New Window (\(label, privacy: .public))")
+                            self.scheduleReread(because: reason)
                         }
                         return
                     }
-                    self.menuRead(reading, because: reason, window: window)
-                    self.learnSymbols(from: toolbars)
+                    self.menuRead(reading, toolbars: toolbars, because: label, baseReason: reason, window: window)
                 }
             }
         }
     }
 
-    private func menuRead(_ reading: ProfileReader.MenuReading, because reason: String, window: Int?) {
-        let updated = ProfileList.reconcile(remembered: profiles, menu: reading.profiles)
-        let changed = updated != profiles
+    /// Takes a read of the menu, checked against the open windows and the live extension copies
+    /// (`ProfileList.update`): a read that comes up short never takes a button away, and is read again
+    /// with back-off; a profile goes only when two reads agree and nothing else shows it.
+    private func menuRead(_ reading: ProfileReader.MenuReading, toolbars: [ToolbarProfile], because label: String, baseReason: String, window: Int?) {
+        let now = Date()
+        let startedAt = max(self.startedAt, safariLaunchedAt ?? .distantPast)
+        let starting = now.timeIntervalSince(startedAt) < Self.dropGrace
+        let before = profiles
+        let update = ProfileList.update(
+            before, read: reading.profiles,
+            evidence: ProfileEvidence(toolbars: toolbars, liveKeys: liveKeys),
+            missingSince: missingSince, now: now, mayDrop: !starting
+        )
+        missingSince = update.missingSince
+        keysKeptForCopies = Set(update.keptForCopies.compactMap { id in before.first { $0.id == id }?.key })
+        let changed = update.profiles != before
         if changed {
-            profiles = updated
+            profiles = update.profiles
             lookedUp = []
             scheduleSave()
         }
+
+        // ⌘N's item, among the profiles the read listed, as a position in the list shown.
         let shortcut = reading.profiles.firstIndex(where: \.hasNewWindowShortcut)
         if let window, let shortcut {
-            newWindowShortcut = (window, shortcut)
+            let notRead = Set(update.keptForWindows + update.keptForCopies + update.awaitingSecondRead + update.addedFromWindows)
+            let listed = profiles.indices.filter { !notRead.contains(profiles[$0].id) }
+            if listed.indices.contains(shortcut) {
+                newWindowShortcut = (window, listed[shortcut])
+            }
         }
         let defaultPosition = reading.profiles.firstIndex(where: \.isDefault).map(String.init) ?? "none"
-        log.notice("read File → New Window (\(reason, privacy: .public)) in \(reading.milliseconds) ms: \(reading.profiles.count) profiles, default at \(defaultPosition, privacy: .public), ⌘N at \(shortcut.map(String.init) ?? "none", privacy: .public)\(changed ? "; the list changed" : "", privacy: .public)")
+        log.notice("read File → New Window (\(label, privacy: .public)) in \(reading.milliseconds) ms: \(reading.profiles.count) profiles, default at \(defaultPosition, privacy: .public), ⌘N at \(shortcut.map(String.init) ?? "none", privacy: .public)\(changed ? "; the list changed" : "", privacy: .public)")
+        if !update.agrees || reading.profiles.count < before.count {
+            func positions(_ ids: [UUID], in list: [SafariProfile]) -> String {
+                let found = ids.compactMap { id in list.firstIndex { $0.id == id } }
+                return found.isEmpty ? "none" : found.map(String.init).joined(separator: " ")
+            }
+            log.notice("""
+                the read lists fewer profiles than are known (\(before.count) before, \(self.profiles.count) now): \
+                kept for open windows: \(positions(update.keptForWindows, in: before), privacy: .public); \
+                kept for live extension copies: \(positions(update.keptForCopies, in: before), privacy: .public); \
+                kept until a second read agrees: \(positions(update.awaitingSecondRead, in: before), privacy: .public); \
+                added from open windows: \(positions(update.addedFromWindows, in: self.profiles), privacy: .public); \
+                dropped: \(positions(update.removed, in: before), privacy: .public). \
+                File menu: \(reading.shape, privacy: .public)
+                """)
+        } else {
+            // The same, without names, for a live test to see how Safari lays the menu out
+            // (`log show --info`).
+            log.info("File menu: \(reading.shape, privacy: .public)")
+        }
+
+        if update.agrees {
+            rereadWork?.cancel()
+            rereadWork = nil
+            rereadStep = 0
+        } else {
+            scheduleReread(because: baseReason)
+        }
+        if !update.awaitingSecondRead.isEmpty, starting, graceWork == nil {
+            // Nothing is dropped while starting up; look again once that's over.
+            let work = DispatchWorkItem { [weak self] in
+                self?.graceWork = nil
+                self?.readMenu(because: "after starting up")
+            }
+            graceWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.dropGrace - now.timeIntervalSince(startedAt) + 0.2, execute: work)
+        }
         resolveDocked()
+        learnSymbols(from: toolbars)
     }
 
-    /// Reads the menu once for a toolbar profile it couldn't place.
+    /// Reads again after a read that didn't agree with what else is known: after 0.5, 1, 2 and 4 s, then
+    /// not until something happens that may change the profiles.
+    private func scheduleReread(because reason: String) {
+        guard rereadWork == nil, rereadStep < Self.rereadDelays.count else { return }
+        let delay = Self.rereadDelays[rereadStep]
+        rereadStep += 1
+        let step = rereadStep
+        let work = DispatchWorkItem { [weak self] in
+            self?.rereadWork = nil
+            self?.readMenu(because: reason, trigger: false, again: step)
+        }
+        rereadWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// The profiles of the extension copies sending heartbeats.
+    private var liveKeys: Set<ProfileKey> {
+        let live = liveInstances
+        return Set(store.snapshots.values.filter { live.contains($0.instance) }.map { ProfileKey(snapshotProfile: $0.profile) })
+    }
+
+    /// Reads the menu for a toolbar profile the list couldn't place: once per profile until the list
+    /// changes. The read is checked against the window, and read again with back-off while they disagree;
+    /// a profile windows show that the menu doesn't list is added from what its toolbar says.
     private func lookUp(_ toolbar: ToolbarProfile, because reason: String) {
         guard case .profile(let name, let symbol) = toolbar else { return }
         guard lookedUp.insert("\(name)\u{1}\(symbol ?? "")").inserted else { return }
@@ -591,9 +718,14 @@ final class SafariProfiles {
                         self.settingsFocused = false
                         // Names and symbols change in Settings, so every window's profile is read again.
                         reader.queue.async { reader.forgetToolbars() }
-                        self.readMenu(because: "Settings closed", readingWindows: true)
+                        self.readMenu(because: "Settings closed")
                         if let window = self.dockedWindow {
                             self.readDockedToolbar(window)
+                        }
+                        // Safari may rebuild its menu a moment later, and a profile just added has no
+                        // window yet to show the first read was short: one more look.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                            self?.readMenu(because: "Settings closed, a second look")
                         }
                     }
                 }
