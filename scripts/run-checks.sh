@@ -61,6 +61,12 @@ echo "== row press"
 swiftc -o "$WORK/row-press-checks" Tests/RowPressChecks/main.swift SideTabs/RowPress.swift
 "$WORK/row-press-checks"
 
+# When Settings recommends the Mac's "Minimize windows into application icon" option (#42): only while
+# "Minimize other profiles' windows" is on and the option is off. The rule only; nothing reads this Mac's Dock.
+echo "== dock recommendation"
+swiftc -o "$WORK/dock-recommendation-checks" Tests/DockRecommendationChecks/main.swift SideTabs/DockMinimizeOption.swift
+"$WORK/dock-recommendation-checks"
+
 echo "== docked window notifications"
 swiftc -o "$WORK/docked-window-checks" Tests/DockedWindowChecks/main.swift SideTabs/DockedWindowNotifications.swift
 "$WORK/docked-window-checks"

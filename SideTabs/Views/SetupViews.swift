@@ -287,6 +287,10 @@ private struct SetupTip: View {
 
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
+    /// The Mac's "Minimize windows into application icon" option. Read when Settings opens and each
+    /// time it comes back to the front, so the recommendation goes away once the option is turned on
+    /// in System Settings.
+    @State private var minimizesIntoApplicationIcon = DockMinimizeOption.readMinimizesIntoApplicationIcon()
 
     var body: some View {
         @Bindable var settings = settings
@@ -326,6 +330,31 @@ struct SettingsView: View {
                 .disabled(!settings.closesUnviewedTabs)
             }
 
+            // Shown even with one profile, where it does nothing, so Settings doesn't change with
+            // what Safari reports.
+            Section("Profiles") {
+                Toggle(isOn: $settings.minimizesOtherProfiles) {
+                    Text("Minimize other profiles' windows")
+                    Text("When you switch profiles, the other profiles' windows are minimized, so Mission Control shows only the profile you're using. Private and full-screen windows stay open.")
+                }
+                if DockMinimizeOption.recommends(
+                    minimizesOtherProfiles: settings.minimizesOtherProfiles,
+                    minimizesIntoApplicationIcon: minimizesIntoApplicationIcon
+                ) {
+                    LabeledContent {
+                        Button("Open Desktop & Dock") {
+                            if let url = DockMinimizeOption.settingsURL {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    } label: {
+                        Text("Turn on “Minimize windows into application icon” so these windows don't fill the Dock. The Scale effect makes switching quicker.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Section("General") {
                 Toggle("Open at login", isOn: Binding(
                     get: { settings.launchAtLoginStatus() },
@@ -346,6 +375,47 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 480)
         .fixedSize(horizontal: false, vertical: true)
+        .background(WindowBecameKey {
+            minimizesIntoApplicationIcon = DockMinimizeOption.readMinimizesIntoApplicationIcon()
+        })
+    }
+}
+
+/// Calls `action` each time the window showing this view becomes key: when it opens, and each time it
+/// comes back to the front, say from System Settings. The window is kept when it closes, so SwiftUI's
+/// `onAppear` alone wouldn't see it open again.
+private struct WindowBecameKey: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> Watcher { Watcher(action: action) }
+
+    func updateNSView(_ watcher: Watcher, context: Context) { watcher.action = action }
+
+    final class Watcher: NSView {
+        var action: () -> Void
+        private var token: NSObjectProtocol?
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let token {
+                NotificationCenter.default.removeObserver(token)
+            }
+            token = nil
+            guard let window else { return }
+            token = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.action() }
+            }
+        }
+
+        /// Clicks go to the settings in front of it.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
 
