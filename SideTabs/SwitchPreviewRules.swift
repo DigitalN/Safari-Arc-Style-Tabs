@@ -154,3 +154,109 @@ nonisolated enum SwitchPreviewRules {
         max(shortestFadeIn, arrival.timeIntervalSince(now))
     }
 }
+
+// MARK: - The fade's steps
+
+/// The sidebar's fade over to a switch's profile (#44), step by step, kept apart from SwiftUI and timers so the
+/// checks can interrupt it anywhere. The sidebar draws one set of sections, never two: its opacity goes to 0 over
+/// what was shown, the contents are swapped while nothing shows, and it comes back to 1, ending as the window
+/// lands. The opacity always follows the phase, never an animation's progress, so a fade that's over shows the
+/// sections at full opacity whatever an animation did on the way; and a watchdog ends any fade a moment after its
+/// window should have landed, even if its other timers never fired.
+nonisolated struct SidebarFade: Equatable, Sendable {
+    enum Phase: Equatable, Sendable {
+        case none
+        /// What was shown when the fade began is fading out, over this long.
+        case out(TimeInterval)
+        /// Out: the new contents take its place while nothing shows, with no animation.
+        case hidden
+        /// The new contents are fading in, over this long.
+        case `in`(TimeInterval)
+    }
+
+    /// A timer to set. When it fires, `fire` it.
+    struct Timer: Equatable, Sendable {
+        enum Kind: Equatable, Sendable {
+            case outEnded, fadeIn, inEnded, watchdog
+        }
+        let kind: Kind
+        /// The fade it belongs to: a timer of an earlier fade does nothing.
+        let step: Int
+        /// In seconds from now.
+        let after: TimeInterval
+    }
+
+    private(set) var phase: Phase = .none
+    /// Bumped by each new fade-out.
+    private(set) var step = 0
+    /// When the newest switch's window should land.
+    private(set) var arrivesAt = Date.distantPast
+
+    /// How long a fade may outlast its window before the watchdog ends it.
+    static let grace: TimeInterval = 0.5
+    /// Between the swap and the fade-in: the next turn, so the swap isn't part of an animation.
+    static let swapPause: TimeInterval = 0.02
+    /// After an animation's end, before its step is taken as done.
+    static let margin: TimeInterval = 0.02
+
+    /// The sections' opacity.
+    var opacity: Double {
+        switch phase {
+        case .out, .hidden: 0
+        case .none, .in: 1
+        }
+    }
+
+    /// The sections keep showing what was there before the fade: only while it fades out.
+    var showsOldContents: Bool {
+        if case .out = phase { return true }
+        return false
+    }
+
+    var isOver: Bool { phase == .none }
+
+    /// A switch's window is on its way, landing at `arrivesAt`. Unless a fade-out is under way (then what's
+    /// fading out is still what was there first, and the newest contents come in once it's out), a fade-out
+    /// starts from whatever is on screen: nothing, the new contents fading in, or ones just swapped in.
+    /// `keepsOnScreen`: the contents on screen now are the old ones, to keep while they fade out.
+    mutating func begin(arrivesAt: Date, now: Date) -> (keepsOnScreen: Bool, timers: [Timer]) {
+        self.arrivesAt = arrivesAt
+        let watchdogAfter = max(arrivesAt.timeIntervalSince(now), 0) + Self.grace
+        if case .out = phase {
+            return (false, [Timer(kind: .watchdog, step: step, after: watchdogAfter)])
+        }
+        step += 1
+        phase = .out(SwitchPreviewRules.fadeOut)
+        return (true, [
+            Timer(kind: .outEnded, step: step, after: SwitchPreviewRules.fadeOut + Self.margin),
+            Timer(kind: .watchdog, step: step, after: watchdogAfter),
+        ])
+    }
+
+    /// A timer has fired: the next step, and the timers it needs.
+    mutating func fire(_ timer: Timer, now: Date) -> [Timer] {
+        guard timer.step == step else { return [] }
+        switch (timer.kind, phase) {
+        case (.outEnded, .out):
+            phase = .hidden
+            return [Timer(kind: .fadeIn, step: step, after: Self.swapPause)]
+        case (.fadeIn, .hidden):
+            let duration = SwitchPreviewRules.fadeIn(arrivesAt: arrivesAt, now: now)
+            phase = .in(duration)
+            return [Timer(kind: .inEnded, step: step, after: duration + Self.margin)]
+        case (.inEnded, .in):
+            phase = .none
+            return []
+        case (.watchdog, let current) where current != .none:
+            let left = arrivesAt.addingTimeInterval(Self.grace).timeIntervalSince(now)
+            guard left <= 0.001 else {
+                // A newer switch moved the landing on: look again then.
+                return [Timer(kind: .watchdog, step: step, after: left)]
+            }
+            phase = .none
+            return []
+        default:
+            return []
+        }
+    }
+}

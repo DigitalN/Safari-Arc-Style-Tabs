@@ -201,8 +201,8 @@ separate window that the app keeps attached to Safari's window:
     `profiles.json`; a minimized window that isn't on it is the user's. Quitting Side Tabs brings
     nothing back: turning the setting off does.
   - While a switch's window comes back from the Dock, the sidebar doesn't wait for Safari
-    (`TabStore.switchPreview`): the old contents fade out, then the target profile's fade in, ending as
-    the window lands, never both at once. It shows the window `SwitchPreviewRules` guesses from the
+    (`TabStore.switchPreview`): one set of sections fades out over the old contents, then back in with
+    the target profile's, ending as the window lands (`SidebarFade`), never both at once. It shows the window `SwitchPreviewRules` guesses from the
     store, or the profile's lists and a placeholder for Tabs, until Safari reports.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
   - `AppLocation` offers to move the app into Applications.

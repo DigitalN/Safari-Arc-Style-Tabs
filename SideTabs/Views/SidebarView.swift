@@ -31,13 +31,15 @@ struct SidebarView: View {
                                 .padding(.bottom, 8)
                         }
                         // While a switch's window comes back from the Dock, the sections fade over to its
-                        // profile (#44): the old ones fully out, then the new ones in, so the two are never on
-                        // screen together. One set of sections at a time; only the fade's steps animate, so
-                        // Safari's report, right or not, swaps the contents in place.
+                        // profile (#44, SidebarFade): one set of sections, never two, faded out over what was
+                        // shown, swapped while nothing shows, and faded back in. The animation is scoped to the
+                        // opacity alone, so a change of contents is never animated: no row is ever kept on
+                        // screen for a removal transition, and Safari's report, right or not, swaps in place.
                         if let content = store.displayedContent {
                             SidebarSections(content: content)
-                                .opacity(store.sidebarFade.opacity)
-                                .animation(store.sidebarFade.animation, value: store.sidebarFade)
+                                .animation(store.sidebarFade.animation) { sections in
+                                    sections.opacity(store.sidebarFade.opacity)
+                                }
                         }
                     }
                     .coordinateSpace(.named(SidebarDrag.coordinateSpace))
@@ -66,11 +68,11 @@ struct SidebarView: View {
     }
 }
 
-extension TabStore.SidebarFade {
+extension SidebarFade {
     /// How the step to this one animates: the fade-out quickly, the fade-in until the window lands, and the
-    /// swap in between not at all.
+    /// swap in between, or a fade the watchdog ended, not at all.
     var animation: Animation? {
-        switch self {
+        switch phase {
         case .out(let duration): .easeIn(duration: duration)
         case .in(let duration): .easeOut(duration: duration)
         case .hidden, .none: nil

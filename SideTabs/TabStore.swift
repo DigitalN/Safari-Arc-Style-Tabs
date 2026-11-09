@@ -142,32 +142,11 @@ final class TabStore {
     }
     /// Nil when the sidebar follows Safari, as it does but for a switch's window coming back from the Dock.
     private(set) var switchPreview: SwitchPreview?
-    /// The sidebar's fade over to a switch's profile: the old contents fade fully out, then the new fade in,
-    /// so the two are never on screen together. Only a preview's start sets it going.
-    enum SidebarFade: Equatable {
-        case none
-        /// The contents shown when the switch began (`fadingOutContent`) are fading out, over this long.
-        case out(TimeInterval)
-        /// Out: the new contents take their place while nothing shows, with no animation.
-        case hidden
-        /// The new contents are fading in, over this long.
-        case `in`(TimeInterval)
-
-        /// The sections' opacity.
-        var opacity: Double {
-            switch self {
-            case .out, .hidden: 0
-            case .none, .in: 1
-            }
-        }
-    }
-    private(set) var sidebarFade: SidebarFade = .none
+    /// The sidebar's fade over to a switch's profile (SidebarFade): one set of sections, faded out over what was
+    /// shown, swapped while nothing shows, and faded back in. Only a preview's start sets it going.
+    private(set) var sidebarFade = SidebarFade()
     /// What the sidebar showed when the fade began, kept on screen while it fades out.
     private(set) var fadingOutContent: ShownContent?
-    /// Each fade's steps check they're still the newest fade's.
-    @ObservationIgnored private var fadeStep = 0
-    /// When the newest preview's window should land: the fade-in ends then.
-    @ObservationIgnored private var previewArrivesAt = Date.distantPast
 
     @ObservationIgnored var sendCommand: (([String: Any]) -> Void)?
     @ObservationIgnored var onToggleSidebar: (() -> Void)?
@@ -1394,10 +1373,7 @@ final class TabStore {
 
     /// What the sections have on screen: while the old contents fade out, those; then `shownContent`.
     var displayedContent: ShownContent? {
-        if case .out = sidebarFade {
-            return fadingOutContent
-        }
-        return shownContent
+        sidebarFade.showsOldContents ? fadingOutContent : shownContent
     }
 
     /// The profile whose Favorites and Pinned the sidebar shows.
@@ -1420,18 +1396,13 @@ final class TabStore {
     func beginSwitchPreview(id: Int, profile: ProfileKey, guess: SwitchGuess, arrivesAt: Date) {
         let onScreen = displayedContent
         switchPreview = SwitchPreview(id: id, profile: profile, guess: guess)
-        previewArrivesAt = arrivesAt
-        if case .out = sidebarFade {
-            // Carries on: what's fading out is still what was there before.
-        } else {
+        var fade = sidebarFade
+        let begun = fade.begin(arrivesAt: arrivesAt, now: clock())
+        if begun.keepsOnScreen {
             fadingOutContent = onScreen
-            fadeStep += 1
-            let step = fadeStep
-            sidebarFade = .out(SwitchPreviewRules.fadeOut)
-            DispatchQueue.main.asyncAfter(deadline: .now() + SwitchPreviewRules.fadeOut + 0.02) { [weak self] in
-                self?.fadedOut(step)
-            }
         }
+        sidebarFade = fade
+        scheduleFade(begun.timers)
         let landsIn = Int(arrivesAt.timeIntervalSince(clock()) * 1000)
         log.notice("the sidebar shows \(Self.describe(profile.isDefault ? nil : profile.rawValue), privacy: .public) at the switch: \(Self.describe(guess), privacy: .public); fading out, then in, for the window to land in \(landsIn) ms")
         DispatchQueue.main.asyncAfter(deadline: .now() + SwitchPreviewRules.lifetime) { [weak self] in
@@ -1440,24 +1411,24 @@ final class TabStore {
         }
     }
 
-    /// The old contents are out: the new take their place while nothing shows, then fade in on the next turn,
-    /// so the swap itself isn't animated.
-    private func fadedOut(_ step: Int) {
-        guard step == fadeStep, case .out = sidebarFade else { return }
-        fadingOutContent = nil
-        sidebarFade = .hidden
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
-            self?.fadeIn(step)
-        }
-    }
-
-    private func fadeIn(_ step: Int) {
-        guard step == fadeStep, sidebarFade == .hidden else { return }
-        let duration = SwitchPreviewRules.fadeIn(arrivesAt: previewArrivesAt, now: clock())
-        sidebarFade = .in(duration)
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.02) { [weak self] in
-            guard let self, step == self.fadeStep, case .in = self.sidebarFade else { return }
-            self.sidebarFade = .none
+    /// Sets the fade's timers; each takes its step when it fires, and sets the next ones.
+    private func scheduleFade(_ timers: [SidebarFade.Timer]) {
+        for timer in timers {
+            DispatchQueue.main.asyncAfter(deadline: .now() + timer.after) { [weak self] in
+                guard let self else { return }
+                var fade = self.sidebarFade
+                let next = fade.fire(timer, now: self.clock())
+                if fade != self.sidebarFade {
+                    if timer.kind == .watchdog {
+                        self.log.notice("the sidebar's fade was still going \(Int(SidebarFade.grace * 1000)) ms after its window should have landed; ended it")
+                    }
+                    self.sidebarFade = fade
+                }
+                if !fade.showsOldContents, self.fadingOutContent != nil {
+                    self.fadingOutContent = nil
+                }
+                self.scheduleFade(next)
+            }
         }
     }
 

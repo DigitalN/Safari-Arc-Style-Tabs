@@ -160,6 +160,166 @@ do {
           "within reason: a switch held up by something else doesn't throw it off")
 }
 
+// MARK: - The fade's steps, interrupted anywhere
+
+/// The sidebar as the store runs it: one set of sections, `SidebarFade`'s timers on a clock of its own, and the
+/// contents the sidebar would show without the fade (`shown`). What's on screen is one value at a time.
+struct FadeRun {
+    var fade = SidebarFade()
+    let start = Date(timeIntervalSinceReferenceDate: 0)
+    var now: TimeInterval = 0
+    var timers: [(at: TimeInterval, timer: SidebarFade.Timer)] = []
+    /// What the store's shownContent would be.
+    var shown = "A"
+    /// What was on screen when the fade began, kept while it fades out.
+    var old: String?
+    /// Timers that never fire, to check the watchdog.
+    var dropped: Set<SidebarFade.Timer.Kind> = []
+
+    var onScreen: String? { fade.showsOldContents ? old : shown }
+    var date: Date { start.addingTimeInterval(now) }
+
+    /// A switch: the store's guess becomes `guess`, and the window lands `landsIn` from now.
+    mutating func switchTo(_ guess: String, landsIn: TimeInterval) {
+        let before = onScreen
+        shown = guess
+        let begun = fade.begin(arrivesAt: date.addingTimeInterval(landsIn), now: date)
+        if begun.keepsOnScreen { old = before }
+        add(begun.timers)
+    }
+
+    mutating func add(_ new: [SidebarFade.Timer]) {
+        for timer in new where !dropped.contains(timer.kind) {
+            timers.append((now + timer.after, timer))
+        }
+    }
+
+    /// Lets time pass, firing the timers due, in order.
+    mutating func run(for seconds: TimeInterval) {
+        let end = now + seconds
+        while let index = timers.indices.min(by: { timers[$0].at < timers[$1].at }), timers[index].at <= end {
+            let (at, timer) = timers.remove(at: index)
+            now = at
+            add(fade.fire(timer, now: date))
+            if !fade.showsOldContents { old = nil }
+        }
+        now = end
+    }
+
+    /// Lets every timer fire.
+    mutating func finish() {
+        run(for: 10)
+    }
+
+    /// Over, at full opacity, showing `expected` and nothing else.
+    func endsShowing(_ expected: String) -> Bool {
+        fade.isOver && fade.opacity == 1 && onScreen == expected && old == nil
+    }
+}
+
+do {
+    let genie = SwitchPreviewRules.arrivalEstimate(minimizeEffect: "genie")
+
+    // A switch, start to end.
+    var run = FadeRun()
+    run.switchTo("B", landsIn: genie)
+    check(run.fade.opacity == 0 && run.onScreen == "A", "the one set of sections fades out over what was shown")
+    run.run(for: SwitchPreviewRules.fadeOut + SidebarFade.margin)
+    check(run.fade.phase == .hidden && run.onScreen == "B" && run.fade.opacity == 0, "once it's out, the new contents take its place while nothing shows")
+    run.run(for: SidebarFade.swapPause)
+    if case .in(let duration) = run.fade.phase {
+        check(abs(run.now + duration - genie) < 0.01, "then they fade in, ending as the window lands")
+    } else {
+        check(false, "the new contents fade in after the swap")
+    }
+    run.finish()
+    check(run.endsShowing("B"), "and the fade ends at full opacity, showing the new contents")
+
+    // A newer switch while the old contents fade out.
+    run = FadeRun()
+    run.switchTo("B", landsIn: genie)
+    run.run(for: 0.05)
+    run.switchTo("C", landsIn: genie)
+    check(run.onScreen == "A" && run.fade.opacity == 0, "a newer switch mid-fade-out: what was there first carries on fading out")
+    run.finish()
+    check(run.endsShowing("C"), "and the newest switch's contents come in, at full opacity")
+
+    // In the moment between the swap and the fade-in.
+    run = FadeRun()
+    run.switchTo("B", landsIn: genie)
+    run.run(for: SwitchPreviewRules.fadeOut + SidebarFade.margin + 0.005)
+    check(run.fade.phase == .hidden, "between the swap and the fade-in")
+    run.switchTo("C", landsIn: genie)
+    run.finish()
+    check(run.endsShowing("C"), "a newer switch there ends with its contents, at full opacity")
+
+    // A newer switch while the new contents fade in.
+    run = FadeRun()
+    run.switchTo("B", landsIn: genie)
+    run.run(for: 0.4)
+    check(run.onScreen == "B", "fading in")
+    run.switchTo("C", landsIn: genie)
+    check(run.fade.showsOldContents && run.onScreen == "B" && run.fade.opacity == 0,
+          "a newer switch mid-fade-in fades out what's on screen, from wherever it had got to")
+    run.finish()
+    check(run.endsShowing("C"), "and ends with the newest contents, at full opacity")
+
+    // The preview ends mid-fade: Safari reported, or the switch failed. The store's contents change; the fade
+    // carries on, and ends showing them.
+    run = FadeRun()
+    run.switchTo("B", landsIn: genie)
+    run.run(for: 0.05)
+    run.shown = "A"
+    check(run.onScreen == "A", "the preview ending mid-fade-out changes nothing on screen while it fades out")
+    run.finish()
+    check(run.endsShowing("A"), "and the fade ends showing what Safari has, at full opacity")
+
+    run = FadeRun()
+    run.switchTo("B", landsIn: genie)
+    run.run(for: 0.4)
+    run.shown = "B2"
+    check(run.onScreen == "B2" && run.fade.phase != .none, "a correction mid-fade-in swaps in place, with no second fade")
+    run.finish()
+    check(run.endsShowing("B2"), "and ends at full opacity")
+
+    // Timers that never fire: the watchdog ends the fade anyway, at full opacity.
+    for lost in [SidebarFade.Timer.Kind.outEnded, .fadeIn, .inEnded] {
+        run = FadeRun()
+        run.dropped = [lost]
+        run.switchTo("B", landsIn: genie)
+        run.finish()
+        check(run.endsShowing("B"), "with the \(lost) timer lost, the watchdog still ends the fade at full opacity, showing the new contents")
+    }
+    run = FadeRun()
+    run.dropped = [.outEnded]
+    run.switchTo("B", landsIn: genie)
+    run.run(for: genie)
+    check(!run.fade.isOver, "the watchdog waits until the window should have landed, and a moment more")
+    run.run(for: SidebarFade.grace + 0.01)
+    check(run.endsShowing("B"), "then ends it")
+
+    // A newer switch moves the landing on, and the watchdog with it.
+    run = FadeRun()
+    run.switchTo("B", landsIn: genie)
+    run.run(for: 0.05)
+    run.switchTo("C", landsIn: 2)
+    run.run(for: genie + SidebarFade.grace)
+    check(!run.fade.isOver && run.onScreen == "C", "an earlier watchdog doesn't cut short a fade for a later window")
+    run.finish()
+    check(run.endsShowing("C"), "which ends at full opacity")
+
+    // A timer from an earlier fade does nothing.
+    var fade = SidebarFade()
+    let origin = Date()
+    let first = fade.begin(arrivesAt: origin.addingTimeInterval(genie), now: origin).timers
+    _ = fade.fire(SidebarFade.Timer(kind: .outEnded, step: fade.step, after: 0), now: origin)
+    _ = fade.fire(SidebarFade.Timer(kind: .fadeIn, step: fade.step, after: 0), now: origin)
+    _ = fade.begin(arrivesAt: origin.addingTimeInterval(genie), now: origin)
+    let stale = first.first { $0.kind == .outEnded }!
+    let phase = fade.phase
+    check(fade.fire(stale, now: origin).isEmpty && fade.phase == phase, "a timer of an earlier fade changes nothing")
+}
+
 if failures > 0 {
     print("\(failures) switch preview check(s) failed")
     exit(1)

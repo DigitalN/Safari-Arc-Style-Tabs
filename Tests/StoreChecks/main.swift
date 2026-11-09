@@ -2213,7 +2213,7 @@ do {
     check(store.shownWindow?.instance == "A" && store.shownProfile == .defaultProfile && store.switchPreview == nil,
           "until a switch, the sidebar shows the window in front")
     let before = store.displayedContent
-    check(store.sidebarFade == .none, "no fade before a switch")
+    check(store.sidebarFade.isOver, "no fade before a switch")
 
     store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 8), arrivesAt: Date().addingTimeInterval(0.4))
     check(store.shownWindow?.instance == "B" && store.shownWindow?.window.id == 8, "at the switch, the sidebar is set to show the guessed window's tabs")
@@ -2221,11 +2221,11 @@ do {
           "and its profile's Favorites and Pinned")
     check(store.currentWindow?.instance == "A", "while the window Safari has in front is still the one commands act on")
     // Fade out, then in: never both on screen.
-    check(store.sidebarFade == .out(SwitchPreviewRules.fadeOut) && store.sidebarFade.opacity == 0,
+    check(store.sidebarFade.phase == .out(SwitchPreviewRules.fadeOut) && store.sidebarFade.opacity == 0,
           "first the old contents fade out")
     check(store.displayedContent == before && store.activeTab?.instance == "A", "and only they are on screen meanwhile, the address bar too")
     wait(SwitchPreviewRules.fadeOut + 0.1)
-    if case .in(let duration) = store.sidebarFade {
+    if case .in(let duration) = store.sidebarFade.phase {
         check(duration > 0.15 && duration < 0.4, "then the new contents fade in, until the window lands")
     } else {
         check(false, "the new contents fade in once the old are out")
@@ -2252,7 +2252,7 @@ do {
     check(store.shownWindow?.instance == "B" && store.shownWindow?.window.id == 8, "a right guess: the sidebar keeps what it showed")
     check(store.sidebarFade == fade, "with no second fade")
     wait(0.5)
-    check(store.sidebarFade == .none, "and once the window has landed, the fade is over")
+    check(store.sidebarFade.isOver && store.sidebarFade.opacity == 1, "and once the window has landed, the fade is over, at full opacity")
 }
 
 do {
@@ -2298,7 +2298,7 @@ do {
     store.beginSwitchPreview(id: 2, profile: .defaultProfile, guess: .window(instance: "A", windowId: 1), arrivesAt: Date())
     store.refineSwitchPreview(id: 1, guess: .placeholder)
     check(store.switchPreview?.id == 2 && store.shownWindow?.instance == "A", "a newer click's guess replaces the older one, whose news is ignored")
-    check(store.displayedContent == before && store.sidebarFade == .out(SwitchPreviewRules.fadeOut),
+    check(store.displayedContent == before && store.sidebarFade.phase == .out(SwitchPreviewRules.fadeOut),
           "while what was there before is still fading out, it carries on")
     wait(SwitchPreviewRules.fadeOut + 0.1)
     check(store.displayedContent == .window(store.shownWindow!), "and the newest guess comes in once it's out")
@@ -2306,6 +2306,22 @@ do {
     check(store.switchPreview?.id == 2, "and so is a report of the older switch's profile")
     store.endSwitchPreview(because: "the switch didn't work")
     check(store.switchPreview == nil && store.shownWindow?.instance == "A", "a switch that didn't work: the sidebar follows Safari again")
+
+    wait(0.5)
+    check(store.sidebarFade.isOver && store.sidebarFade.opacity == 1 && store.displayedContent == store.shownContent,
+          "the switch that didn't work ends its fade at full opacity, showing the window Safari has")
+
+    // A newer switch while the new contents fade in, then the preview ending mid-fade-out.
+    store.beginSwitchPreview(id: 4, profile: switchedWork, guess: .window(instance: "B", windowId: 7), arrivesAt: Date().addingTimeInterval(0.5))
+    wait(SwitchPreviewRules.fadeOut + 0.1)
+    check(store.displayedContent == .window(store.shownWindow!) && store.shownWindow?.instance == "B", "fading in Work's window")
+    store.beginSwitchPreview(id: 5, profile: .defaultProfile, guess: .window(instance: "A", windowId: 1), arrivesAt: Date().addingTimeInterval(0.4))
+    check(store.sidebarFade.showsOldContents && store.displayedContent == .window(TabStore.WindowSelection(instance: "B", window: store.liveSnapshots["B"]!.windows[0])),
+          "a newer switch mid-fade-in fades out what's on screen")
+    store.endSwitchPreview(because: "the switch didn't work")
+    wait(1.2)
+    check(store.sidebarFade.isOver && store.sidebarFade.opacity == 1 && store.displayedContent == store.shownContent && store.fadingOutContent == nil,
+          "and when the preview ends mid-fade-out, the fade still ends at full opacity, showing what Safari has, once")
 
     // #41: a target its copy can't see shows its profile's lists and the tab bar list.
     store.beginSwitchPreview(id: 3, profile: switchedWork, guess: .unseen, arrivesAt: Date())
