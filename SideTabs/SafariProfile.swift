@@ -106,6 +106,18 @@ nonisolated enum ProfileIdentifiers {
         identifier?.hasPrefix(browserWindowPrefix) == true
     }
 
+    /// The UUID in a browser window's identifier, `SafariWindow?IsSecure=…&UUID=<uuid>`, which may
+    /// survive a relaunch (#42). Nil for any other identifier, or an empty UUID. `IsSecure` isn't
+    /// whether the window is private: recorded private windows say false.
+    static func windowUUID(_ identifier: String?) -> String? {
+        guard let identifier, isBrowserWindow(identifier), let query = identifier.firstIndex(of: "?") else { return nil }
+        for pair in identifier[identifier.index(after: query)...].split(separator: "&") where pair.hasPrefix("UUID=") {
+            let uuid = pair.dropFirst("UUID=".count)
+            return uuid.isEmpty ? nil : String(uuid)
+        }
+        return nil
+    }
+
     /// Nobody has checked yet how Safari writes a name with spaces or symbols into these
     /// identifiers (#28). If it percent-encodes them, decode; otherwise leave the name as it is.
     static func decoded(_ text: String) -> String {
