@@ -43,6 +43,12 @@ final class AppSettings {
         didSet { defaults.set(unviewedTabInterval.rawValue, forKey: "closeUnviewedTabsAfter") }
     }
 
+    /// Minimize the windows of the profiles not in use, so Mission Control shows only the current
+    /// profile's windows (#42).
+    var minimizesOtherProfiles: Bool {
+        didSet { defaults.set(minimizesOtherProfiles, forKey: "minimizesOtherProfiles") }
+    }
+
     /// Check GitHub for new versions and install them in the background.
     var updatesAutomatically: Bool {
         didSet { defaults.set(updatesAutomatically, forKey: "updatesAutomatically") }
@@ -93,6 +99,7 @@ final class AppSettings {
             "showBookmarks": true,
             "closeUnviewedTabs": false,
             "closeUnviewedTabsAfter": CleanupInterval.oneDay.rawValue,
+            "minimizesOtherProfiles": false,
             "hasCompletedSetup": false,
             "updatesAutomatically": true,
         ])
@@ -103,6 +110,7 @@ final class AppSettings {
         showBookmarks = defaults.bool(forKey: "showBookmarks")
         closesUnviewedTabs = defaults.bool(forKey: "closeUnviewedTabs")
         unviewedTabInterval = CleanupInterval(rawValue: defaults.string(forKey: "closeUnviewedTabsAfter") ?? "") ?? .oneDay
+        minimizesOtherProfiles = defaults.bool(forKey: "minimizesOtherProfiles")
         hasCompletedSetup = defaults.bool(forKey: "hasCompletedSetup")
         updatesAutomatically = defaults.bool(forKey: "updatesAutomatically")
     }
