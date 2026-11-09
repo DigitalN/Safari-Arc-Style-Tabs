@@ -2212,21 +2212,33 @@ do {
     store.dockedWindowTitle = "Personal — Mail"
     check(store.shownWindow?.instance == "A" && store.shownProfile == .defaultProfile && store.switchPreview == nil,
           "until a switch, the sidebar shows the window in front")
-    let fade = store.sidebarFade
+    let before = store.displayedContent
+    check(store.sidebarFade == .none, "no fade before a switch")
 
-    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 8), fadeDuration: 0.25)
-    check(store.shownWindow?.instance == "B" && store.shownWindow?.window.id == 8, "at the switch, the guessed window's tabs, at once")
+    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 8), arrivesAt: Date().addingTimeInterval(0.4))
+    check(store.shownWindow?.instance == "B" && store.shownWindow?.window.id == 8, "at the switch, the sidebar is set to show the guessed window's tabs")
     check(store.shownProfile == switchedWork && store.currentFavoritesList == .favorites(switchedWork) && store.currentPinnedList == .pinned(switchedWork),
           "and its profile's Favorites and Pinned")
-    check(store.sidebarFade == fade + 1 && store.sidebarFadeDuration == 0.25, "fading over to them")
     check(store.currentWindow?.instance == "A", "while the window Safari has in front is still the one commands act on")
-    check(store.activeTab?.instance == "B", "the address bar shows the guessed window's page")
+    // Fade out, then in: never both on screen.
+    check(store.sidebarFade == .out(SwitchPreviewRules.fadeOut) && store.sidebarFade.opacity == 0,
+          "first the old contents fade out")
+    check(store.displayedContent == before && store.activeTab?.instance == "A", "and only they are on screen meanwhile, the address bar too")
+    wait(SwitchPreviewRules.fadeOut + 0.1)
+    if case .in(let duration) = store.sidebarFade {
+        check(duration > 0.15 && duration < 0.4, "then the new contents fade in, until the window lands")
+    } else {
+        check(false, "the new contents fade in once the old are out")
+    }
+    check(store.displayedContent == .window(store.shownWindow!) && store.activeTab?.instance == "B",
+          "the new contents alone are on screen, the address bar too")
+    let fade = store.sidebarFade
 
     store.refineSwitchPreview(id: 1, guess: .placeholder)
     check(store.shownContent == .placeholder(switchedWork) && store.shownWindow == nil && store.activeTab == nil,
           "a placeholder shows the profile's lists and no window's tabs")
     store.refineSwitchPreview(id: 1, guess: .window(instance: "B", windowId: 8))
-    check(store.sidebarFade == fade + 1, "a better guess replaces the first with no second fade")
+    check(store.sidebarFade == fade, "a better guess replaces the first with no second fade")
 
     // Safari reports a window of another profile than the switch's: the guess stays.
     store.confirmSwitchPreview(profile: .defaultProfile)
@@ -2238,7 +2250,9 @@ do {
     store.confirmSwitchPreview(profile: switchedWork)
     check(store.switchPreview == nil, "once Safari shows the switch's profile, and the sidebar's own choice is its window, the guess ends")
     check(store.shownWindow?.instance == "B" && store.shownWindow?.window.id == 8, "a right guess: the sidebar keeps what it showed")
-    check(store.sidebarFade == fade + 1, "with no second fade")
+    check(store.sidebarFade == fade, "with no second fade")
+    wait(0.5)
+    check(store.sidebarFade == .none, "and once the window has landed, the fade is over")
 }
 
 do {
@@ -2247,7 +2261,7 @@ do {
     send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: true, at: 100))
     send(store, copyWindows("B", profile: workProfile, seq: 1, [(7, "Docs"), (8, "News")], lastFocused: 8, at: 50))
     store.dockedWindowProfile = "default"
-    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 8), fadeDuration: 0.35)
+    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 8), arrivesAt: Date())
     let fade = store.sidebarFade
     store.dockedWindowProfile = workProfile
     store.dockedWindowTitle = "Work — Docs"
@@ -2262,7 +2276,7 @@ do {
     send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: true, at: 100))
     send(store, copyWindows("B", profile: workProfile, seq: 1, [], lastFocused: nil, at: 50))
     store.dockedWindowProfile = "default"
-    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .placeholder, fadeDuration: 0.25)
+    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .placeholder, arrivesAt: Date())
     store.dockedWindowProfile = workProfile
     store.dockedWindowTitle = "Work — Start Page"
     store.confirmSwitchPreview(profile: switchedWork)
@@ -2279,17 +2293,22 @@ do {
     send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: true, at: 100))
     send(store, copyWindows("B", profile: workProfile, seq: 1, [(7, "Docs")], lastFocused: 7, at: 50))
     store.dockedWindowProfile = "default"
-    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 7), fadeDuration: 0.25)
-    store.beginSwitchPreview(id: 2, profile: .defaultProfile, guess: .window(instance: "A", windowId: 1), fadeDuration: 0.25)
+    let before = store.displayedContent
+    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 7), arrivesAt: Date())
+    store.beginSwitchPreview(id: 2, profile: .defaultProfile, guess: .window(instance: "A", windowId: 1), arrivesAt: Date())
     store.refineSwitchPreview(id: 1, guess: .placeholder)
     check(store.switchPreview?.id == 2 && store.shownWindow?.instance == "A", "a newer click's guess replaces the older one, whose news is ignored")
+    check(store.displayedContent == before && store.sidebarFade == .out(SwitchPreviewRules.fadeOut),
+          "while what was there before is still fading out, it carries on")
+    wait(SwitchPreviewRules.fadeOut + 0.1)
+    check(store.displayedContent == .window(store.shownWindow!), "and the newest guess comes in once it's out")
     store.confirmSwitchPreview(profile: switchedWork)
     check(store.switchPreview?.id == 2, "and so is a report of the older switch's profile")
     store.endSwitchPreview(because: "the switch didn't work")
     check(store.switchPreview == nil && store.shownWindow?.instance == "A", "a switch that didn't work: the sidebar follows Safari again")
 
     // #41: a target its copy can't see shows its profile's lists and the tab bar list.
-    store.beginSwitchPreview(id: 3, profile: switchedWork, guess: .unseen, fadeDuration: 0.25)
+    store.beginSwitchPreview(id: 3, profile: switchedWork, guess: .unseen, arrivesAt: Date())
     check(store.shownContent == .unseen(profile: switchedWork) && store.shownProfile == switchedWork, "a window its copy can't see: its profile's lists, and the tab bar list")
 }
 

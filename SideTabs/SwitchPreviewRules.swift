@@ -124,9 +124,33 @@ nonisolated enum SwitchPreviewRules {
         guess == shown && guess != .placeholder ? .kept : .corrected
     }
 
-    /// How long the cross-fade takes: about as long as the window's slide-in from the Dock, kept short. The
-    /// Scale effect is quicker than the Genie (the Dock's `mineffect`).
-    static func fadeDuration(minimizeEffect: String?) -> TimeInterval {
-        minimizeEffect == "scale" ? 0.25 : 0.35
+    // MARK: - The fade's timing
+
+    // The old contents fade fully out, then the new fade in, so the two are never on screen together; the
+    // new are fully in about as the window lands.
+
+    /// How long the old contents take to fade out: short, so the new can start coming in.
+    static let fadeOut: TimeInterval = 0.12
+    /// The shortest fade-in, for a window that has landed already, or nearly.
+    static let shortestFadeIn: TimeInterval = 0.15
+    /// How long after its start a fade for a window that's already on its way (a Dock tile, the Window menu,
+    /// App Exposé) is given: Side Tabs only hears of it once the window's animation has begun.
+    static let alreadyOnItsWay: TimeInterval = 0.5
+
+    /// How long after the click a minimized window lands, until a switch has measured it: the Genie effect
+    /// takes about 0.76 s here (#44's live test), the Scale effect less (the Dock's `mineffect`).
+    static func arrivalEstimate(minimizeEffect: String?) -> TimeInterval {
+        minimizeEffect == "scale" ? 0.5 : 0.76
+    }
+
+    /// The estimate after a switch that measured how long its minimized window took to become Safari's main
+    /// window: halfway to the new measure, so one slow switch doesn't throw it off, and within reason.
+    static func arrivalEstimate(after previous: TimeInterval, measured: TimeInterval) -> TimeInterval {
+        min(max((previous + measured) / 2, 0.3), 1.5)
+    }
+
+    /// How long the new contents take to fade in, once the old are out at `now`: until the window lands.
+    static func fadeIn(arrivesAt arrival: Date, now: Date) -> TimeInterval {
+        max(shortestFadeIn, arrival.timeIntervalSince(now))
     }
 }

@@ -132,9 +132,32 @@ do {
     check(SwitchPreviewRules.fades(targetIsMinimized: nil, minimizesOtherProfiles: true),
           "at the click, with the setting on, the target is nearly always in the Dock: the fade starts at once")
     check(!SwitchPreviewRules.fades(targetIsMinimized: nil, minimizesOtherProfiles: false), "with it off, the switch says first")
-    check(SwitchPreviewRules.fadeDuration(minimizeEffect: "scale") < SwitchPreviewRules.fadeDuration(minimizeEffect: "genie"),
-          "the fade is shorter with the Scale effect, which is quicker than the Genie")
-    check(SwitchPreviewRules.fadeDuration(minimizeEffect: nil) <= 0.4, "and short either way")
+}
+
+// MARK: - The fade's timing: out, then in, ending as the window lands
+
+do {
+    let genie = SwitchPreviewRules.arrivalEstimate(minimizeEffect: "genie")
+    check(abs(genie - 0.76) < 0.001 && SwitchPreviewRules.arrivalEstimate(minimizeEffect: nil) == genie,
+          "with the Genie effect (the default), a minimized window lands about 0.76 s after the click, as measured")
+    check(SwitchPreviewRules.arrivalEstimate(minimizeEffect: "scale") < genie, "sooner with the Scale effect")
+    check(SwitchPreviewRules.fadeOut <= 0.15, "the old contents fade out quickly")
+
+    // Fully out before anything comes in, and fully in as the window lands.
+    let click = Date()
+    let lands = click.addingTimeInterval(genie)
+    let outEnds = click.addingTimeInterval(SwitchPreviewRules.fadeOut)
+    let fadeIn = SwitchPreviewRules.fadeIn(arrivesAt: lands, now: outEnds)
+    check(abs(SwitchPreviewRules.fadeOut + fadeIn - genie) < 0.001, "the fade-in takes the rest, ending as the window lands")
+    check(fadeIn > SwitchPreviewRules.fadeOut * 3, "most of the time is the fade-in")
+    check(SwitchPreviewRules.fadeIn(arrivesAt: click, now: outEnds) == SwitchPreviewRules.shortestFadeIn,
+          "a window that has landed already: a short fade-in all the same")
+
+    // Measured switches tune the estimate.
+    let measured = SwitchPreviewRules.arrivalEstimate(after: genie, measured: 0.9)
+    check(measured > genie && measured < 0.9, "a slower switch moves the estimate halfway towards it")
+    check(SwitchPreviewRules.arrivalEstimate(after: genie, measured: 9) <= 1.5 && SwitchPreviewRules.arrivalEstimate(after: 0.3, measured: 0) >= 0.3,
+          "within reason: a switch held up by something else doesn't throw it off")
 }
 
 if failures > 0 {

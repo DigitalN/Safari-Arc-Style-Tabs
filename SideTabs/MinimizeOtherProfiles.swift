@@ -603,12 +603,14 @@ final class MinimizeOtherProfiles {
     /// instead (or one the user minimized comes back, as a switch would), where the closed one was, and the
     /// window macOS brought out goes back into the Dock once it's in front (the switch's sweep minimizes it).
     private func dockIconBroughtOut(_ front: Front) {
+        let clickAt = dockIconClickAt
         dockIconClickAt = nil
         guard let current = currentProfileID, let profile = host.profiles.first(where: { $0.id == current }),
               let other = front.profile else { return }
         let onList = front.number.map(list.contains) ?? false
         log.notice("the Dock icon brought out a window of profile \(self.position(other), privacy: .public) (\(onList ? "one Side Tabs minimized" : "not on the list: Safari may have opened it", privacy: .public)); a window of profile \(self.position(current), privacy: .public) comes instead")
-        if !host.beginSwitch(to: profile, reason: .dockIcon, frame: closedFrame) {
+        // Timed from the click on the icon, not from the sidebar's last press.
+        if !host.beginSwitch(to: profile, reason: .dockIcon, frame: closedFrame, clickAt: clickAt) {
             changeCurrent(to: other, front: front.number)
         }
     }

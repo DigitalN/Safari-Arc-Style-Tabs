@@ -109,8 +109,11 @@ final class SafariProfiles {
     @ObservationIgnored private var latestPreview = 0
     /// The docked window when the preview began: another one coming to the front ends it.
     @ObservationIgnored private var previewDockedNumber: Int?
-    /// How long the sidebar's fade takes, from the Dock's minimize effect, read off the main thread.
-    @ObservationIgnored private var fadeDuration = SwitchPreviewRules.fadeDuration(minimizeEffect: nil)
+    /// How long after the click a minimized switch target lands: from the Dock's minimize effect (read off the
+    /// main thread) until switches have measured it. The sidebar's fade-in ends then.
+    @ObservationIgnored private var arrivalEstimate = SwitchPreviewRules.arrivalEstimate(minimizeEffect: nil)
+    /// The minimize effect the estimate is for; a new one starts it over.
+    @ObservationIgnored private var minimizeEffect: String??
     /// A one-off look when the docked window has been open long enough to call it unseen.
     @ObservationIgnored private var settleCheck: DispatchWorkItem?
 
@@ -162,7 +165,7 @@ final class SafariProfiles {
         })
 
         observeStore()
-        refreshFadeDuration()
+        refreshArrivalEstimate()
         unseenTabs.start()
         readMenu(because: "launch", attempts: 3)
         dockedWindowChanged()
@@ -709,15 +712,25 @@ final class SafariProfiles {
         ProfileResolver(profiles: profiles, copyWindows: copyWindows)
     }
 
+    /// A press on the sidebar this recent is the one that started a switch.
+    private static let clickStartsSwitch: TimeInterval = 1
+
     /// Brings `profile`'s window forward in place of the docked one, or opens one. `frame`: where it goes,
-    /// if not the docked window's spot. `then` runs on the main thread when it's done, with whether the
-    /// profile's window came to the front. Says whether a switch started.
+    /// if not the docked window's spot. `clickAt`: the click that asked for it, outside the sidebar (the Dock
+    /// icon); otherwise a press on the sidebar just now, or else the switch's own start, is what it's timed
+    /// from. `then` runs on the main thread when it's done, with whether the profile's window came to the
+    /// front. Says whether a switch started.
     @discardableResult
     func beginSwitch(to profile: SafariProfile, reason: MinimizeReason = .switched, frame override: CGRect? = nil,
-                     then: ((Bool) -> Void)? = nil) -> Bool {
+                     clickAt click: Date? = nil, then: ((Bool) -> Void)? = nil) -> Bool {
         guard let app = application,
               let position = profiles.firstIndex(where: { $0.id == profile.id }) else { return false }
-        let clickAt = store.lastPointerDown?() ?? Date()
+        // Not an older press: a switch nobody clicked for in the sidebar (the Dock icon, say) would otherwise be
+        // timed from whenever the sidebar was last pressed.
+        let now = Date()
+        let press = (store.lastPointerDown?()).flatMap { now.timeIntervalSince($0) < Self.clickStartsSwitch ? $0 : nil }
+        let clickAt = click ?? press ?? now
+        let since = click != nil ? "the click on the Dock icon" : press != nil ? "the click" : "the switch began"
         let pending = PendingSwitch(id: profile.id, at: Date())
         pendingSwitch = pending
         DispatchQueue.main.asyncAfter(deadline: .now() + PendingSwitch.lifetime) { [weak self] in
@@ -744,10 +757,10 @@ final class SafariProfiles {
         latestPreview += 1
         let previewID = latestPreview
         if reason == .switched {
-            previewAtClick(id: previewID, profile: profile)
+            previewAtClick(id: previewID, profile: profile, clickAt: clickAt)
             request.onTarget = { [weak self] choice in
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.switchPicked(choice, preview: previewID, profile: profile) }
+                    MainActor.assumeIsolated { self?.switchPicked(choice, preview: previewID, profile: profile, clickAt: clickAt) }
                 }
             }
         }
@@ -757,7 +770,7 @@ final class SafariProfiles {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    self.switchFinished(outcome, pending: pending, position: position)
+                    self.switchFinished(outcome, pending: pending, position: position, since: since)
                     let succeeded: Bool
                     switch outcome {
                     case .raised, .opened: succeeded = true
@@ -776,12 +789,17 @@ final class SafariProfiles {
         return true
     }
 
-    private func switchFinished(_ outcome: ProfileSwitcher.Outcome, pending: PendingSwitch, position: Int) {
+    /// `since`: what the times are from, for the log.
+    private func switchFinished(_ outcome: ProfileSwitcher.Outcome, pending: PendingSwitch, position: Int, since: String) {
         switch outcome {
         case .raised(let milliseconds, let minimized):
-            log.notice("switched to profile \(position): its window was Safari's main window \(milliseconds) ms after the click\(minimized ? " (it was minimized)" : "", privacy: .public)")
+            log.notice("switched to profile \(position): its window was Safari's main window \(milliseconds) ms after \(since, privacy: .public)\(minimized ? " (it was minimized)" : "", privacy: .public)")
+            if minimized {
+                // How long a minimized window takes to land, for the next fade (#44).
+                arrivalEstimate = SwitchPreviewRules.arrivalEstimate(after: arrivalEstimate, measured: Double(milliseconds) / 1000)
+            }
         case .opened(let milliseconds):
-            log.notice("switched to profile \(position): it had no window; a new one appeared \(milliseconds) ms after the click")
+            log.notice("switched to profile \(position): it had no window; a new one appeared \(milliseconds) ms after \(since, privacy: .public)")
         case .superseded:
             break
         case .menuOutOfDate:
@@ -799,17 +817,17 @@ final class SafariProfiles {
     /// At the click: with "Minimize other profiles' windows" on, the target is nearly always in the Dock, so the
     /// sidebar fades over to the profile now, with its guess from the store alone (the copy's last focused
     /// window). Without the setting, it waits for the switch to say whether the target is minimized.
-    private func previewAtClick(id: Int, profile: SafariProfile) {
+    private func previewAtClick(id: Int, profile: SafariProfile, clickAt: Date) {
         guard let key = profile.key,
               SwitchPreviewRules.fades(targetIsMinimized: nil, minimizesOtherProfiles: settings.minimizesOtherProfiles) else { return }
         let guess = SwitchPreviewRules.guess(SwitchTarget(profile: key), copies: Array(store.liveSnapshots.values))
-        beginPreview(id: id, profile: key, guess: guess)
+        beginPreview(id: id, profile: key, guess: guess, arrivesAt: clickAt.addingTimeInterval(arrivalEstimate))
     }
 
     /// The switch has picked its window, through Accessibility, before bringing it forward: a better guess from
     /// its title, or, when the target is in the Dock and nothing is shown yet, the fade starts now. A target that's
     /// already open stays as it was: Safari reports it in about 0.1 s.
-    private func switchPicked(_ choice: ProfileSwitcher.TargetChoice, preview id: Int, profile: SafariProfile) {
+    private func switchPicked(_ choice: ProfileSwitcher.TargetChoice, preview id: Int, profile: SafariProfile, clickAt: Date) {
         guard id == latestPreview, let key = profiles.first(where: { $0.id == profile.id })?.key ?? profile.key else { return }
         let target = SwitchTarget(profile: key, title: choice.title, isNewWindow: choice.window == nil, profileWindowCount: choice.profileWindowCount)
         let guess = SwitchPreviewRules.guess(target, copies: Array(store.liveSnapshots.values))
@@ -817,17 +835,17 @@ final class SafariProfiles {
             store.refineSwitchPreview(id: id, guess: guess)
         } else if choice.window != nil,
                   SwitchPreviewRules.fades(targetIsMinimized: choice.isMinimized, minimizesOtherProfiles: settings.minimizesOtherProfiles) {
-            beginPreview(id: id, profile: key, guess: guess)
+            beginPreview(id: id, profile: key, guess: guess, arrivesAt: clickAt.addingTimeInterval(arrivalEstimate))
         }
         if guess == .unseen, let window = choice.window, store.switchPreview?.id == id {
             unseenTabs.preview(window)
         }
     }
 
-    private func beginPreview(id: Int, profile key: ProfileKey, guess: SwitchGuess) {
+    private func beginPreview(id: Int, profile key: ProfileKey, guess: SwitchGuess, arrivesAt: Date) {
         previewDockedNumber = dockedNumber
-        store.beginSwitchPreview(id: id, profile: key, guess: guess, fadeDuration: fadeDuration)
-        refreshFadeDuration()
+        store.beginSwitchPreview(id: id, profile: key, guess: guess, arrivesAt: arrivesAt)
+        refreshArrivalEstimate()
     }
 
     /// A minimized window is coming back some other way (a Dock tile, the Window menu, App Exposé): if it's
@@ -861,15 +879,21 @@ final class SafariProfiles {
         latestPreview += 1
         let guess = SwitchPreviewRules.guess(SwitchTarget(profile: key, title: title), copies: Array(store.liveSnapshots.values))
         log.notice("a minimized window of profile \(position) is coming back: the sidebar fades over to it")
-        beginPreview(id: latestPreview, profile: key, guess: guess)
+        // Its animation has begun already.
+        beginPreview(id: latestPreview, profile: key, guess: guess, arrivesAt: Date().addingTimeInterval(SwitchPreviewRules.alreadyOnItsWay))
     }
 
-    /// The Dock's minimize effect sets how long a window takes to come back from the Dock, and so the fade's.
-    private func refreshFadeDuration() {
+    /// The Dock's minimize effect sets how long a window takes to come back from the Dock, until switches have
+    /// measured it. A change of effect starts the estimate over.
+    private func refreshArrivalEstimate() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let duration = SwitchPreviewRules.fadeDuration(minimizeEffect: Self.minimizeEffect())
+            let effect = Self.minimizeEffect()
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.fadeDuration = duration }
+                MainActor.assumeIsolated {
+                    guard let self, self.minimizeEffect != .some(effect) else { return }
+                    self.minimizeEffect = .some(effect)
+                    self.arrivalEstimate = SwitchPreviewRules.arrivalEstimate(minimizeEffect: effect)
+                }
             }
         }
     }

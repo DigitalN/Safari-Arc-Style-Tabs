@@ -18,7 +18,7 @@ struct SidebarView: View {
                 TurnOnSideTabsRow()
                     .replaced(by: ClosedTabsList(isShown: $showsClosedTabs), when: showsClosedTabs && settings.closesUnviewedTabs)
                 BottomBar(showsClosedTabs: $showsClosedTabs)
-            } else if let content = store.shownContent {
+            } else if store.shownContent != nil || store.displayedContent != nil {
                 // Centered on the same line as Safari's toolbar when docked.
                 AddressBar()
                     .padding(.horizontal, 8)
@@ -31,15 +31,14 @@ struct SidebarView: View {
                                 .padding(.bottom, 8)
                         }
                         // While a switch's window comes back from the Dock, the sections fade over to its
-                        // profile (#44): the old ones fade out as the new ones fade in. Only a switch's start
-                        // changes this identity, so nothing else fades, and Safari's report, right or not,
-                        // swaps the contents in place.
-                        ZStack(alignment: .topLeading) {
+                        // profile (#44): the old ones fully out, then the new ones in, so the two are never on
+                        // screen together. One set of sections at a time; only the fade's steps animate, so
+                        // Safari's report, right or not, swaps the contents in place.
+                        if let content = store.displayedContent {
                             SidebarSections(content: content)
-                                .id(store.sidebarFade)
-                                .transition(.opacity)
+                                .opacity(store.sidebarFade.opacity)
+                                .animation(store.sidebarFade.animation, value: store.sidebarFade)
                         }
-                        .animation(.easeInOut(duration: store.sidebarFadeDuration), value: store.sidebarFade)
                     }
                     .coordinateSpace(.named(SidebarDrag.coordinateSpace))
                     .overlay(alignment: .topLeading) {
@@ -67,13 +66,24 @@ struct SidebarView: View {
     }
 }
 
+extension TabStore.SidebarFade {
+    /// How the step to this one animates: the fade-out quickly, the fade-in until the window lands, and the
+    /// swap in between not at all.
+    var animation: Animation? {
+        switch self {
+        case .out(let duration): .easeIn(duration: duration)
+        case .in(let duration): .easeOut(duration: duration)
+        case .hidden, .none: nil
+        }
+    }
+}
+
 /// Favorites, Pinned and Tabs, top to bottom (#34). Favorites and Pinned are the lists of the profile whose
 /// window the sidebar shows (#38), so both swap at once when another profile's window comes in front. A
 /// private window belongs to no profile and shows Tabs only, and so does every window with Favorites and
 /// Pinned turned off in Settings.
 private struct SidebarSections: View {
-    /// What to show (TabStore.shownContent). Taken as a value, so sections fading out keep showing what they
-    /// showed (#44).
+    /// What to show (TabStore.displayedContent).
     let content: TabStore.ShownContent
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
