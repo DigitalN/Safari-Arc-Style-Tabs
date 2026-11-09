@@ -392,6 +392,7 @@ do {
     click(store, tab: 3)
     var other = snapshotObject(seq: 1, active: 2, startedAt: earlier)
     other["instance"] = "other-instance"
+    other["profile"] = "OTHER-PROFILE"
     send(store, other)
     check(highlighted(store) == 3, "a snapshot of another extension instance doesn't touch this click's highlight")
     check(store.snapshots["other-instance"]?.windows.first?.tabs.first(where: \.active)?.id == 2, "and is applied as it is")
@@ -968,15 +969,17 @@ do {
 
 /// A snapshot of windows given as (window id, its tabs as (id, page)). `active` are the tabs showing
 /// in their windows. It starts after any link made before it, unless `startedAt` says otherwise.
+/// `from` is the extension copy that sends it, and `profile` that copy's profile (nil: the default one).
 func pagesSnapshot(
     seq: Int,
     from profile: String = instance,
+    in profileID: String? = nil,
     focused: Int = 1,
     startedAt: Double? = nil,
     _ windows: [(id: Int, tabs: [(id: Int, url: String)])],
     active: Set<Int> = []
 ) -> [String: Any] {
-    ["type": "snapshot", "instance": profile, "seq": seq, "focusedWindowId": focused, "lastFocusedWindowId": focused,
+    var object: [String: Any] = ["type": "snapshot", "instance": profile, "seq": seq, "focusedWindowId": focused, "lastFocusedWindowId": focused,
      "focusChangedAt": Double(seq), "startedAt": startedAt ?? nowMilliseconds() + 1,
      "windows": windows.map { window -> [String: Any] in
          ["id": window.id, "focused": window.id == focused, "incognito": false,
@@ -985,6 +988,8 @@ func pagesSnapshot(
                "active": active.contains(tab.id), "pinned": false, "audible": false, "muted": false, "loading": false]
           }]
      }]
+    if let profileID { object["profile"] = profileID }
+    return object
 }
 
 /// The tabs listed under Tabs in the window the sidebar shows.
@@ -1240,15 +1245,16 @@ do {
     var sent: [[String: Any]] = []
     store.sendCommand = { sent.append($0) }
     let other = "other-profile"
+    let work = "WORK-PROFILE"
     send(store, pagesSnapshot(seq: 1, [(1, [(1, "https://example.com/1")])], active: [1]))
     let saved = bookmark(store, news)
     let docs = bookmark(store, "https://docs.example/")
     openAndCreate(store, saved, commands: { sent }, tabId: 10)
     openAndCreate(store, docs, commands: { sent }, tabId: 12)
     send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, elsewhere), (12, "https://docs.example/")])], active: [10]))
-    send(store, pagesSnapshot(seq: 3, from: other, focused: 5, [(5, [(50, "https://example.com/5")])], active: [50]))
+    send(store, pagesSnapshot(seq: 3, from: other, in: work, focused: 5, [(5, [(50, "https://example.com/5")])], active: [50]))
     openAndCreate(store, saved, commands: { sent }, tabId: 51, from: other)
-    send(store, pagesSnapshot(seq: 4, from: other, focused: 5, [(5, [(50, "https://example.com/5"), (51, elsewhere)])], active: [51]))
+    send(store, pagesSnapshot(seq: 4, from: other, in: work, focused: 5, [(5, [(50, "https://example.com/5"), (51, elsewhere)])], active: [51]))
     check(store.bookmarkTabs.owners.count == 3, "three tabs belong to bookmarks before the restart")
     store.save()
 
@@ -1260,7 +1266,7 @@ do {
     check(reloaded.openTab(for: docs) == nil, "one that closed meanwhile is closed")
     check(listedIds(reloaded) == [1, 13], "and a tab on a bookmark's page that wasn't its tab stays under Tabs")
     check(reloaded.bookmarkTabs.owners[TabKey(instance: other, tabId: 51)] == saved.id, "a profile that hasn't reported yet keeps its links")
-    send(reloaded, pagesSnapshot(seq: 6, from: other, focused: 5, [(5, [(50, "https://example.com/5"), (51, elsewhere)])], active: [51]))
+    send(reloaded, pagesSnapshot(seq: 6, from: other, in: work, focused: 5, [(5, [(50, "https://example.com/5"), (51, elsewhere)])], active: [51]))
     check(reloaded.openTab(for: saved)?.id == 51, "and has them when it does")
 }
 
@@ -1307,6 +1313,211 @@ do {
     try! old.write(to: url, atomically: true, encoding: .utf8)
     let store = TabStore(stateURL: url)
     check(store.bookmarks.map(\.title) == ["Old"], "an older state.json without bookmarks' tabs still loads its bookmarks")
+}
+
+// MARK: - Copies of the extension that go quiet or are replaced (#31)
+
+/// A message other than a snapshot from a copy of the extension. `profile` is what the extension's handler
+/// adds: the profile's UUID, absent for the default profile.
+func message(_ type: String, from copy: String, in profile: String? = nil, _ fields: [String: Any] = [:]) -> [String: Any] {
+    var object: [String: Any] = ["type": type, "instance": copy]
+    if let profile { object["profile"] = profile }
+    return object.merging(fields) { $1 }
+}
+
+/// Sends a message and returns the store's reply.
+func reply(_ store: TabStore, _ object: [String: Any]) -> [String: Any] {
+    let data = try! JSONSerialization.data(withJSONObject: object)
+    return store.handleMessage(type: object["type"] as! String, payload: data, object: object)
+}
+
+do {
+    // A copy that sends nothing for 30 s is quiet: its windows are hidden until it speaks again.
+    let (store, _) = makeStore()
+    var ahead: TimeInterval = 0
+    store.clock = { Date().addingTimeInterval(ahead) }
+    check(store.liveInstances == [instance], "a copy that has sent a snapshot is live")
+    check(store.hasLiveCopy(profile: nil), "so its profile, the default one, has a live copy")
+    ahead = 29
+    store.noteQuietCopies()
+    check(store.currentWindow?.window.id == 1, "29 s without a message isn't quiet yet")
+    _ = reply(store, message("heartbeat", from: instance, ["seq": 1]))
+    ahead = 29 + 25
+    store.noteQuietCopies()
+    check(store.currentWindow?.window.id == 1, "a heartbeat counts as a message: 25 s after it the copy isn't quiet")
+    ahead = 29 + 31
+    store.noteQuietCopies()
+    check(store.liveInstances.isEmpty, "after 30 s without any message the copy is quiet")
+    check(store.currentWindow == nil, "and its window isn't shown")
+    check(store.snapshots[instance] != nil, "but its snapshot is kept")
+    check(!store.hasLiveCopy(profile: nil), "and its profile has no live copy")
+    let answer = reply(store, message("heartbeat", from: instance, ["seq": 1]))
+    check(store.currentWindow?.window.id == 1, "when it speaks again, its window is shown again")
+    check(answer["needSnapshot"] as? Bool == true, "and it's asked for a new snapshot, though it had sent its last one")
+    check(store.liveInstances == [instance] && store.hasLiveCopy(profile: nil), "and it's live")
+    let next = reply(store, message("heartbeat", from: instance, ["seq": 1]))
+    check(next["needSnapshot"] as? Bool == false, "after that, heartbeats are answered as before")
+}
+
+do {
+    // One profile's copy goes quiet; another's goes on. Only the quiet one's windows are hidden, whatever the
+    // docked window's title says.
+    let (store, commands) = makeStore()
+    var ahead: TimeInterval = 0
+    store.clock = { Date().addingTimeInterval(ahead) }
+    let work = "WORK-PROFILE"
+    send(store, pagesSnapshot(seq: 2, from: "work-copy", in: work, focused: 5, [(5, [(50, "https://example.com/5")])], active: [50]))
+    check(store.currentWindow?.instance == "work-copy", "the window focused last, the work profile's, is shown")
+    check(store.hasLiveCopy(profile: work) && store.hasLiveCopy(profile: nil), "both profiles have a live copy")
+    store.dockedWindowTitle = "Work — Page 50"
+    check(store.currentWindow?.window.id == 5, "the docked window's title picks the work window")
+    ahead = 20
+    _ = reply(store, message("heartbeat", from: instance, ["seq": 1]))
+    ahead = 31
+    store.noteQuietCopies()
+    check(store.liveInstances == [instance], "the copy that went silent is quiet, the other isn't")
+    check(!store.hasLiveCopy(profile: work) && store.hasLiveCopy(profile: nil), "so only the default profile has a live copy")
+    check(store.currentWindow?.instance == instance, "the quiet copy's window isn't shown, even though the docked window's title fits it")
+    let before = commands().filter { $0["action"] as? String == "snapshot" }.count
+    store.dockedWindowTitle = "Work — Page 51"
+    store.dockedWindowTitle = "Work — Page 50"
+    check(commands().filter { $0["action"] as? String == "snapshot" }.count > before,
+        "a docked window only a quiet copy reports counts as unknown, so Safari is asked for snapshots")
+}
+
+do {
+    // Whether the extension lacks website access is told from the tabs of the copies that are live, not from
+    // what a quiet copy last said.
+    let (store, _) = makeStore()
+    var ahead: TimeInterval = 0
+    store.clock = { Date().addingTimeInterval(ahead) }
+    var bare = pagesSnapshot(seq: 1, from: "bare-copy", in: "BARE-PROFILE", [(9, [(90, "")])])
+    bare["windows"] = [["id": 9, "focused": false, "incognito": false, "tabs": [["id": 90, "windowId": 9, "index": 0,
+        "active": true, "pinned": false, "audible": false, "muted": false, "loading": false]]]]
+    send(store, bare)
+    check(!store.lacksWebsiteAccess, "while one copy's tabs show URLs, there's website access")
+    ahead = 20
+    _ = reply(store, message("heartbeat", from: "bare-copy", ["seq": 1]))
+    ahead = 31
+    store.noteQuietCopies()
+    check(store.lacksWebsiteAccess, "once that copy is quiet, the live copy's tabs without URLs say there isn't")
+}
+
+do {
+    // When the extension reloads or is reinstalled, a new copy of each profile starts. Its first message, of any
+    // kind, replaces the old copy of its profile, which has stopped.
+    let (store, _) = makeStore()
+    _ = reply(store, message("hello", from: "new-copy", ["launchApp": true]))
+    check(store.snapshots[instance] == nil, "a newer copy of the same profile replaces the old one, and the old one's snapshot goes")
+    check(store.liveInstances == ["new-copy"], "only the newer copy is live")
+    check(store.currentWindow == nil, "the old copy's window isn't shown")
+    send(store, pagesSnapshot(seq: 1, from: "new-copy", focused: 7, [(7, [(70, "https://example.com/1")])], active: [70]))
+    check(store.currentWindow?.instance == "new-copy" && store.currentWindow?.window.id == 7, "the new copy's window is")
+
+    // Messages from the old copy that were still on their way are ignored.
+    send(store, snapshotObject(seq: 9, active: 2))
+    check(store.snapshots[instance] == nil, "a late snapshot from the replaced copy doesn't bring it back")
+    let answer = reply(store, message("heartbeat", from: instance, ["seq": 9]))
+    check(answer["needSnapshot"] == nil && !store.liveInstances.contains(instance), "nor does a late heartbeat")
+    check(store.currentWindow?.instance == "new-copy", "the new copy's window stays shown")
+}
+
+do {
+    // Copies are matched by profile: the UUID the extension's handler adds, or none for the default profile.
+    let (store, _) = makeStore()
+    send(store, pagesSnapshot(seq: 1, from: "work-copy", in: "WORK", focused: 5, [(5, [(50, "https://example.com/5")])]))
+    send(store, pagesSnapshot(seq: 1, from: "home-copy", in: "HOME", focused: 6, [(6, [(60, "https://example.com/6")])]))
+    check(Set(store.snapshots.keys) == [instance, "work-copy", "home-copy"], "copies of other profiles replace nothing")
+    _ = reply(store, message("heartbeat", from: "work-copy-2", in: "WORK", ["seq": 0]))
+    check(store.snapshots["work-copy"] == nil, "a newer copy with the same profile UUID replaces the old one")
+    check(Set(store.snapshots.keys) == [instance, "home-copy"], "and only that one")
+    check(store.liveInstances == [instance, "home-copy", "work-copy-2"], "the newer copy is live, though it hasn't sent a snapshot yet")
+    check(store.hasLiveCopy(profile: "WORK") && store.hasLiveCopy(profile: "HOME") && !store.hasLiveCopy(profile: "OTHER"),
+        "and each profile with a running copy has a live copy")
+    _ = reply(store, message("heartbeat", from: "work-copy-2", ["seq": 0]))
+    check(store.hasLiveCopy(profile: "WORK"), "a message without a profile from a copy known to have one doesn't make it the default profile's")
+    _ = reply(store, message("hello", from: "default-copy-2"))
+    check(store.liveInstances == ["home-copy", "work-copy-2", "default-copy-2"],
+        "so a newer copy of the default profile replaces only the default profile's old copy")
+}
+
+do {
+    // A replaced copy that keeps sending for 30 s is running after all (a second Safari, say). It's taken back,
+    // and doesn't replace the newer copy in turn.
+    let (store, _) = makeStore()
+    var ahead: TimeInterval = 0
+    store.clock = { Date().addingTimeInterval(ahead) }
+    _ = reply(store, message("heartbeat", from: "second-copy", ["seq": 0]))
+    check(store.snapshots[instance] == nil, "the newer copy replaces it")
+    ahead = 10
+    _ = reply(store, message("heartbeat", from: instance, ["seq": 1]))
+    check(!store.liveInstances.contains(instance), "its heartbeat soon after is taken for one that was on its way")
+    ahead = 31
+    let answer = reply(store, message("heartbeat", from: instance, ["seq": 1]))
+    check(store.liveInstances == [instance, "second-copy"], "still sending 30 s after it was replaced, it's taken back")
+    check(answer["needSnapshot"] as? Bool == true, "and asked for a snapshot")
+    send(store, snapshotObject(seq: 2, active: 1))
+    check(store.snapshots[instance] != nil, "which is applied")
+    _ = reply(store, message("heartbeat", from: "second-copy", ["seq": 0]))
+    check(store.liveInstances == [instance, "second-copy"], "and neither copy replaces the other after that")
+}
+
+do {
+    // Safari quits: every copy is gone. After it starts again, its copies are new.
+    let (store, _) = makeStore()
+    store.safariDidTerminate()
+    check(store.liveInstances.isEmpty && !store.hasLiveCopy(profile: nil), "after Safari quits, no copy is live")
+    send(store, pagesSnapshot(seq: 1, from: "after-restart", focused: 3, [(3, [(30, "https://example.com/1")])], active: [30]))
+    check(store.liveInstances == ["after-restart"] && store.currentWindow?.window.id == 3, "the copy that starts with Safari is")
+}
+
+do {
+    // A quiet copy keeps its bookmarks' tabs, cleanup's clocks and custom names, so a pause under load loses
+    // nothing. Once a newer copy of its profile replaces it, they go through the paths for a copy that's gone:
+    // the clocks are dropped, and the bookmark and the name go to the new copy's tab on the same page.
+    let (store, commands) = makeStore()
+    var ahead: TimeInterval = 0
+    store.clock = { Date().addingTimeInterval(ahead) }
+    store.cleanup.setOn(true, tabs: store.snapshots)
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, news)])], active: [1]))
+    store.beginRename(.tab(TabKey(instance: instance, tabId: 1)))
+    store.commitRename("Mine")
+    let old = { (tabId: Int) in TabKey(instance: instance, tabId: tabId) }
+    check(store.bookmarkTabs.owners[old(10)] == saved.id, "the bookmark has its tab")
+    check(store.cleanup.lastViewed[old(1)] != nil && store.cleanup.lastViewed[old(10)] != nil, "the tabs have clocks")
+    check(store.hasCustomName(old(1)), "and a tab has a custom name")
+
+    ahead = 31
+    store.noteQuietCopies()
+    check(store.currentWindow == nil, "the copy is quiet")
+    check(store.bookmarkTabs.owners[old(10)] == saved.id, "a quiet copy's bookmark's tab stays the bookmark's")
+    check(store.cleanup.lastViewed[old(1)] != nil && store.cleanup.lastViewed[old(10)] != nil, "its tabs keep their clocks")
+    check(store.hasCustomName(old(1)), "and their custom names")
+
+    // Another profile's copy starting meanwhile takes none of it.
+    send(store, pagesSnapshot(seq: 1, from: "work-copy", in: "WORK", focused: 5, [(5, [(50, news), (51, "https://example.com/1")])], active: [50]))
+    check(store.bookmarkTabs.owners[old(10)] == saved.id, "a new copy of another profile starting meanwhile leaves the bookmark's tab alone")
+    check(store.bookmarkTabs.owners[TabKey(instance: "work-copy", tabId: 50)] == nil, "and its tab on the saved page doesn't take it")
+    check(store.hasCustomName(old(1)) && !store.hasCustomName(TabKey(instance: "work-copy", tabId: 51)), "nor the custom name")
+    check(store.cleanup.lastViewed[old(1)] != nil, "and the clocks stay")
+
+    send(store, pagesSnapshot(seq: 3, [(1, [(1, "https://example.com/1"), (10, news)])], active: [10]))
+    check(store.currentWindow?.instance == instance, "when the copy speaks again, its window is back")
+    check(store.openTab(for: saved)?.id == 10, "with the bookmark's tab still its own")
+
+    // Side Tabs is turned off in the profile, and later on again: a newer copy of the profile starts.
+    ahead = 70
+    store.noteQuietCopies()
+    send(store, pagesSnapshot(seq: 1, from: "newer-copy", focused: 8, [(8, [(81, "https://example.com/1"), (82, news)])], active: [81]))
+    check(store.snapshots[instance] == nil, "once a newer copy of its profile reports, the old copy is gone")
+    check(store.bookmarkTabs.owners[old(10)] == nil, "its bookmark's tab is no longer the bookmark's")
+    check(store.bookmarkTabs.owners[TabKey(instance: "newer-copy", tabId: 82)] == saved.id, "the new copy's tab on the saved page is")
+    check(!store.cleanup.lastViewed.keys.contains { $0.instance == instance }, "the old copy's clocks are dropped")
+    check(store.cleanup.lastViewed[TabKey(instance: "newer-copy", tabId: 81)] != nil, "and the new copy's tabs have clocks")
+    let renamed = store.tab(for: TabKey(instance: "newer-copy", tabId: 81))
+    check(renamed.map { store.displayTitle(for: $0, instance: "newer-copy") } == "Mine", "the custom name goes to the new copy's tab on that page")
 }
 
 try? FileManager.default.removeItem(at: stateFolder)

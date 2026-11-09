@@ -521,6 +521,45 @@ do {
     check(TabCleanup.reopenWindow(forProfile: "work", in: [:], current: nil) == nil, "with no windows at all, there's nowhere")
 }
 
+// MARK: - Copies of the extension that go quiet (#31)
+
+do {
+    // A copy that has sent nothing for a while may be stopped, or held up by load, and what it last said may be
+    // old: cleanup closes none of its tabs and reopens nothing in its windows. Its clocks are kept, and once it
+    // speaks again, its tabs are closed as before.
+    now = start
+    let (store, commands) = twoProfiles()
+    var ahead: TimeInterval = 0
+    store.clock = { Date().addingTimeInterval(ahead) }
+    send(store, snapshotObject("B", seq: 2, profile: "work", focused: 5, focusChangedAt: 5, [
+        windowObject(5, [tabObject(50, window: 5, active: true), tabObject(51, window: 5)]),
+    ]))
+    ahead = 20
+    send(store, ["type": "heartbeat", "instance": "A", "profile": "home", "seq": 1])
+    ahead = 31
+    store.noteQuietCopies()
+    check(store.liveInstances == ["A"], "B, the work profile's copy, is quiet")
+
+    now = start + 2 * day
+    store.runCleanup(after: day)
+    check(closedIds(commands()).isEmpty, "a quiet copy's tabs aren't closed")
+    check(store.cleanup.lastViewed[key(51, "B")] == start, "but keep their clocks")
+
+    var work = closedTab(1, closedAt: start)
+    work.profile = "work"
+    store.cleanup.record([work])
+    store.reopen(work)
+    let create = creates(commands()).last ?? [:]
+    check(create["instance"] as? String == "A" && create["windowId"] as? Int == 1,
+          "a tab of a profile whose copy is quiet reopens in the current window, not in a window of the quiet copy")
+
+    ahead = 32
+    send(store, ["type": "heartbeat", "instance": "B", "profile": "work", "seq": 2])
+    store.runCleanup(after: day)
+    check(closedIds(commands()) == [[51]], "once the copy speaks again, its tab nobody looked at is closed")
+    now = start
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

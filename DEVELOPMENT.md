@@ -157,7 +157,11 @@ separate window that the app keeps attached to Safari's window:
   fetches favicons for the app, which never connects to websites itself: reaching a
   device on the local network, like a router, would make macOS ask for Local Network
   access. `content.js` reports each page's favicon URL, which Safari's tabs API doesn't
-  provide.
+  provide. Safari can lose a native message's reply, so `background.js` gives up on each
+  message after 4 seconds and counts it as not delivered. Each Safari profile runs its own
+  copy of `background.js`; the app hides a copy's windows after 30 seconds without a
+  message from it, and drops the copy once a newer copy of the same profile reports (after
+  the extension reloads or is reinstalled).
 - `SideTabsExtension/`: the extension's native handler. It passes messages to the app
   over a CFMessagePort named after the app group, which is what lets the sandboxed
   extension reach the app.
