@@ -1,0 +1,10 @@
+{"role":"AXApplication","title":"Dock","children":[
+  {"role":"AXList","frame":[0,296,66,300],"children":[
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Finder","url":"file:///System/Library/CoreServices/Finder.app/","frame":[0,300,66,56]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Safari","url":"file:///System/Applications/Notes.app/","frame":[0,356,66,56]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Сафари","url":"file:///Applications/Safari.app","frame":[0,412,66,56]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Calendar","url":"file:///System/Applications/Calendar.app/","frame":[0,468,66,56]},
+    {"role":"AXDockItem","subrole":"AXSeparatorDockItem","title":"","frame":[0,524,66,12]},
+    {"role":"AXDockItem","subrole":"AXTrashDockItem","title":"Trash","url":"file:///Users/tester/.Trash/","frame":[0,536,66,56]}
+  ]}
+]}

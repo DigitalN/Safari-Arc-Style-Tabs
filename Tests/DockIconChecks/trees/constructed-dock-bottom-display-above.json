@@ -1,0 +1,8 @@
+{"role":"AXApplication","title":"Dock","children":[
+  {"role":"AXList","frame":[696,-66,232,66],"children":[
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Finder","url":"file:///System/Library/CoreServices/Finder.app/","frame":[700,-66,56,66]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Safari","url":"file:///System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/","frame":[756,-66,56,66]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Mail","url":"file:///System/Applications/Mail.app/","frame":[812,-66,56,66]},
+    {"role":"AXDockItem","subrole":"AXTrashDockItem","title":"Trash","url":"file:///Users/tester/.Trash/","frame":[868,-66,56,66]}
+  ]}
+]}

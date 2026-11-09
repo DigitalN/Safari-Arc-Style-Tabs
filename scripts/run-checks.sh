@@ -95,6 +95,15 @@ swiftc -o "$WORK/unseen-checks" \
     Tests/UnseenWindowChecks/main.swift SideTabs/TabBarFinder.swift SideTabs/TabBarMatcher.swift
 "$WORK/unseen-checks"
 
+# A click on Safari's Dock icon (#42): Safari's item found in the Dock's tree by its bundle, never its
+# title or a minimized window's tile, wherever the Dock is; and only a plain click on it counts, not a
+# press held long enough for the icon's menu, a choice in that menu, a drag, or a press that starts or
+# ends elsewhere. Against constructed trees in Tests/DockIconChecks/trees.
+echo "== Dock icon"
+swiftc -o "$WORK/dock-icon-checks" \
+    Tests/DockIconChecks/main.swift SideTabs/SafariDockIconWatcher.swift SideTabs/AccessibilityQuery.swift Shared/Bridge.swift
+"$WORK/dock-icon-checks"
+
 # A row has one mouse gesture, the one sidebarRowGesture attaches. A press gesture of its own,
 # inside the reorder gesture, wins every press and the reorder never starts (#20).
 # How the favorites' grid lays out tiles, at every width SwiftUI proposes (#34).

@@ -1,0 +1,14 @@
+{"role":"AXApplication","title":"Dock","children":[
+  {"role":"AXList","frame":[436,916,524,66],"children":[
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Finder","url":"file:///System/Library/CoreServices/Finder.app/","frame":[440,916,56,66]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Safari","url":"file:///System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/","frame":[496,916,56,66]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Mail","url":"file:///System/Applications/Mail.app/","frame":[552,916,56,66]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Safari Technology Preview","url":"file:///Applications/Safari%20Technology%20Preview.app/","frame":[608,916,56,66]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Safari","url":"file:///Users/tester/Applications/Safari.app/","frame":[664,916,56,66]},
+    {"role":"AXDockItem","subrole":"AXSeparatorDockItem","title":"","frame":[720,916,12,66]},
+    {"role":"AXDockItem","subrole":"AXFolderDockItem","title":"Downloads","url":"file:///Users/tester/Downloads/","frame":[732,916,56,66]},
+    {"role":"AXDockItem","subrole":"AXMinimizedWindowDockItem","title":"Test page","url":"file:///System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/","frame":[788,916,56,66]},
+    {"role":"AXDockItem","subrole":"AXURLDockItem","title":"Safari","url":"https://example.com/","frame":[844,916,56,66]},
+    {"role":"AXDockItem","subrole":"AXTrashDockItem","title":"Trash","url":"file:///Users/tester/.Trash/","frame":[900,916,56,66]}
+  ]}
+]}
