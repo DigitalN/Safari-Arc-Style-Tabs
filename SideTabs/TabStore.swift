@@ -82,7 +82,10 @@ final class TabStore {
     private(set) var snapshots: [String: Snapshot] = [:] {
         // Any change to which tab is active (a snapshot, a report of a switch, a click) starts or
         // stops a tab's cleanup clock.
-        didSet { cleanup.snapshotsChanged(from: oldValue, to: snapshots) }
+        didSet {
+            cleanup.snapshotsChanged(from: oldValue, to: snapshots)
+            settleSwitchPreview()
+        }
     }
     /// Closes tabs nobody has looked at for a while, when that's turned on, and keeps the list for
     /// reopening them (TabCleanup.swift).
@@ -117,10 +120,32 @@ final class TabStore {
     var dockedWindowIsPrivate = false
     /// How many of Safari's windows are like the docked one, from their toolbars (SafariProfiles): of its
     /// profile, or private. A copy that lists that many can see them all, and is only behind on a title.
-    var dockedLikeWindowCount: Int?
+    var dockedLikeWindowCount: Int? {
+        didSet { settleSwitchPreview() }
+    }
     /// The docked window has been open long enough for its copy to have reported it: about 2 s, and longer
     /// right after Side Tabs starts (SafariProfiles). Before that, a copy that doesn't list it yet says nothing.
-    var dockedWindowSettled = false
+    var dockedWindowSettled = false {
+        didSet { settleSwitchPreview() }
+    }
+
+    /// What the sidebar shows while a profile switch's window comes back from the Dock (#44): its guess at
+    /// the switch's profile and window, in place of `currentWindow`, until Safari reports.
+    struct SwitchPreview: Equatable {
+        /// The switch's: a newer click supersedes it.
+        let id: Int
+        let profile: ProfileKey
+        var guess: SwitchGuess
+        /// Safari has shown the switch's profile in front: the preview ends as soon as the sidebar's own choice
+        /// is a window of that profile.
+        var reported = false
+    }
+    /// Nil when the sidebar follows Safari, as it does but for a switch's window coming back from the Dock.
+    private(set) var switchPreview: SwitchPreview?
+    /// Bumped when a preview starts, which fades the sidebar's sections over to it; nothing else does.
+    private(set) var sidebarFade = 0
+    /// How long that fade takes.
+    private(set) var sidebarFadeDuration: TimeInterval = 0.3
 
     @ObservationIgnored var sendCommand: (([String: Any]) -> Void)?
     @ObservationIgnored var onToggleSidebar: (() -> Void)?
@@ -1015,8 +1040,9 @@ final class TabStore {
 
     // MARK: - Address bar
 
+    /// The active tab of the window the sidebar shows (`shownWindow`): during a switch, the guessed window's.
     var activeTab: (tab: BrowserTab, instance: String)? {
-        guard let selection = currentWindow, let tab = selection.window.tabs.first(where: \.active) else { return nil }
+        guard let selection = shownWindow, let tab = selection.window.tabs.first(where: \.active) else { return nil }
         return (tab, selection.instance)
     }
 
@@ -1295,16 +1321,126 @@ final class TabStore {
         currentWindow.flatMap { profile(of: $0.window, instance: $0.instance) } ?? unseenDockedWindow?.profile
     }
 
-    /// The Favorites the sidebar shows: those of the current window's profile (#38). Nil in a private
-    /// window, which shows Tabs only.
+    /// The Favorites the sidebar shows: those of the current window's profile (#38), or of the profile a
+    /// switch is bringing forward (#44). Nil in a private window, which shows Tabs only.
     var currentFavoritesList: BookmarkList? {
-        currentWindowProfile.map(BookmarkList.favorites)
+        shownProfile.map(BookmarkList.favorites)
     }
 
-    /// The Pinned list the sidebar shows: that of the current window's profile. Nil in a private
-    /// window, which shows Tabs only.
+    /// The Pinned list the sidebar shows: that of the current window's profile, or of the profile a switch
+    /// is bringing forward. Nil in a private window, which shows Tabs only.
     var currentPinnedList: BookmarkList? {
-        currentWindowProfile.map(BookmarkList.pinned)
+        shownProfile.map(BookmarkList.pinned)
+    }
+
+    // MARK: - A switch's window on its way in (#44)
+
+    /// What the sidebar's sections show.
+    enum ShownContent: Equatable {
+        case window(WindowSelection)
+        /// A window its profile's copy can't see (#41): its profile's lists (none for a private window), and its
+        /// tabs from the tab bar.
+        case unseen(profile: ProfileKey?)
+        /// A switch's profile whose window isn't known yet: its lists, and a placeholder for Tabs.
+        case placeholder(ProfileKey)
+    }
+
+    /// The window whose tabs the sidebar shows: a switch's guessed window while there is one, otherwise
+    /// `currentWindow`. Commands that act on the window Safari has in front go by `currentWindow`.
+    var shownWindow: WindowSelection? {
+        guard let preview = switchPreview else { return currentWindow }
+        guard case .window(let instance, let windowId) = preview.guess,
+              let window = liveSnapshots[instance]?.windows.first(where: { $0.id == windowId }) else { return nil }
+        return WindowSelection(instance: instance, window: window)
+    }
+
+    /// What the sidebar's sections show, or nil for none.
+    var shownContent: ShownContent? {
+        if let preview = switchPreview {
+            switch preview.guess {
+            case .window: return shownWindow.map(ShownContent.window) ?? .placeholder(preview.profile)
+            case .unseen: return .unseen(profile: preview.profile)
+            case .placeholder: return .placeholder(preview.profile)
+            }
+        }
+        if let window = currentWindow {
+            return .window(window)
+        }
+        return unseenDockedWindow.map { .unseen(profile: $0.profile) }
+    }
+
+    /// The profile whose Favorites and Pinned the sidebar shows.
+    var shownProfile: ProfileKey? {
+        switchPreview?.profile ?? currentWindowProfile
+    }
+
+    /// What the sidebar would show without a preview, in a guess's terms.
+    private var reportedContent: SwitchGuess? {
+        if let window = currentWindow {
+            return .window(instance: window.instance, windowId: window.window.id)
+        }
+        return unseenDockedWindow != nil ? .unseen : nil
+    }
+
+    /// A switch's window is coming back from the Dock: the sidebar shows `guess` for `profile` at once,
+    /// fading over to it in `fadeDuration`. Replaces an older switch's preview.
+    func beginSwitchPreview(id: Int, profile: ProfileKey, guess: SwitchGuess, fadeDuration: TimeInterval) {
+        switchPreview = SwitchPreview(id: id, profile: profile, guess: guess)
+        sidebarFadeDuration = fadeDuration
+        sidebarFade += 1
+        log.notice("the sidebar shows \(Self.describe(profile.isDefault ? nil : profile.rawValue), privacy: .public) at the switch: \(Self.describe(guess), privacy: .public), fading over in \(Int(fadeDuration * 1000)) ms")
+        DispatchQueue.main.asyncAfter(deadline: .now() + SwitchPreviewRules.lifetime) { [weak self] in
+            guard let self, self.switchPreview?.id == id else { return }
+            self.endSwitchPreview(because: "Safari didn't report the switch's window in time")
+        }
+    }
+
+    /// The switch has picked its window: a better guess replaces the first, with no second fade.
+    func refineSwitchPreview(id: Int, guess: SwitchGuess) {
+        guard var preview = switchPreview, preview.id == id, preview.guess != guess else { return }
+        preview.guess = guess
+        switchPreview = preview
+        log.notice("the switch picked its window: the sidebar now shows \(Self.describe(guess), privacy: .public)")
+    }
+
+    /// Safari shows a window of `profile` in front. The preview ends once the sidebar's own choice is that
+    /// profile's window: right away, or when the copy reports it.
+    func confirmSwitchPreview(profile: ProfileKey) {
+        guard var preview = switchPreview, preview.profile == profile, !preview.reported else { return }
+        preview.reported = true
+        switchPreview = preview
+        settleSwitchPreview()
+    }
+
+    /// The sidebar goes back to following Safari, with no fade: the switch failed, or another window came to
+    /// the front.
+    func endSwitchPreview(because reason: String) {
+        guard switchPreview != nil else { return }
+        switchPreview = nil
+        log.notice("the sidebar follows Safari again: \(reason, privacy: .public)")
+    }
+
+    /// Ends a reported preview once the sidebar's own choice is a window of its profile: it keeps what it showed
+    /// if the guess was right, and otherwise changes to that window without a fade.
+    private func settleSwitchPreview() {
+        guard let preview = switchPreview, preview.reported, currentWindowProfile == preview.profile,
+              let shown = reportedContent else { return }
+        switchPreview = nil
+        switch SwitchPreviewRules.report(preview.guess, shown: shown) {
+        case .kept:
+            log.notice("Safari reported the switch's window: the sidebar's guess was right")
+        case .corrected:
+            log.notice("Safari reported the switch's window: the sidebar changes from \(Self.describe(preview.guess), privacy: .public) to \(Self.describe(shown), privacy: .public)")
+        }
+    }
+
+    /// A guess for the log: never a title.
+    private static func describe(_ guess: SwitchGuess) -> String {
+        switch guess {
+        case .window(let instance, let windowId): "window \(windowId) of copy \(instance.prefix(8))"
+        case .placeholder: "its lists, with Tabs to come"
+        case .unseen: "a window its copy can't see, from the tab bar"
+        }
     }
 
     /// The profile last named in the log by `logShownSpace`.

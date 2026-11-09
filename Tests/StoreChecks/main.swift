@@ -2183,6 +2183,116 @@ do {
     check(snapshotCommands(commands(), to: instance) == 1, "a copy that speaks again after going quiet is sent a snapshot command")
 }
 
+// MARK: - What the sidebar shows while a switch's window comes back from the Dock (#44)
+
+/// A copy's snapshot with several windows, none focused, `lastFocused` the one it had last.
+func copyWindows(_ copy: String, profile: String?, seq: Int, _ windows: [(id: Int, page: String)], lastFocused: Int?, at: Double) -> [String: Any] {
+    var object: [String: Any] = [
+        "type": "snapshot", "instance": copy, "seq": seq, "focusedWindowId": -1, "focusChangedAt": at,
+        "windows": windows.map { window in
+            ["id": window.id, "focused": false, "incognito": false,
+             "tabs": [["id": window.id * 100, "windowId": window.id, "index": 0, "title": window.page,
+                       "url": "https://example.com/\(window.id)", "active": true, "pinned": false, "audible": false,
+                       "muted": false, "loading": false] as [String: Any]]] as [String: Any]
+        },
+    ]
+    if let lastFocused { object["lastFocusedWindowId"] = lastFocused }
+    if let profile { object["profile"] = profile }
+    return object
+}
+
+let switchedWork = ProfileKey(rawValue: workProfile)
+
+do {
+    // Personal's window is in front; Work's two windows are in the Dock, the one used last is 8.
+    let store = storeWithoutCopies()
+    send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: true, at: 100))
+    send(store, copyWindows("B", profile: workProfile, seq: 1, [(7, "Docs"), (8, "News")], lastFocused: 8, at: 50))
+    store.dockedWindowProfile = "default"
+    store.dockedWindowTitle = "Personal — Mail"
+    check(store.shownWindow?.instance == "A" && store.shownProfile == .defaultProfile && store.switchPreview == nil,
+          "until a switch, the sidebar shows the window in front")
+    let fade = store.sidebarFade
+
+    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 8), fadeDuration: 0.25)
+    check(store.shownWindow?.instance == "B" && store.shownWindow?.window.id == 8, "at the switch, the guessed window's tabs, at once")
+    check(store.shownProfile == switchedWork && store.currentFavoritesList == .favorites(switchedWork) && store.currentPinnedList == .pinned(switchedWork),
+          "and its profile's Favorites and Pinned")
+    check(store.sidebarFade == fade + 1 && store.sidebarFadeDuration == 0.25, "fading over to them")
+    check(store.currentWindow?.instance == "A", "while the window Safari has in front is still the one commands act on")
+    check(store.activeTab?.instance == "B", "the address bar shows the guessed window's page")
+
+    store.refineSwitchPreview(id: 1, guess: .placeholder)
+    check(store.shownContent == .placeholder(switchedWork) && store.shownWindow == nil && store.activeTab == nil,
+          "a placeholder shows the profile's lists and no window's tabs")
+    store.refineSwitchPreview(id: 1, guess: .window(instance: "B", windowId: 8))
+    check(store.sidebarFade == fade + 1, "a better guess replaces the first with no second fade")
+
+    // Safari reports a window of another profile than the switch's: the guess stays.
+    store.confirmSwitchPreview(profile: .defaultProfile)
+    check(store.switchPreview != nil, "a report of another profile doesn't end the guess")
+
+    // Safari reports the switch's window: the docked window is Work's window 8.
+    store.dockedWindowProfile = workProfile
+    store.dockedWindowTitle = "Work — News"
+    store.confirmSwitchPreview(profile: switchedWork)
+    check(store.switchPreview == nil, "once Safari shows the switch's profile, and the sidebar's own choice is its window, the guess ends")
+    check(store.shownWindow?.instance == "B" && store.shownWindow?.window.id == 8, "a right guess: the sidebar keeps what it showed")
+    check(store.sidebarFade == fade + 1, "with no second fade")
+}
+
+do {
+    // A wrong guess: Safari brings window 7 forward.
+    let store = storeWithoutCopies()
+    send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: true, at: 100))
+    send(store, copyWindows("B", profile: workProfile, seq: 1, [(7, "Docs"), (8, "News")], lastFocused: 8, at: 50))
+    store.dockedWindowProfile = "default"
+    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 8), fadeDuration: 0.35)
+    let fade = store.sidebarFade
+    store.dockedWindowProfile = workProfile
+    store.dockedWindowTitle = "Work — Docs"
+    store.confirmSwitchPreview(profile: switchedWork)
+    check(store.switchPreview == nil && store.shownWindow?.window.id == 7, "a wrong guess changes to the window Safari reported")
+    check(store.sidebarFade == fade, "without a second fade")
+}
+
+do {
+    // A new window: Work had none. Safari shows it in front before Work's copy reports it.
+    let store = storeWithoutCopies()
+    send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: true, at: 100))
+    send(store, copyWindows("B", profile: workProfile, seq: 1, [], lastFocused: nil, at: 50))
+    store.dockedWindowProfile = "default"
+    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .placeholder, fadeDuration: 0.25)
+    store.dockedWindowProfile = workProfile
+    store.dockedWindowTitle = "Work — Start Page"
+    store.confirmSwitchPreview(profile: switchedWork)
+    check(store.switchPreview != nil && store.shownContent == .placeholder(switchedWork),
+          "while the sidebar's own choice is still another profile's window, the placeholder stays: never another window's tabs")
+    send(store, copyWindows("B", profile: workProfile, seq: 2, [(9, "Start Page")], lastFocused: 9, at: 300))
+    check(store.switchPreview == nil && store.shownWindow?.instance == "B" && store.shownWindow?.window.id == 9,
+          "once Work's copy reports the new window, the sidebar shows it")
+}
+
+do {
+    // A newer click supersedes an older switch's guess; the sidebar can go back to following Safari.
+    let store = storeWithoutCopies()
+    send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: true, at: 100))
+    send(store, copyWindows("B", profile: workProfile, seq: 1, [(7, "Docs")], lastFocused: 7, at: 50))
+    store.dockedWindowProfile = "default"
+    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 7), fadeDuration: 0.25)
+    store.beginSwitchPreview(id: 2, profile: .defaultProfile, guess: .window(instance: "A", windowId: 1), fadeDuration: 0.25)
+    store.refineSwitchPreview(id: 1, guess: .placeholder)
+    check(store.switchPreview?.id == 2 && store.shownWindow?.instance == "A", "a newer click's guess replaces the older one, whose news is ignored")
+    store.confirmSwitchPreview(profile: switchedWork)
+    check(store.switchPreview?.id == 2, "and so is a report of the older switch's profile")
+    store.endSwitchPreview(because: "the switch didn't work")
+    check(store.switchPreview == nil && store.shownWindow?.instance == "A", "a switch that didn't work: the sidebar follows Safari again")
+
+    // #41: a target its copy can't see shows its profile's lists and the tab bar list.
+    store.beginSwitchPreview(id: 3, profile: switchedWork, guess: .unseen, fadeDuration: 0.25)
+    check(store.shownContent == .unseen(profile: switchedWork) && store.shownProfile == switchedWork, "a window its copy can't see: its profile's lists, and the tab bar list")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

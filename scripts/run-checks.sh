@@ -21,7 +21,7 @@ echo "== TabStore"
 swiftc -o "$WORK/store-checks" \
     Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift SideTabs/TabBarMatcher.swift \
     SideTabs/BookmarkTabs.swift Shared/Bridge.swift SideTabs/TabCleanup.swift \
-    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift
+    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift
 "$WORK/store-checks"
 
 # Which tabs cleanup closes, the clocks it keeps, its list of closed tabs and reopening them (#27).
@@ -30,7 +30,7 @@ echo "== tab cleanup"
 swiftc -o "$WORK/cleanup-checks" \
     Tests/TabCleanupChecks/main.swift SideTabs/TabCleanup.swift SideTabs/TabStore.swift SideTabs/Models.swift \
     SideTabs/TabBarMatcher.swift SideTabs/AppSettings.swift SideTabs/BookmarkTabs.swift Shared/Bridge.swift \
-    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift
+    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift
 "$WORK/cleanup-checks"
 
 echo "== click actions"
@@ -95,6 +95,14 @@ swiftc -o "$WORK/minimize-checks" \
     Tests/MinimizeChecks/main.swift SideTabs/MinimizeRules.swift SideTabs/ProfileRules.swift \
     SideTabs/SafariProfile.swift SideTabs/ProfileKey.swift
 "$WORK/minimize-checks"
+
+# What the sidebar shows while a profile switch's window comes back from the Dock (#44): the switch's target matched
+# to a window of the profile's extension copy, the placeholder when it can't be told, what Safari's report does to
+# the guess, and when the sidebar fades. How the store shows it is among the store checks.
+echo "== the sidebar during a switch"
+swiftc -o "$WORK/switch-preview-checks" \
+    Tests/SwitchPreviewChecks/main.swift SideTabs/SwitchPreviewRules.swift SideTabs/Models.swift SideTabs/ProfileKey.swift
+"$WORK/switch-preview-checks"
 # A profile's name is the user's own words, so it stays out of the log like titles and URLs do.
 # Positions, symbols and the copy's profile UUID are fine.
 if grep -nE '(\blog\.(notice|info|error|debug|warning|fault)|\bnote)\(.*\\\([^)]*\b(name|names|profileName|rowName)\b' \
