@@ -55,7 +55,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .environment(settings)
             .environment(favicons)
             .environment(rows)
-            .environment(safariProfiles))
+            .environment(safariProfiles)
+            // The gear in the sidebar's bottom bar (#43).
+            .environment(\.showSideTabsSettings, ShowSettingsAction { [weak self] in self?.showSettings() }))
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
         self.dock = dock
 

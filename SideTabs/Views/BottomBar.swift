@@ -3,11 +3,13 @@ import SwiftUI
 
 /// The bar along the bottom of the sidebar. On the left, where Arc keeps its Archive, is the button
 /// for the tabs cleanup closed (while cleanup is on). In the middle, one button per Safari profile,
-/// in Safari's order (#33); on the right, a + for a new profile. The + always shows, so the bar is
-/// always there; with a single profile, only the + shows.
+/// in Safari's order (#33); on the right, a + for a new profile, with the Settings gear directly
+/// above it (#43). The + and the gear always show, so the bar is always there; with a single
+/// profile, only they show.
 ///
 /// The profile buttons are centred in the sidebar whatever the ends hold (#39), and when they don't
-/// fit in the same room on both sides, one dropdown takes their place (ProfileBarLayout).
+/// fit in the same room on both sides, one dropdown takes their place (ProfileBarLayout). The gear
+/// is a row up, so it takes none of their room.
 struct BottomBar: View {
     @Binding var showsClosedTabs: Bool
     @Environment(AppSettings.self) private var settings
@@ -15,7 +17,7 @@ struct BottomBar: View {
     /// The bar's width inside its insets, and its two ends', as last laid out.
     @State private var barWidth: CGFloat?
     @State private var leadingWidth: CGFloat = 0
-    @State private var trailingWidth = ProfileBarLayout.sideButtonWidth
+    @State private var trailingWidth = ProfileBarLayout.trailingWidth
 
     private var layout: ProfileBarLayout.Middle {
         ProfileBarLayout.middle(
@@ -27,20 +29,25 @@ struct BottomBar: View {
     }
 
     var body: some View {
-        // The ends at the edges, and the middle centred over them in the whole bar, so an empty end
-        // (cleanup off) can't pull it to one side.
-        ZStack {
-            HStack(spacing: 0) {
-                HStack(spacing: 4) { leading }
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { leadingWidth = $0 }
-                Spacer(minLength: 0)
-                HStack(spacing: 4) { trailing }
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { trailingWidth = $0 }
+        // The gear on a row of its own at the right, so it sits directly over the + and the row
+        // below keeps its ends as they were.
+        VStack(alignment: .trailing, spacing: ProfileBarLayout.buttonSpacing) {
+            SettingsButton()
+            // The ends at the edges, and the middle centred over them in the whole bar, so an empty
+            // end (cleanup off) can't pull it to one side.
+            ZStack {
+                HStack(spacing: 0) {
+                    HStack(spacing: 4) { leading }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { leadingWidth = $0 }
+                    Spacer(minLength: 0)
+                    HStack(spacing: 4) { trailing }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { trailingWidth = $0 }
+                }
+                middle
             }
-            middle
+            .frame(maxWidth: .infinity)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { barWidth = $0 }
         }
-        .frame(maxWidth: .infinity)
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { barWidth = $0 }
         .padding(.horizontal, ProfileBarLayout.barInset)
         .padding(.top, 4)
         .padding(.bottom, 8)
@@ -235,6 +242,35 @@ private struct BarButton: View {
         .help(help)
         .accessibilityLabel(help)
     }
+}
+
+/// Opens Side Tabs' Settings (#43), the window the menu bar's Settings… opens, in front of Safari. Its
+/// click doesn't bring Safari forward first, as every other click on the sidebar does: Safari would come
+/// out over the window it opens.
+private struct SettingsButton: View {
+    @Environment(\.showSideTabsSettings) private var showSettings
+
+    var body: some View {
+        BarButton(systemImage: "gearshape", help: "Settings") {
+            showSettings()
+        }
+        .keepsSafariBehind()
+    }
+}
+
+/// Opens Side Tabs' Settings window (AppDelegate.showSettings), for the sidebar's gear.
+struct ShowSettingsAction: Equatable {
+    let show: () -> Void
+
+    func callAsFunction() { show() }
+
+    /// Set once, where the sidebar is made, so there's only ever the one: a new copy never needs the views
+    /// that read it updated.
+    static func == (lhs: Self, rhs: Self) -> Bool { true }
+}
+
+extension EnvironmentValues {
+    @Entry var showSideTabsSettings = ShowSettingsAction {}
 }
 
 /// Shows or hides the list of tabs cleanup closed (ClosedTabsList).

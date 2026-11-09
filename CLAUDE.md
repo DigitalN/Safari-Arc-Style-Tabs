@@ -78,7 +78,9 @@ Don't undo these without asking:
   own address bar (⌘L). There's no typing in the sidebar, because extensions can't get
   Safari's history or suggestions.
 - Any left or middle click on the sidebar brings Safari forward, and so does picking the
-  sidebar in Mission Control. Right-clicking, scrolling and hovering don't.
+  sidebar in Mission Control. Right-clicking, scrolling and hovering don't. The one
+  exception is a left click on the Settings gear above the +: it opens Side Tabs' Settings
+  window in front of Safari and never brings Safari forward (`keepsSafariBehind()`).
 - Tab renames show only in the sidebar. Reordering uses its own drag gesture
   (`SidebarDrag`), not system drag and drop.
 - Onboarding happens in the app, one step at a time, with no instructions in the README

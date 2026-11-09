@@ -13,6 +13,9 @@ nonisolated enum ProfileBarLayout {
     static let buttonSpacing: CGFloat = 2
     /// The buttons at the bar's ends: Closed Tabs on the left (while cleanup is on), + on the right.
     static let sideButtonWidth: CGFloat = 28
+    /// The bar's right end, beside the buttons: the +. The Settings gear sits a row up, directly above it
+    /// (#43), so it takes none of the buttons' room and this end stays one button wide.
+    static let trailingWidth: CGFloat = sideButtonWidth
     /// The bar's own inset from the sidebar's edges, on each side.
     static let barInset: CGFloat = 8
     /// Between a side item and the buttons, at the least.
