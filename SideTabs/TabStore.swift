@@ -3,7 +3,7 @@ import os.log
 import Observation
 
 /// Everything the sidebar shows: Safari's windows and tabs (from the extension), the
-/// user's bookmarks, and the custom names given to tabs.
+/// user's favorites and pinned items, and the custom names given to tabs.
 @Observable
 final class TabStore {
     struct WindowSelection: Equatable {
@@ -88,9 +88,11 @@ final class TabStore {
     /// reopening them (TabCleanup.swift).
     let cleanup = TabCleanup()
     private(set) var lastMessageAt: Date?
-    private(set) var bookmarks: [Bookmark] = []
+    /// Favorites, shared by every profile, and each profile's Pinned list (#34, BookmarkLists.swift).
+    private(set) var bookmarkLists = BookmarkLists()
     private(set) var customNames: [TabKey: CustomName] = [:]
-    /// The tabs that belong to bookmarks, listed under them instead of under Tabs (see BookmarkTabs).
+    /// The tabs that belong to favorites and pinned items, listed under them instead of under Tabs
+    /// (see BookmarkTabs).
     private(set) var bookmarkTabs = BookmarkTabs()
 
     var renaming: RenameTarget?
@@ -101,6 +103,7 @@ final class TabStore {
         didSet {
             if dockedWindowTitle != oldValue {
                 requestSnapshotIfUnknown(title: dockedWindowTitle)
+                logShownSpace()
             }
         }
     }
@@ -852,8 +855,8 @@ final class TabStore {
                 customNames[key] = CustomName(name: name, url: tab?.url)
             }
         case .bookmark(let id):
-            if !name.isEmpty, let index = bookmarks.firstIndex(where: { $0.id == id }) {
-                bookmarks[index].title = name
+            if !name.isEmpty {
+                bookmarkLists.update(id) { $0.title = name }
             }
         }
         renaming = nil
@@ -1176,7 +1179,57 @@ final class TabStore {
         NSWorkspace.shared.open(urls, withApplicationAt: safari, configuration: NSWorkspace.OpenConfiguration())
     }
 
-    // MARK: - Bookmarks
+    // MARK: - Profiles (#34)
+
+    /// The profile a window belongs to, from the snapshot that lists it (`Snapshot.profile`, which the
+    /// default profile's copy of the extension doesn't send). Nil for a private window: it belongs to
+    /// no profile, though the default profile's copy is the one that reports it.
+    func profile(of window: BrowserWindow, instance: String) -> ProfileKey? {
+        guard !window.incognito else { return nil }
+        return ProfileKey(snapshotProfile: snapshots[instance]?.profile)
+    }
+
+    /// The profile of the window the sidebar shows (`currentWindow`), whose Pinned list it shows. Nil
+    /// while that's a private window, and while no window is shown.
+    var currentWindowProfile: ProfileKey? {
+        currentWindow.flatMap { profile(of: $0.window, instance: $0.instance) }
+    }
+
+    /// The Pinned list the sidebar shows: that of the current window's profile. Nil in a private
+    /// window, which has no Pinned section.
+    var currentPinnedList: BookmarkList? {
+        currentWindowProfile.map(BookmarkList.pinned)
+    }
+
+    /// The profile last named in the log by `logShownSpace`.
+    @ObservationIgnored private var loggedSpace: String?
+
+    /// Logs whose window the sidebar shows when that changes from one profile (or a private window)
+    /// to another, with how many favorites and pinned items it shows then. Never a profile's name.
+    private func logShownSpace() {
+        guard let selection = currentWindow else { return }
+        let profile = profile(of: selection.window, instance: selection.instance)
+        let space = profile.map { $0.isDefault ? "the default profile" : "profile \($0.rawValue.prefix(8))" } ?? "a private window"
+        guard space != loggedSpace else { return }
+        loggedSpace = space
+        let pinned = profile.map { bookmarkLists.items(in: .pinned($0)).count }.map(String.init) ?? "no"
+        log.notice("the sidebar shows \(space, privacy: .public): \(self.favorites.count) favorites, \(pinned, privacy: .public) pinned")
+    }
+
+    // MARK: - Favorites and Pinned
+
+    /// The favorites, shared by every profile and shown in private windows too.
+    var favorites: [Bookmark] { bookmarkLists.favorites }
+
+    func bookmarks(in list: BookmarkList) -> [Bookmark] {
+        bookmarkLists.items(in: list)
+    }
+
+    /// The ids of the bookmarks a window shows: the favorites, and its profile's Pinned list. A tab
+    /// only belongs to a bookmark its window shows.
+    func bookmarkIds(shownIn window: BrowserWindow, instance: String) -> Set<UUID> {
+        Set(bookmarkLists.shown(in: profile(of: window, instance: instance)).map(\.id))
+    }
 
     /// The bookmark's own tab in the window the sidebar shows, if it has one there. Wherever the
     /// tab has browsed to since, it's the bookmark's until it closes.
@@ -1185,6 +1238,22 @@ final class TabStore {
         return bookmarkTabs.tab(of: bookmark.id, in: selection.window, instance: selection.instance)
     }
 
+    /// What a press on a favorite's tile or a pinned row does on mouse-down. One whose tab is open in
+    /// this window switches to it at once, like a tab row. Otherwise nothing happens until the button
+    /// goes up, and then `open(_:inNewTab:)` opens it: a press that turns into a drag to reorder mustn't
+    /// open a tab. A press with ⌘ always waits, and opens an ordinary new tab. Says whether the press
+    /// waits for the button to go up.
+    func pressBookmark(_ bookmark: Bookmark, command: Bool) -> Bool {
+        if !command, openTab(for: bookmark) != nil {
+            open(bookmark)
+            return false
+        }
+        return true
+    }
+
+    /// Opens a favorite or pinned item in the window the sidebar shows: switches to its tab there, or
+    /// opens its saved page in a new tab of that window (so a favorite's tab opens in the profile of the
+    /// window it's clicked in), which becomes its tab.
     func open(_ bookmark: Bookmark, inNewTab: Bool = false) {
         guard let selection = currentWindow else {
             openInSafari(bookmark.url)
@@ -1222,37 +1291,50 @@ final class TabStore {
         ], to: selection.instance)
     }
 
-    func addBookmark(from tab: BrowserTab, instance: String, at index: Int? = nil) {
+    /// Makes a favorite or pinned item of the tab's page, at `index` in `list` (at the end without
+    /// one). It's what dragging a tab onto Favorites or Pinned does, and the tab's menu.
+    func addBookmark(from tab: BrowserTab, instance: String, to list: BookmarkList, at index: Int? = nil) {
         guard let url = tab.url, !url.isEmpty else { return }
         let bookmark = Bookmark(
             title: displayTitle(for: tab, instance: instance),
             url: url,
             faviconURL: tab.favIconUrl
         )
-        insert(bookmark, at: index)
-        // The tab moves up into Bookmarks as the new bookmark's tab, unless it's another bookmark's.
-        changeBookmarkTabs { $0.link(TabKey(instance: instance, tabId: tab.id), to: bookmark.id) }
+        insert(bookmark, into: list, at: index)
+        // The tab moves up as the new bookmark's tab, unless it's another bookmark's, or its window
+        // doesn't show that list (another profile's Pinned list).
+        if let window = window(instance: instance, id: tab.windowId),
+           bookmarkIds(shownIn: window, instance: instance).contains(bookmark.id) {
+            changeBookmarkTabs { $0.link(TabKey(instance: instance, tabId: tab.id), to: bookmark.id) }
+        }
     }
 
+    /// Add Bookmark for the current tab (the + in Pinned's header). It pins the tab in the current
+    /// window's profile's Pinned list. A private window has none, so there it adds to Favorites.
     func addBookmarkForCurrentTab() {
         guard let selection = currentWindow, let tab = selection.window.tabs.first(where: \.active) else { return }
-        addBookmark(from: tab, instance: selection.instance)
+        let list = profile(of: selection.window, instance: selection.instance).map(BookmarkList.pinned) ?? .favorites
+        addBookmark(from: tab, instance: selection.instance, to: list)
     }
 
-    func addBookmark(url: URL, at index: Int? = nil) {
+    /// A link dragged in from a web page or Safari's address bar.
+    func addBookmark(url: URL, to list: BookmarkList, at index: Int? = nil) {
         guard let scheme = url.scheme, ["http", "https"].contains(scheme.lowercased()) else { return }
-        insert(Bookmark(title: url.host() ?? url.absoluteString, url: url.absoluteString), at: index)
+        insert(Bookmark(title: url.host() ?? url.absoluteString, url: url.absoluteString), into: list, at: index)
     }
 
-    private func insert(_ bookmark: Bookmark, at index: Int?) {
-        let position = index.map { min(max($0, 0), bookmarks.count) } ?? bookmarks.count
-        bookmarks.insert(bookmark, at: position)
+    private func insert(_ bookmark: Bookmark, into list: BookmarkList, at index: Int?) {
+        bookmarkLists.insert(bookmark, into: list, at: index)
+        log.notice("added a bookmark to \(list, privacy: .public), which has \(self.bookmarkLists.items(in: list).count) now")
         scheduleSave()
     }
 
+    /// Takes a favorite or pinned item out of its list. Its tabs stay open, back under Tabs.
     func removeBookmark(_ bookmark: Bookmark) {
-        bookmarks.removeAll { $0.id == bookmark.id }
+        guard let list = bookmarkLists.list(containing: bookmark.id) else { return }
+        bookmarkLists.remove(bookmark.id)
         changeBookmarkTabs { $0.forget(bookmark: bookmark.id) }
+        log.notice("removed a bookmark from \(list, privacy: .public), which has \(self.bookmarkLists.items(in: list).count) now")
         scheduleSave()
     }
 
@@ -1260,22 +1342,35 @@ final class TabStore {
         guard let selection = currentWindow,
               let tab = selection.window.tabs.first(where: \.active),
               let url = tab.url,
-              let index = bookmarks.firstIndex(where: { $0.id == bookmark.id }) else { return }
-        bookmarks[index].url = url
-        bookmarks[index].faviconURL = tab.favIconUrl
+              bookmarkLists.bookmark(bookmark.id) != nil else { return }
+        bookmarkLists.update(bookmark.id) { saved in
+            saved.url = url
+            saved.faviconURL = tab.favIconUrl
+        }
         // The tab showing the page becomes the bookmark's too, if the bookmark has none in this window
         // (and the tab isn't another bookmark's). The bookmark's own tab is already.
-        if bookmarkTabs.tab(of: bookmark.id, in: selection.window, instance: selection.instance) == nil {
+        if bookmarkTabs.tab(of: bookmark.id, in: selection.window, instance: selection.instance) == nil,
+           bookmarkIds(shownIn: selection.window, instance: selection.instance).contains(bookmark.id) {
             changeBookmarkTabs { $0.link(TabKey(instance: selection.instance, tabId: tab.id), to: bookmark.id) }
         }
         scheduleSave()
     }
 
-    /// Moves a bookmark to `index` (its position once moved).
-    func moveBookmark(_ id: UUID, to index: Int) {
-        guard let from = bookmarks.firstIndex(where: { $0.id == id }) else { return }
-        let bookmark = bookmarks.remove(at: from)
-        bookmarks.insert(bookmark, at: min(max(index, 0), bookmarks.count))
+    /// Moves a favorite or pinned item to `index` in `list` (its position once moved): reordering a
+    /// list, or moving from one list to the other. A pinned item moved to Favorites becomes shared, and
+    /// keeps its tabs. A favorite moved to Pinned lets go of its tabs in windows that don't show that
+    /// list (other profiles' and private ones), which go back under Tabs there.
+    func moveBookmark(_ id: UUID, to list: BookmarkList, at index: Int) {
+        let from = bookmarkLists.list(containing: id)
+        guard bookmarkLists.move(id, to: list, at: index) else { return }
+        if let from, from != list {
+            log.notice("moved a bookmark from \(from, privacy: .public) to \(list, privacy: .public)")
+            changeBookmarkTabs { tabs in
+                for snapshot in snapshots.values {
+                    tabs.unlinkTabs(in: snapshot) { bookmarkIds(shownIn: $0, instance: snapshot.instance) }
+                }
+            }
+        }
         scheduleSave()
     }
 
@@ -1289,23 +1384,29 @@ final class TabStore {
     }
 
     /// A tab opened for a bookmark becomes its tab, unless the bookmark already has one in that
-    /// window (Open in New Tab on an open bookmark gives an ordinary tab) or was removed meanwhile.
+    /// window (Open in New Tab on an open bookmark gives an ordinary tab), or was removed or moved to
+    /// a list that window doesn't show meanwhile.
     private func linkOpenedTab(_ key: TabKey, to bookmark: UUID, windowId: Int) {
-        guard bookmarks.contains(where: { $0.id == bookmark }) else { return }
-        if let window = window(instance: key.instance, id: windowId),
-           bookmarkTabs.tab(of: bookmark, in: window, instance: key.instance) != nil {
-            return
+        guard bookmarkLists.bookmark(bookmark) != nil else { return }
+        if let window = window(instance: key.instance, id: windowId) {
+            guard bookmarkIds(shownIn: window, instance: key.instance).contains(bookmark),
+                  bookmarkTabs.tab(of: bookmark, in: window, instance: key.instance) == nil else { return }
         }
         changeBookmarkTabs { $0.link(key, to: bookmark) }
     }
 
     private func updateBookmarkTabs(with snapshot: Snapshot) {
         let before = bookmarkTabs.owners.count
-        changeBookmarkTabs { $0.update(with: snapshot, live: Set(snapshots.keys), bookmarks: bookmarks) }
+        changeBookmarkTabs { tabs in
+            tabs.update(with: snapshot, live: Set(snapshots.keys), bookmarks: bookmarkLists.all) {
+                bookmarkIds(shownIn: $0, instance: snapshot.instance)
+            }
+        }
         let after = bookmarkTabs.owners.count
         if after != before {
             log.notice("bookmarks' tabs: \(before) before snapshot \(snapshot.seq), \(after) after")
         }
+        logShownSpace()
     }
 
     /// Changes the links on a copy, so views aren't told of a change when nothing changed, and saves
@@ -1329,7 +1430,11 @@ final class TabStore {
     private struct SavedState: Codable {
         /// Cleanup's clocks and its list of closed tabs. Missing from files saved before it existed.
         var cleanup: TabCleanup.Saved?
+        /// The favorites. Before there were Pinned lists this held every bookmark, which became the
+        /// favorites as they were (#34).
         var bookmarks: [Bookmark]
+        /// Each profile's Pinned list, by `ProfileKey.rawValue`. Missing from files saved before it existed.
+        var pinned: [String: [Bookmark]]?
         var names: [SavedName]
         var orphanNames: [String: String]
         /// Which tabs belong to bookmarks, and the extension instances running when they were saved
@@ -1347,13 +1452,13 @@ final class TabStore {
         guard let data = try? Data(contentsOf: stateURL),
               let state = try? JSONDecoder().decode(SavedState.self, from: data) else { return }
         cleanup.restore(state.cleanup)
-        bookmarks = state.bookmarks
+        bookmarkLists = BookmarkLists(favorites: state.bookmarks, pinned: state.pinned ?? [:])
         orphanNames = state.orphanNames
         customNames = Dictionary(
             state.names.map { (TabKey(instance: $0.instance, tabId: $0.tabId), $0.name) },
             uniquingKeysWith: { first, _ in first }
         )
-        bookmarkTabs = BookmarkTabs(saved: state.bookmarkTabs ?? [], instances: state.instances ?? [], bookmarks: state.bookmarks)
+        bookmarkTabs = BookmarkTabs(saved: state.bookmarkTabs ?? [], instances: state.instances ?? [], bookmarks: bookmarkLists.all)
     }
 
     private func scheduleSave() {
@@ -1366,7 +1471,8 @@ final class TabStore {
     func save() {
         let state = SavedState(
             cleanup: cleanup.saved,
-            bookmarks: bookmarks,
+            bookmarks: bookmarkLists.favorites,
+            pinned: bookmarkLists.savedPinned,
             names: customNames.map { SavedName(instance: $0.key.instance, tabId: $0.key.tabId, name: $0.value) },
             orphanNames: orphanNames,
             bookmarkTabs: bookmarkTabs.saved,

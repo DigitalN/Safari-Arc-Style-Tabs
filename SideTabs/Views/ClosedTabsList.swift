@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The tabs cleanup closed, newest first, shown in place of bookmarks and tabs while it's open (the
+/// The tabs cleanup closed, newest first, shown in place of the sidebar's sections while it's open (the
 /// button at the bottom left opens it). Clicking one reopens it and goes back to the tabs.
 struct ClosedTabsList: View {
     @Binding var isShown: Bool

@@ -149,7 +149,12 @@ struct TabRow: View {
             Button("Reset Name") { store.resetName(key) }
         }
         Divider()
-        Button("Add to Bookmarks") { store.addBookmark(from: tab, instance: instance) }
+        // A private window has no Pinned list.
+        if let pinned = store.currentPinnedList {
+            Button("Add to Pinned") { store.addBookmark(from: tab, instance: instance, to: pinned) }
+                .disabled(tab.url == nil)
+        }
+        Button("Add to Favorites") { store.addBookmark(from: tab, instance: instance, to: .favorites) }
             .disabled(tab.url == nil)
         Button("Copy Link") { store.copyLink(tab.url) }
             .disabled(tab.url == nil)

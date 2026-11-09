@@ -1006,10 +1006,10 @@ func closes(_ commands: [[String: Any]]) -> [[Int]] {
     commands.filter { $0["action"] as? String == "close" }.compactMap { $0["tabIds"] as? [Int] }
 }
 
-/// Adds a bookmark for `url` and returns it.
-func bookmark(_ store: TabStore, _ url: String) -> Bookmark {
-    store.addBookmark(url: URL(string: url)!)
-    return store.bookmarks.last!
+/// Adds a bookmark for `url` to `list` (Favorites, where #25's bookmarks went) and returns it.
+func bookmark(_ store: TabStore, _ url: String, to list: BookmarkList = .favorites) -> Bookmark {
+    store.addBookmark(url: URL(string: url)!, to: list)
+    return store.bookmarks(in: list).last!
 }
 
 /// Opens the bookmark as a click does, and answers the extension's `create` with tab `tabId`.
@@ -1206,18 +1206,18 @@ do {
 do {
     // Dragging a tab onto Bookmarks, Replace with Current Page, and Remove Bookmark.
     let (store, _) = makeStore()
-    store.addBookmark(from: store.tab(for: TabKey(instance: instance, tabId: 3))!, instance: instance, at: 0)
-    let dragged = store.bookmarks[0]
+    store.addBookmark(from: store.tab(for: TabKey(instance: instance, tabId: 3))!, instance: instance, to: .favorites, at: 0)
+    let dragged = store.favorites[0]
     check(dragged.url == "https://example.com/3", "a tab dragged onto Bookmarks makes a bookmark of its page")
     check(store.openTab(for: dragged)?.id == 3, "which owns the tab")
     check(listedIds(store) == [1, 2, 4], "so the tab moves up out of Tabs")
 
     send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (2, "https://example.com/2"), (3, elsewhere), (4, "https://example.com/4")])], active: [3]))
     store.replaceBookmarkWithCurrentPage(dragged)
-    check(store.bookmarks[0].url == elsewhere, "Replace with Current Page saves the tab's current page as the bookmark's")
-    check(store.openTab(for: store.bookmarks[0])?.id == 3, "and the tab stays the bookmark's")
+    check(store.favorites[0].url == elsewhere, "Replace with Current Page saves the tab's current page as the bookmark's")
+    check(store.openTab(for: store.favorites[0])?.id == 3, "and the tab stays the bookmark's")
 
-    store.removeBookmark(store.bookmarks[0])
+    store.removeBookmark(store.favorites[0])
     check(store.bookmarkTabs.owners.isEmpty, "removing the bookmark lets go of its tab")
     check(listedIds(store) == [1, 2, 3, 4], "which goes back under Tabs, still open")
 }
@@ -1312,7 +1312,356 @@ do {
     let old = #"{"bookmarks":[{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","title":"Old","url":"https://old.example/"}],"names":[],"orphanNames":{}}"#
     try! old.write(to: url, atomically: true, encoding: .utf8)
     let store = TabStore(stateURL: url)
-    check(store.bookmarks.map(\.title) == ["Old"], "an older state.json without bookmarks' tabs still loads its bookmarks")
+    check(store.favorites.map(\.title) == ["Old"], "an older state.json without bookmarks' tabs still loads its bookmarks")
+}
+
+// MARK: - Favorites, shared by every profile, and a Pinned list for each (#34)
+
+// Each Safari profile runs its own copy of the extension. Safari sends each copy's messages with the
+// profile's UUID, except the default profile's, whose copy also reports private windows.
+let defaultCopy = "copy-default"
+let workCopy = "copy-work"
+let workUUID = "8B1A3C55-1D2E-4F60-8A7B-9C0D1E2F3A4B"
+let work = ProfileKey(rawValue: workUUID)
+
+typealias PageTabs = [(id: Int, url: String)]
+
+/// A snapshot from one copy of the extension. `profile` is the UUID Safari sends with it (none for the
+/// default profile). Each window is (id, whether it's private, its tabs as (id, page)).
+func spaceSnapshot(
+    seq: Int,
+    from copy: String,
+    profile: String? = nil,
+    focused: Int,
+    lastFocused: Int? = nil,
+    focusChangedAt: Double,
+    _ windows: [(id: Int, incognito: Bool, tabs: PageTabs)],
+    active: Set<Int>
+) -> [String: Any] {
+    var object: [String: Any] = [
+        "type": "snapshot", "instance": copy, "seq": seq, "focusedWindowId": focused,
+        "lastFocusedWindowId": lastFocused ?? focused, "focusChangedAt": focusChangedAt,
+        "startedAt": nowMilliseconds() + 1,
+        "windows": windows.map { window -> [String: Any] in
+            ["id": window.id, "focused": window.id == focused, "incognito": window.incognito,
+             "tabs": window.tabs.enumerated().map { position, tab -> [String: Any] in
+                 ["id": tab.id, "windowId": window.id, "index": position, "title": "Page \(tab.id)", "url": tab.url,
+                  "active": active.contains(tab.id), "pinned": false, "audible": false, "muted": false, "loading": false]
+             }]
+        },
+    ]
+    if let profile { object["profile"] = profile }
+    return object
+}
+
+/// Safari with two profiles. The default profile's copy has window 1 (tabs 1 and 2) and private
+/// window 3 (tab 30); the Work profile's copy has window 5 (tabs 50 and 51).
+final class Spaces {
+    enum Window { case personal, privateBrowsing, work }
+
+    let store: TabStore
+    private(set) var commands: [[String: Any]] = []
+    var personalTabs: PageTabs = [(1, "https://example.com/1"), (2, "https://example.com/2")]
+    var privateTabs: PageTabs = [(30, "https://example.com/30")]
+    var workTabs: PageTabs = [(50, "https://example.com/50"), (51, "https://example.com/51")]
+    /// The tab showing in each window, by window id.
+    var active: [Int: Int] = [1: 1, 3: 30, 5: 50]
+    private var seq = 0
+    private var focusClock = 10.0
+    private(set) var front = Window.personal
+
+    /// A store that keeps its state at `stateURL`, which has heard from both copies with the default
+    /// profile's window in front. With `other`, Safari has the tabs that one had.
+    init(stateURL: URL? = nil, tabsOf other: Spaces? = nil) {
+        storeCount += 1
+        store = TabStore(stateURL: stateURL ?? stateFolder.appending(path: "state-\(storeCount).json"))
+        if let other {
+            personalTabs = other.personalTabs
+            privateTabs = other.privateTabs
+            workTabs = other.workTabs
+            active = other.active
+        }
+        store.sendCommand = { [unowned self] in self.commands.append($0) }
+        show(.personal)
+    }
+
+    /// Both copies report, with `window` in front: its copy changed focus last.
+    func show(_ window: Window) {
+        front = window
+        seq += 1
+        focusClock += 1
+        let shown = Set(active.values)
+        let defaultInFront = window != .work
+        send(store, spaceSnapshot(
+            seq: seq, from: defaultCopy, focused: defaultInFront ? (window == .personal ? 1 : 3) : -1, lastFocused: window == .privateBrowsing ? 3 : 1,
+            focusChangedAt: defaultInFront ? focusClock : focusClock - 0.5,
+            [(1, false, personalTabs), (3, true, privateTabs)], active: shown
+        ))
+        send(store, spaceSnapshot(
+            seq: seq, from: workCopy, profile: workUUID, focused: defaultInFront ? -1 : 5, lastFocused: 5,
+            focusChangedAt: defaultInFront ? focusClock - 0.5 : focusClock,
+            [(5, false, workTabs)], active: shown
+        ))
+    }
+
+    /// Opens the bookmark as a click does, answers the extension's `create` with tab `tabId`, and puts
+    /// that tab in the window it was asked for, showing. Says which copy and window it was asked of.
+    @discardableResult
+    func openAndCreate(_ bookmark: Bookmark, tabId: Int, inNewTab: Bool = false, line: Int = #line) -> (copy: String, windowId: Int)? {
+        let before = creates(commands).count
+        store.open(bookmark, inNewTab: inNewTab)
+        guard creates(commands).count == before + 1, let command = creates(commands).last,
+              let requestId = command["requestId"] as? String, let copy = command["instance"] as? String,
+              let windowId = command["windowId"] as? Int else {
+            check(false, "opening the bookmark asks Safari for a new tab", line: line)
+            return nil
+        }
+        send(store, ["type": "created", "instance": copy, "requestId": requestId, "tabId": tabId])
+        switch windowId {
+        case 1: personalTabs.append((tabId, bookmark.url))
+        case 3: privateTabs.append((tabId, bookmark.url))
+        case 5: workTabs.append((tabId, bookmark.url))
+        default: check(false, "the tab opens in one of the windows", line: line)
+        }
+        active[windowId] = tabId
+        show(front)
+        return (copy, windowId)
+    }
+
+    func key(_ tabId: Int) -> TabKey {
+        TabKey(instance: workTabs.contains { $0.id == tabId } ? workCopy : defaultCopy, tabId: tabId)
+    }
+
+    func tab(_ tabId: Int) -> BrowserTab {
+        store.tab(for: key(tabId))!
+    }
+}
+
+do {
+    // Each profile has its own Pinned list, which follows the window in front; a private window has none.
+    let spaces = Spaces()
+    let store = spaces.store
+    check(store.currentWindowProfile == .defaultProfile, "a window of the copy that sends no profile is the default profile's")
+    check(store.currentPinnedList == .pinned(.defaultProfile), "and the sidebar shows the default profile's Pinned list")
+    store.addBookmarkForCurrentTab()
+    check(store.bookmarks(in: .pinned(.defaultProfile)).map(\.url) == ["https://example.com/1"], "Add Bookmark pins the current tab in the profile's Pinned list")
+    check(store.favorites.isEmpty, "not in Favorites")
+    check(store.bookmarks(in: .pinned(.defaultProfile)).first.flatMap(store.openTab(for:))?.id == 1 && listedIds(store) == [2],
+          "the pinned item owns the tab, which leaves Tabs")
+
+    spaces.show(.work)
+    check(store.currentWindowProfile == work, "a window of another copy is the profile whose UUID Safari sends with it")
+    check(store.currentPinnedList == .pinned(work), "switching to it swaps the Pinned list at once")
+    check(store.bookmarks(in: .pinned(work)).isEmpty, "a profile's list starts empty")
+    store.addBookmarkForCurrentTab()
+    check(store.bookmarks(in: .pinned(work)).map(\.url) == ["https://example.com/50"], "Add Bookmark there pins to that profile's own list")
+    check(store.bookmarks(in: .pinned(.defaultProfile)).map(\.url) == ["https://example.com/1"], "and leaves the other profile's list alone")
+
+    spaces.show(.privateBrowsing)
+    check(store.currentWindowProfile == nil, "a private window belongs to no profile, though the default profile's copy reports it")
+    check(store.currentPinnedList == nil, "so it has no Pinned list")
+    store.addBookmarkForCurrentTab()
+    check(store.favorites.map(\.url) == ["https://example.com/30"], "Add Bookmark in a private window adds to Favorites")
+    check(store.favorites.first.flatMap(store.openTab(for:))?.id == 30 && listedIds(store).isEmpty, "with the tab as the favorite's, out of Tabs")
+    check(store.bookmarks(in: .pinned(.defaultProfile)).count == 1, "the default profile's list doesn't get it")
+
+    spaces.show(.personal)
+    check(store.currentPinnedList == .pinned(.defaultProfile), "back in the default profile's window, its own list shows again")
+    check(listedIds(store) == [2], "with its pinned tab still out of Tabs")
+    check(store.favorites.first.flatMap(store.openTab(for:)) == nil, "the favorite shows here too, closed in this window")
+
+    store.dockedWindowTitle = "Work — Page 50"
+    check(store.currentPinnedList == .pinned(work), "the list follows the window the sidebar is docked to, as soon as its title says which")
+}
+
+do {
+    // #25's rules hold for favorites and pinned items alike.
+    for list in [BookmarkList.favorites, .pinned(.defaultProfile)] {
+        let spaces = Spaces()
+        let store = spaces.store
+        let name = list == .favorites ? "a favorite" : "a pinned item"
+        let saved = bookmark(store, news, to: list)
+        check(store.pressBookmark(saved, command: false) && creates(spaces.commands).isEmpty,
+              "pressing \(name) that's closed waits for the button to go up, so a drag doesn't open it")
+        spaces.openAndCreate(saved, tabId: 10)
+        check(store.openTab(for: saved)?.id == 10, "\(name), opened, owns the new tab")
+        check(listedIds(store) == [1, 2], "which isn't listed under Tabs")
+        check(store.openTab(for: saved)?.active == true, "and is highlighted while that tab is active")
+
+        spaces.active[1] = 1
+        spaces.personalTabs[2].url = elsewhere
+        spaces.show(.personal)
+        check(store.openTab(for: saved)?.id == 10, "browsing elsewhere in its tab keeps it \(name)'s")
+        check(!store.pressBookmark(saved, command: false) && activations(spaces.commands).last == 10,
+              "pressing \(name) that's open switches to its tab on mouse-down")
+        let createsBefore = creates(spaces.commands).count
+        check(store.pressBookmark(saved, command: true) && creates(spaces.commands).count == createsBefore,
+              "with ⌘ the press waits for the button to go up")
+        spaces.openAndCreate(saved, tabId: 11, inNewTab: true)
+        check(store.openTab(for: saved)?.id == 10 && listedIds(store) == [1, 2, 11], "and ⌘-click opens an ordinary new tab")
+
+        check(store.closeBookmarkTab(saved.id) && closes(spaces.commands).last == [10],
+              "the − (and a middle click, and Close Tab) closes \(name)'s tab")
+        check(store.openTab(for: saved) == nil, "and puts it back to closed at once")
+        let sent = spaces.commands.count
+        check(!store.closeBookmarkTab(saved.id) && spaces.commands.count == sent, "a middle click on \(name) that's closed does nothing")
+    }
+}
+
+do {
+    // A favorite opens in the profile of the window it's clicked in.
+    let spaces = Spaces()
+    let store = spaces.store
+    let saved = bookmark(store, news)
+    spaces.openAndCreate(saved, tabId: 10)
+    spaces.show(.work)
+    check(store.openTab(for: saved) == nil, "a favorite open in one profile's window is closed in another profile's")
+    let opened = spaces.openAndCreate(saved, tabId: 52)
+    check(opened?.copy == workCopy && opened?.windowId == 5, "clicking it there opens its page in that window, through that profile's copy")
+    check(store.openTab(for: saved)?.id == 52 && listedIds(store) == [50, 51], "and the new tab is the favorite's there")
+    spaces.show(.privateBrowsing)
+    let privately = spaces.openAndCreate(saved, tabId: 31)
+    check(privately?.copy == defaultCopy && privately?.windowId == 3, "in a private window it opens in that private window")
+    check(store.openTab(for: saved)?.id == 31, "where it owns its tab too")
+    check(store.bookmarkTabKeys == [spaces.key(10), spaces.key(52), spaces.key(31)], "one tab in each window, all kept open by cleanup")
+}
+
+do {
+    // Dragging a tab onto Favorites or Pinned.
+    let spaces = Spaces()
+    let store = spaces.store
+    store.addBookmark(from: spaces.tab(2), instance: defaultCopy, to: .pinned(.defaultProfile), at: 0)
+    check(store.bookmarks(in: .pinned(.defaultProfile)).first?.url == "https://example.com/2", "a tab dropped on Pinned becomes a pinned item")
+    check(store.bookmarks(in: .pinned(.defaultProfile)).first.flatMap(store.openTab(for:))?.id == 2 && listedIds(store) == [1], "that owns the tab")
+    store.addBookmark(from: spaces.tab(1), instance: defaultCopy, to: .favorites, at: 0)
+    check(store.favorites.first?.url == "https://example.com/1" && store.favorites.first.flatMap(store.openTab(for:))?.id == 1,
+          "a tab dropped on Favorites becomes a favorite that owns the tab")
+    check(listedIds(store).isEmpty, "so both left Tabs")
+}
+
+do {
+    // Moving between the lists, and reordering.
+    let spaces = Spaces()
+    let store = spaces.store
+    let saved = bookmark(store, news)
+    let docs = bookmark(store, "https://docs.example/")
+    spaces.openAndCreate(saved, tabId: 10)
+    spaces.show(.work)
+    spaces.openAndCreate(saved, tabId: 52)
+    spaces.show(.privateBrowsing)
+    spaces.openAndCreate(saved, tabId: 31)
+    spaces.show(.personal)
+
+    store.moveBookmark(saved.id, to: .pinned(.defaultProfile), at: 0)
+    check(store.favorites.map(\.id) == [docs.id] && store.bookmarks(in: .pinned(.defaultProfile)).map(\.id) == [saved.id],
+          "Move to Pinned takes a favorite out of Favorites into the profile's Pinned list")
+    check(store.openTab(for: saved)?.id == 10 && listedIds(store) == [1, 2], "it keeps its tab in that profile's window")
+    check(store.bookmarkTabKeys == [spaces.key(10)], "but lets go of its tabs in windows that don't show that list")
+    spaces.show(.work)
+    check(listedIds(store) == [50, 51, 52], "so its tab in another profile's window is back under Tabs there")
+    spaces.show(.privateBrowsing)
+    check(listedIds(store) == [30, 31], "and so is its tab in a private window")
+
+    spaces.show(.personal)
+    store.moveBookmark(saved.id, to: .favorites, at: 1)
+    check(store.favorites.map(\.id) == [docs.id, saved.id], "Move to Favorites, or a drop there, puts it where it's dropped")
+    check(store.bookmarks(in: .pinned(.defaultProfile)).isEmpty, "and out of Pinned")
+    check(store.openTab(for: saved)?.id == 10, "keeping its tab")
+    spaces.show(.work)
+    let workWindow = store.currentWindow!
+    check(store.bookmarkIds(shownIn: workWindow.window, instance: workWindow.instance).contains(saved.id), "and it's shared now: every profile shows it")
+
+    store.moveBookmark(saved.id, to: .favorites, at: 0)
+    check(store.favorites.map(\.id) == [saved.id, docs.id], "favorites reorder by dragging")
+    store.moveBookmark(docs.id, to: .pinned(work), at: 5)
+    store.moveBookmark(saved.id, to: .pinned(work), at: 0)
+    check(store.bookmarks(in: .pinned(work)).map(\.id) == [saved.id, docs.id], "a drop past the end of a list goes at its end")
+    store.moveBookmark(saved.id, to: .pinned(work), at: 1)
+    check(store.bookmarks(in: .pinned(work)).map(\.id) == [docs.id, saved.id], "and pinned items reorder too")
+    let ids = store.bookmarkLists.all.map(\.id)
+    check(Set(ids).count == ids.count && ids.count == 2, "a bookmark is in one list only, with its own id")
+}
+
+do {
+    // Everything survives saving and loading.
+    storeCount += 1
+    let url = stateFolder.appending(path: "state-\(storeCount).json")
+    let spaces = Spaces(stateURL: url)
+    let store = spaces.store
+    let favorite = bookmark(store, news)
+    let here = bookmark(store, "https://docs.example/", to: .pinned(.defaultProfile))
+    let there = bookmark(store, "https://work.example/", to: .pinned(work))
+    spaces.openAndCreate(here, tabId: 10)
+    spaces.show(.work)
+    spaces.openAndCreate(there, tabId: 52)
+    spaces.openAndCreate(favorite, tabId: 53)
+    store.beginRename(.bookmark(there.id))
+    store.commitRename("Renamed")
+    check(store.bookmarks(in: .pinned(work)).first?.title == "Renamed", "a pinned item can be renamed")
+    store.save()
+
+    let json = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any] ?? [:]
+    let urls = { (list: Any?) in (list as? [[String: Any]])?.compactMap { $0["url"] as? String } ?? [] }
+    check(urls(json["bookmarks"]) == [news], "state.json keeps the favorites under bookmarks, as before")
+    let pinned = json["pinned"] as? [String: Any] ?? [:]
+    check(urls(pinned["default"]) == ["https://docs.example/"] && urls(pinned[workUUID]) == ["https://work.example/"],
+          "and each profile's Pinned list under the profile's key")
+
+    let reloaded = Spaces(stateURL: url, tabsOf: spaces)
+    check(reloaded.store.bookmarkLists == store.bookmarkLists, "the lists load back as they were, with their ids, names and order")
+    check(reloaded.store.bookmarkTabs.owners == store.bookmarkTabs.owners, "and so do their tabs")
+    check(reloaded.store.currentPinnedList == .pinned(.defaultProfile) && reloaded.store.openTab(for: here)?.id == 10,
+          "the default profile's window shows its own list, with its tab")
+    reloaded.show(.work)
+    check(reloaded.store.bookmarks(in: reloaded.store.currentPinnedList!).map(\.title) == ["Renamed"], "and Work's window shows Work's")
+    check(reloaded.store.openTab(for: there)?.id == 52 && reloaded.store.openTab(for: favorite)?.id == 53 && listedIds(reloaded.store) == [50, 51],
+          "with their tabs still theirs")
+}
+
+do {
+    // An old state.json: its bookmarks are the favorites, and stay under `bookmarks` when it's saved again.
+    storeCount += 1
+    let url = stateFolder.appending(path: "state-\(storeCount).json")
+    try! FileManager.default.createDirectory(at: stateFolder, withIntermediateDirectories: true)
+    let old = #"{"bookmarks":[{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","title":"Old","url":"https://old.example/"},{"id":"7A9619FF-8B86-D011-B42D-00C04FC964FF","title":"Older","url":"https://older.example/"}],"names":[],"orphanNames":{},"bookmarkTabs":[{"instance":"copy-default","tabId":2,"bookmark":"6F9619FF-8B86-D011-B42D-00C04FC964FF"}],"instances":["copy-default"]}"#
+    try! old.write(to: url, atomically: true, encoding: .utf8)
+    let spaces = Spaces(stateURL: url)
+    let store = spaces.store
+    check(store.favorites.map(\.title) == ["Old", "Older"], "an old state.json's bookmarks load as the favorites, in the same order")
+    check(store.bookmarkLists.pinned.isEmpty, "and every profile's Pinned list starts empty")
+    check(store.favorites.first.flatMap(store.openTab(for:))?.id == 2 && listedIds(store) == [1], "a bookmark's tab stays its own as a favorite")
+    store.save()
+    let json = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any] ?? [:]
+    check(((json["bookmarks"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String } == ["6F9619FF-8B86-D011-B42D-00C04FC964FF", "7A9619FF-8B86-D011-B42D-00C04FC964FF"],
+          "saved again, they're still under bookmarks with their ids")
+}
+
+do {
+    // Ids stay unique across the lists, even in a state.json edited by hand.
+    storeCount += 1
+    let url = stateFolder.appending(path: "state-\(storeCount).json")
+    let id = "6F9619FF-8B86-D011-B42D-00C04FC964FF"
+    let edited = #"{"bookmarks":[{"id":"\#(id)","title":"A","url":"https://a.example/"}],"pinned":{"default":[{"id":"\#(id)","title":"B","url":"https://b.example/"}]},"names":[],"orphanNames":{}}"#
+    try! edited.write(to: url, atomically: true, encoding: .utf8)
+    let store = TabStore(stateURL: url)
+    let ids = store.bookmarkLists.all.map(\.id)
+    check(ids.count == 2 && Set(ids).count == 2, "a repeated id gets a new one, so each bookmark keeps its own")
+    check(store.favorites.first?.id.uuidString == id, "the favorite keeps the id it had")
+}
+
+do {
+    // After Safari restarts, a pinned item only gets back a tab of its own profile.
+    let spaces = Spaces()
+    let store = spaces.store
+    let pinned = bookmark(store, news, to: .pinned(work))
+    spaces.show(.work)
+    spaces.openAndCreate(pinned, tabId: 52)
+    store.safariDidTerminate()
+    send(store, spaceSnapshot(seq: 1, from: "restarted-default", focused: 7, focusChangedAt: 100, [(7, false, [(70, news)])], active: [70]))
+    check(store.bookmarkTabs.owners.isEmpty, "a restored tab of another profile on the pinned item's page doesn't become its tab")
+    check(listedIds(store) == [70], "and stays under Tabs")
+    send(store, spaceSnapshot(seq: 1, from: "restarted-work", profile: workUUID, focused: 8, focusChangedAt: 101, [(8, false, [(80, news)])], active: [80]))
+    check(store.bookmarkTabs.owners == [TabKey(instance: "restarted-work", tabId: 80): pinned.id], "one of its own profile does")
 }
 
 // MARK: - Copies of the extension that go quiet or are replaced (#31)

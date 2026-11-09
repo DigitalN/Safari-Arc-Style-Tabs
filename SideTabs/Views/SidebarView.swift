@@ -23,19 +23,13 @@ struct SidebarView: View {
                             WebsiteAccessBanner()
                                 .padding(.bottom, 8)
                         }
-                        if settings.showBookmarks {
-                            BookmarksSection()
-                            Divider()
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 7)
-                        }
-                        TabsSection(selection: selection)
+                        SidebarSections(selection: selection)
                     }
                     .coordinateSpace(.named(SidebarDrag.coordinateSpace))
                     .overlay(alignment: .topLeading) {
                         if let item = drag.item {
-                            DragGhost(item: item)
-                                .offset(y: drag.ghostTop)
+                            DragGhost(item: item, tileSize: drag.ghostIsTile ? max(drag.favoritesMetrics.tile, 40) : nil)
+                                .offset(x: drag.ghostOrigin.x, y: drag.ghostOrigin.y)
                                 .allowsHitTesting(false)
                         }
                     }
@@ -45,7 +39,7 @@ struct SidebarView: View {
                 }
                 .scrollIndicators(.automatic)
                 .onWindowFrame { rows.viewport = $0 }
-                // The tabs cleanup closed, listed in place of bookmarks and tabs while that's open.
+                // The tabs cleanup closed, listed in place of the sections while that's open.
                 .replaced(by: ClosedTabsList(isShown: $showsClosedTabs), when: showsClosedTabs && settings.closesUnviewedTabs)
                 BottomBar(showsClosedTabs: $showsClosedTabs)
             } else {
@@ -57,46 +51,77 @@ struct SidebarView: View {
     }
 }
 
-private struct BookmarksSection: View {
+/// Favorites, Pinned and Tabs, top to bottom (#34). Pinned is the list of the profile whose window the
+/// sidebar shows, so it swaps when another profile's window comes in front; a private window belongs
+/// to no profile and has none. With Favorites and Pinned turned off in Settings, only Tabs.
+private struct SidebarSections: View {
+    let selection: TabStore.WindowSelection
+    @Environment(TabStore.self) private var store
+    @Environment(AppSettings.self) private var settings
+    @Environment(SidebarDrag.self) private var drag
+
+    var body: some View {
+        if settings.showBookmarks {
+            let pinned = store.profile(of: selection.window, instance: selection.instance).map(BookmarkList.pinned)
+            FavoritesSection()
+            if let pinned {
+                PinnedSection(list: pinned)
+            }
+            // Nothing to set apart in a private window without favorites.
+            if pinned != nil || !store.favorites.isEmpty || drag.isActive {
+                Divider()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+            }
+        }
+        TabsSection(selection: selection)
+    }
+}
+
+/// The Pinned list of the profile whose window the sidebar shows (#34). It starts out empty, and then
+/// says how to pin something, so there's a place to drop tabs.
+private struct PinnedSection: View {
+    let list: BookmarkList
     @Environment(TabStore.self) private var store
     @Environment(SidebarDrag.self) private var drag
 
     private enum Slot: Identifiable {
-        case bookmark(Bookmark)
+        case pinned(Bookmark)
         case dropSlot
 
         var id: String {
             switch self {
-            case .bookmark(let bookmark): bookmark.id.uuidString
+            case .pinned(let item): item.id.uuidString
             case .dropSlot: "drop-slot"
             }
         }
     }
 
-    /// Bookmarks in display order. While a bookmark is dragged over the list it moves to the
-    /// target slot (and draws itself as the slot); a dragged tab gets a separate slot.
+    /// Pinned items in display order. While one is dragged over the list it moves to the target
+    /// slot (and draws itself as the slot); a dragged tab or favorite gets a separate slot.
     private var slots: [Slot] {
-        var bookmarks = store.bookmarks
+        var items = store.bookmarks(in: list)
         switch (drag.item, drag.target) {
-        case (.bookmark(let dragged)?, .bookmarks(let index)):
-            if let from = bookmarks.firstIndex(where: { $0.id == dragged.id }) {
-                let moved = bookmarks.remove(at: from)
-                bookmarks.insert(moved, at: min(index, bookmarks.count))
+        case (.pinned(let dragged)?, .pinned(let index)):
+            if let from = items.firstIndex(where: { $0.id == dragged.id }) {
+                let moved = items.remove(at: from)
+                items.insert(moved, at: min(index, items.count))
             }
-            return bookmarks.map(Slot.bookmark)
-        case (.tab?, .bookmarks(let index)):
-            var slots = bookmarks.map(Slot.bookmark)
+            return items.map(Slot.pinned)
+        case (.tab?, .pinned(let index)), (.favorite?, .pinned(let index)):
+            var slots = items.map(Slot.pinned)
             slots.insert(.dropSlot, at: min(index, slots.count))
             return slots
         default:
-            return bookmarks.map(Slot.bookmark)
+            return items.map(Slot.pinned)
         }
     }
 
     var body: some View {
+        let isEmpty = store.bookmarks(in: list).isEmpty
         VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-            SectionHeader(title: "Bookmarks") {
-                SidebarIconButton(systemImage: "plus", help: "Bookmark Current Tab") {
+            SectionHeader(title: "Pinned") {
+                SidebarIconButton(systemImage: "plus", help: "Pin Current Tab") {
                     store.addBookmarkForCurrentTab()
                 }
             }
@@ -104,17 +129,17 @@ private struct BookmarksSection: View {
             VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
                 ForEach(slots) { slot in
                     switch slot {
-                    case .bookmark(let bookmark):
-                        BookmarkRow(bookmark: bookmark)
+                    case .pinned(let item):
+                        BookmarkRow(bookmark: item)
                     case .dropSlot:
                         DropSlot()
                     }
                 }
             }
-            .onSidebarTop { drag.bookmarkRowsTop = $0 }
+            .onSidebarTop { drag.pinnedRowsTop = $0 }
 
-            if store.bookmarks.isEmpty && drag.target == .none {
-                Text("Drag a tab here, or click + to bookmark the current page.")
+            if isEmpty && drag.target == .none {
+                Text("Drag a tab here, or click + to pin the current page.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .padding(.horizontal, 8)
@@ -123,12 +148,12 @@ private struct BookmarksSection: View {
             }
         }
         .contentShape(Rectangle())
-        .onSidebarTop { drag.bookmarksSectionTop = $0 }
+        .onSidebarTop { drag.pinnedSectionTop = $0 }
         // Links dragged in from a web page or Safari's address bar.
         .onDrop(of: [.url], isTargeted: nil) { providers, location in
-            let index = drag.bookmarkIndex(forDropAt: location.y, count: store.bookmarks.count)
+            let index = drag.pinnedIndex(forDropAt: location.y, count: store.bookmarks(in: list).count)
             return loadDroppedURL(from: providers) { url in
-                store.addBookmark(url: url, at: index)
+                store.addBookmark(url: url, to: list, at: index)
             }
         }
     }
@@ -140,7 +165,8 @@ private struct TabsSection: View {
     @Environment(AppSettings.self) private var settings
     @Environment(SidebarDrag.self) private var drag
 
-    /// The window's tabs except bookmarks' tabs, which are listed under their bookmarks.
+    /// The window's tabs except the tabs of its favorites and pinned items, which their tiles and
+    /// rows stand for.
     private var listed: [BrowserTab] {
         store.tabsListed(in: selection.window, instance: selection.instance, bookmarksShown: settings.showBookmarks)
     }

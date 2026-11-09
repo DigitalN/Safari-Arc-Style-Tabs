@@ -83,9 +83,34 @@ struct BookmarkTabs: Equatable {
         restorable.removeAll { $0.bookmark == bookmark }
     }
 
+    /// Lets go of the tabs in `snapshot` whose bookmark the tab's window doesn't show (#34): `shown`
+    /// gives the ids of the bookmarks a window shows, which are the favorites and its profile's Pinned
+    /// list. A pinned item moved to another profile's list leaves its tabs in this profile, and a
+    /// favorite moved to Pinned leaves its tabs in other profiles and in private windows. They go back
+    /// under Tabs there, rather than belonging to a bookmark nothing in that window stands for.
+    mutating func unlinkTabs(in snapshot: Snapshot, notShown shown: (BrowserWindow) -> Set<UUID>) {
+        for window in snapshot.windows {
+            let ids = shown(window)
+            for tab in window.tabs {
+                let key = TabKey(instance: snapshot.instance, tabId: tab.id)
+                if let link = links[key], !ids.contains(link.bookmark) {
+                    links[key] = nil
+                }
+            }
+        }
+    }
+
     /// Brings the links up to date with a snapshot from one extension instance. `live` is every
-    /// instance with a snapshot, this one included.
-    mutating func update(with snapshot: Snapshot, live: Set<String>, bookmarks: [Bookmark], now: Date = Date()) {
+    /// instance with a snapshot, this one included. `bookmarks` is every bookmark in every list, and
+    /// `shown` the ids of those a window of the snapshot shows (see `unlinkTabs`): a tab only belongs
+    /// to a bookmark its window shows.
+    mutating func update(
+        with snapshot: Snapshot,
+        live: Set<String>,
+        bookmarks: [Bookmark],
+        shown: (BrowserWindow) -> Set<UUID>,
+        now: Date = Date()
+    ) {
         let instance = snapshot.instance
         if !knownInstances.contains(instance) {
             // A background page that has just started. The instances that haven't reported are gone
@@ -110,6 +135,8 @@ struct BookmarkTabs: Equatable {
             }
         }
 
+        unlinkTabs(in: snapshot, notShown: shown)
+
         // One tab per bookmark in each window. A bookmark's tab moved into a window where the
         // bookmark already has one: the one showing stays the bookmark's (or the first), and the
         // other goes back under Tabs.
@@ -125,7 +152,8 @@ struct BookmarkTabs: Equatable {
         }
 
         // Restored tabs: tabs of a background page that started since, still on a saved page whose
-        // bookmark has no tab in their window yet.
+        // bookmark has no tab in their window yet, and that their window shows (a pinned item only
+        // gets back a tab of its own profile).
         let bookmarkIds = Set(bookmarks.map(\.id))
         restorable.removeAll { now.timeIntervalSince($0.since) >= Self.restoreWindow || !bookmarkIds.contains($0.bookmark) }
         if restorable.isEmpty {
@@ -134,11 +162,13 @@ struct BookmarkTabs: Equatable {
         guard restoringInstances.contains(instance) else { return }
         let savedPages = Dictionary(bookmarks.map { ($0.id, $0.url.comparableURL) }, uniquingKeysWith: { first, _ in first })
         for window in snapshot.windows {
+            let ids = shown(window)
             for tab in window.tabs {
                 let key = TabKey(instance: instance, tabId: tab.id)
                 guard links[key] == nil, let page = tab.url?.comparableURL,
                       let index = restorable.firstIndex(where: {
-                          savedPages[$0.bookmark] == page && self.tab(of: $0.bookmark, in: window, instance: instance) == nil
+                          ids.contains($0.bookmark) && savedPages[$0.bookmark] == page
+                              && self.tab(of: $0.bookmark, in: window, instance: instance) == nil
                       }) else { continue }
                 links[key] = Link(bookmark: restorable[index].bookmark, since: now)
                 restorable.remove(at: index)
@@ -182,20 +212,26 @@ struct BookmarkTabs: Equatable {
 }
 
 extension TabStore {
-    /// The tabs listed under Tabs in `window`: all of them except bookmarks' tabs, which their
-    /// bookmarks' rows stand for. With bookmarks hidden, every tab is listed.
+    /// The tabs listed under Tabs in `window`: all of them except the tabs of the favorites and
+    /// pinned items the window shows, which their tiles and rows stand for. With those hidden
+    /// (Settings), every tab is listed.
     func tabsListed(in window: BrowserWindow, instance: String, bookmarksShown: Bool = true) -> [BrowserTab] {
         guard bookmarksShown else { return window.tabs }
-        return window.tabs.filter { bookmarkTabs.bookmark(owning: TabKey(instance: instance, tabId: $0.id)) == nil }
+        // Only bookmarks this window shows: a tab can't be left out for one nothing here stands for.
+        // (The links are kept that way, see `BookmarkTabs.unlinkTabs`; this makes sure of it.)
+        let shown = bookmarkIds(shownIn: window, instance: instance)
+        return window.tabs.filter { tab in
+            bookmarkTabs.bookmark(owning: TabKey(instance: instance, tabId: tab.id)).map { !shown.contains($0) } ?? true
+        }
     }
 
     /// Closes the bookmark's tab in the window the sidebar shows, which puts the bookmark back to
-    /// closed: the next click opens its saved page. It's what the row's "−" and a middle click on
-    /// the row do. Says whether there was a tab to close.
+    /// closed: the next click opens its saved page. It's what a pinned row's "−", a middle click on
+    /// a row or tile, and a tile's Close Tab do. Says whether there was a tab to close.
     @discardableResult
     func closeBookmarkTab(_ id: UUID) -> Bool {
         guard let selection = currentWindow,
-              let bookmark = bookmarks.first(where: { $0.id == id }),
+              let bookmark = bookmarkLists.bookmark(id),
               let tab = openTab(for: bookmark) else { return false }
         close([tab], instance: selection.instance)
         return true
