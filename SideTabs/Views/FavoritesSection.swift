@@ -103,7 +103,12 @@ struct TileGridMetrics: Equatable {
 
     var width: CGFloat
 
-    var columns: Int { max(2, Int((width + Self.spacing) / (Self.minimumTile + Self.spacing))) }
+    /// SwiftUI measures with an infinite or zero width at times. Turning infinity into a count crashed
+    /// Side Tabs at launch, so a width that isn't a real, positive number gets the fewest columns.
+    var columns: Int {
+        guard width.isFinite, width > 0 else { return 2 }
+        return max(2, Int((width + Self.spacing) / (Self.minimumTile + Self.spacing)))
+    }
     var tile: CGFloat { max(0, (width - Self.spacing * CGFloat(columns - 1)) / CGFloat(columns)) }
     var pitch: CGFloat { tile + Self.spacing }
 
@@ -119,7 +124,7 @@ struct TileGridMetrics: Equatable {
     /// The slot for a point in the grid's coordinates: the cell it's in, from 0 to `count` (past the
     /// last tile is the end).
     func slot(at point: CGPoint, count: Int) -> Int {
-        guard pitch > 0 else { return max(count, 0) }
+        guard pitch > 0, pitch.isFinite, point.x.isFinite, point.y.isFinite else { return max(count, 0) }
         let column = min(max(Int((point.x / pitch).rounded(.down)), 0), columns - 1)
         let row = max(Int((point.y / pitch).rounded(.down)), 0)
         return min(row * columns + column, max(count, 0))
@@ -133,7 +138,10 @@ private struct TileGrid: Layout {
     let metrics: TileGridMetrics
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let grid = proposal.width.map { TileGridMetrics(width: $0) } ?? metrics
+        // An unspecified or infinite width (SwiftUI asking for the grid's ideal or largest size) uses the
+        // width last measured.
+        let proposed = proposal.width.flatMap { $0.isFinite ? $0 : nil }
+        let grid = proposed.map { TileGridMetrics(width: $0) } ?? metrics
         return CGSize(width: grid.width, height: grid.height(for: subviews.count))
     }
 

@@ -153,6 +153,7 @@ final class SidebarDrag {
     /// The slot whose position the floating row overlaps most.
     private func slot(rowTop: CGFloat, rowsTop: CGFloat, others: Int) -> Int {
         let position = ((rowTop - rowsTop) / Self.pitch).rounded()
+        guard position.isFinite else { return 0 }
         return min(max(Int(position), 0), max(others, 0))
     }
 
@@ -204,6 +205,7 @@ final class SidebarDrag {
     func pinnedIndex(forDropAt y: CGFloat, count: Int) -> Int {
         let rowsOffset = pinnedRowsTop - pinnedSectionTop
         let position = ((y - rowsOffset) / Self.pitch).rounded(.down)
+        guard position.isFinite else { return count }
         return min(max(Int(position), 0), count)
     }
 }
