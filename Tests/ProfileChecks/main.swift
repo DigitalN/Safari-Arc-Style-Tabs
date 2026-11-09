@@ -629,9 +629,13 @@ do {
     let widest = ProfileBarLayout.barWidth(sidebarWidth: 420)
     check(narrowest == 164 && standard == 244 && widest == 404, "the bar is the sidebar less its insets")
 
+    // Closed Tabs on the left; on the right the +, with the Settings gear a row up, over it (#43). If the gear ever
+    // moved beside the +, the right end would widen and the counts below would drop.
     let side = ProfileBarLayout.sideButtonWidth
+    let trailing = ProfileBarLayout.trailingWidth
+    check(trailing == side, "the gear above the + leaves the right end one button wide (#43)")
     func fitting(_ bar: CGFloat, leading: CGFloat) -> Int {
-        ProfileBarLayout.buttonsFitting(in: ProfileBarLayout.room(barWidth: bar, leading: leading, trailing: side))
+        ProfileBarLayout.buttonsFitting(in: ProfileBarLayout.room(barWidth: bar, leading: leading, trailing: trailing))
     }
     check(fitting(narrowest, leading: side) == 3, "3 buttons fit at the narrowest, got \(fitting(narrowest, leading: side))")
     check(fitting(standard, leading: side) == 6, "6 fit at the default width, got \(fitting(standard, leading: side))")
@@ -648,8 +652,8 @@ do {
         let width = ProfileBarLayout.buttonsWidth(count: count)
         let place = ProfileBarLayout.centred(width: width, barWidth: bar)
         check(abs(place.minX - (bar - place.maxX)) < 0.001, "equal room on both sides at \(bar), \(count) buttons")
-        check(place.minX >= max(leading, side) + ProfileBarLayout.gap - 0.001, "the buttons clear the ends at \(bar)")
-        check(ProfileBarLayout.buttonsWidth(count: count + 1) > ProfileBarLayout.room(barWidth: bar, leading: leading, trailing: side),
+        check(place.minX >= max(leading, trailing) + ProfileBarLayout.gap - 0.001, "the buttons clear the ends at \(bar)")
+        check(ProfileBarLayout.buttonsWidth(count: count + 1) > ProfileBarLayout.room(barWidth: bar, leading: leading, trailing: trailing),
               "and one more wouldn't fit at \(bar)")
     }
     check(ProfileBarLayout.buttonsWidth(count: 1) == 26 && ProfileBarLayout.buttonsWidth(count: 3) == 82 && ProfileBarLayout.buttonsWidth(count: 0) == 0,
@@ -659,7 +663,7 @@ do {
 
     // When the dropdown takes over.
     func middle(_ count: Int, _ bar: CGFloat, leading: CGFloat = 0) -> ProfileBarLayout.Middle {
-        ProfileBarLayout.middle(profileCount: count, barWidth: bar, leading: leading, trailing: side)
+        ProfileBarLayout.middle(profileCount: count, barWidth: bar, leading: leading, trailing: trailing)
     }
     check(middle(1, standard) == .nothing && middle(0, standard) == .nothing, "one profile: only the + shows")
     check(middle(2, narrowest) == .buttons && middle(3, narrowest) == .buttons, "at the narrowest, 3 profiles are buttons")
@@ -669,7 +673,7 @@ do {
     check(middle(4, narrowest) == .dropdown(maxWidth: 100) && middle(4, standard) == .buttons, "widening the sidebar turns the dropdown back into buttons")
     if case .dropdown(let maxWidth) = middle(9, standard) {
         let place = ProfileBarLayout.centred(width: maxWidth, barWidth: standard)
-        check(abs(place.minX - (standard - place.maxX)) < 0.001 && place.minX >= side + ProfileBarLayout.gap - 0.001, "the dropdown is centred in the same room")
+        check(abs(place.minX - (standard - place.maxX)) < 0.001 && place.minX >= trailing + ProfileBarLayout.gap - 0.001, "the dropdown is centred in the same room")
     }
 }
 

@@ -55,7 +55,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .environment(settings)
             .environment(favicons)
             .environment(rows)
-            .environment(safariProfiles))
+            .environment(safariProfiles)
+            // The gear in the sidebar's bottom bar (#43).
+            .environment(\.showSideTabsSettings, ShowSettingsAction { [weak self] in self?.showSettings() }))
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
         self.dock = dock
 
@@ -84,6 +86,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
         store.onOpenAddressBar = { [weak self] in self?.dock?.openSafariAddressBar() }
         store.lastPointerDown = { [weak panel] in panel?.lastMouseDown ?? .distantPast }
+        // A press on the Settings gear (#43) doesn't bring Safari forward, which is what normally puts the
+        // docked sidebar back behind Safari's window after a click. Lay it out again instead, so it goes
+        // back there even if the press opens nothing or macOS doesn't let Side Tabs come forward.
+        panel.onMouseDownKeepingSafariBehind = { [weak self] in
+            DispatchQueue.main.async { self?.dock?.update(makeRoom: false) }
+        }
         // A middle click on a tab row closes the tab, and one on an open bookmark closes the
         // bookmark's tab, like its "−" (a closed bookmark has nothing to close). Neither switches to
         // the tab first: only a left press does that. (Safari has already been brought forward by
