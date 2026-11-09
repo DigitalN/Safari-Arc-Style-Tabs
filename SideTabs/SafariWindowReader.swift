@@ -151,9 +151,8 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
             assign(&reading, value)
             return true
         }
-        guard step({ frame(of: window) }, { $0.frame = $1 }),
-              step({ query.string(window, kAXTitleAttribute) }, { $0.title = $1 }),
-              step({ query.bool(window, "AXFullScreen") ?? false }, { $0.isFullScreen = $1 }) else {
+        // In one round trip: this runs every second and after every window event, docked or not.
+        guard step({ basics(of: window) }, { $0.frame = $1.frame; $0.title = $1.title; $0.isFullScreen = $1.isFullScreen }) else {
             return (reading, false)
         }
         if reading.number == nil {
@@ -249,14 +248,25 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
 
     // MARK: - Geometry
 
-    private func frame(of element: AXUIElement) -> CGRect? {
-        guard let positionValue = query.value(element, kAXPositionAttribute),
-              let sizeValue = query.value(element, kAXSizeAttribute) else { return nil }
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(positionValue, .cgPoint, &position),
-              AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
-        return CGRect(origin: position, size: size)
+    /// A window's frame, title and whether it's full screen, in one round trip. What Safari doesn't
+    /// give comes back nil (or not full screen), as the separate reads did.
+    private func basics(of window: AXUIElement) -> (frame: CGRect?, title: String?, isFullScreen: Bool) {
+        let attributes = [kAXPositionAttribute, kAXSizeAttribute, kAXTitleAttribute, "AXFullScreen"]
+        guard let values = query.copyMultiple(window, attributes), values.count == attributes.count else {
+            return (nil, nil, false)
+        }
+        return (Self.frame(position: values[0], size: values[1]), values[2] as? String, values[3] as? Bool ?? false)
+    }
+
+    /// A frame from an element's `AXPosition` and `AXSize` values, if both are there.
+    nonisolated private static func frame(position: CFTypeRef?, size: CFTypeRef?) -> CGRect? {
+        guard let position, let size,
+              CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero
+        var extent = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(size as! AXValue, .cgSize, &extent) else { return nil }
+        return CGRect(origin: origin, size: extent)
     }
 
     private func windowNumber(of window: AXUIElement) -> Int? {
@@ -306,16 +316,8 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
             guard !query.timedOut else { return nil }
             let attributes = [kAXRoleAttribute, kAXIdentifierAttribute, kAXPositionAttribute, kAXSizeAttribute]
             guard let values = query.copyMultiple(element, attributes), values.count == attributes.count else { return nil }
-            var frame: CGRect?
-            if let position = values[2], let size = values[3],
-               CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() {
-                var origin = CGPoint.zero
-                var extent = CGSize.zero
-                if AXValueGetValue(position as! AXValue, .cgPoint, &origin), AXValueGetValue(size as! AXValue, .cgSize, &extent) {
-                    frame = CGRect(origin: origin, size: extent)
-                }
-            }
-            return BarNode(element: element, query: query, role: values[0] as? String, identifier: values[1] as? String, frame: frame)
+            return BarNode(element: element, query: query, role: values[0] as? String, identifier: values[1] as? String,
+                           frame: SafariWindowReader.frame(position: values[2], size: values[3]))
         }
 
         func children() -> [BarNode] {
