@@ -306,6 +306,50 @@ do {
           "nor without a click on the icon: the Window menu, App Exposé or a Dock tile is a change of profile")
 }
 
+// MARK: - The Dock icon's blank window
+
+do {
+    func tab(_ url: String?, loading: Bool = false, id: Int = 1) -> BrowserTab {
+        BrowserTab(id: id, windowId: 9, index: id - 1, title: nil, url: url, active: id == 1, pinned: false, audible: false,
+                   muted: false, loading: loading, favIconUrl: nil)
+    }
+    func reported(_ tabs: [BrowserTab]) -> BrowserWindow {
+        BrowserWindow(id: 9, focused: true, incognito: false, tabs: tabs)
+    }
+    let click = Date()
+    let soon = click.addingTimeInterval(0.4)
+    func verdict(_ tabs: [BrowserTab]?, onList: Bool = false, createdAt: Date? = soon) -> DockIconBlankWindow.Verdict {
+        DockIconBlankWindow.verdict(onList: onList, createdAt: createdAt, clickAt: click, newWindows: tabs.map { [reported($0)] })
+    }
+
+    check(verdict([tab(nil)]) == .close, "one tab on Safari's Start Page, nothing loaded: Safari's new window is closed")
+    check(verdict([tab("")]) == .close && verdict([tab("favorites://")]) == .close && verdict([tab("about:blank")]) == .close,
+          "however the copy reports the blank page's address")
+    check(verdict([tab("https://example.com/")]) == .keep(.notBlank), "a page loaded in it: minimized as before")
+    check(verdict([tab(nil), tab(nil, id: 2)]) == .keep(.severalTabs), "two tabs: minimized")
+    check(verdict([tab(nil, loading: true)]) == .keep(.loading), "a page loading: minimized")
+    check(verdict(nil) == .keep(.noReport), "no live copy to report it: minimized")
+    check(DockIconBlankWindow.verdict(onList: false, createdAt: soon, clickAt: click, newWindows: []) == .keep(.noReport),
+          "no report of it from its copy yet: minimized (once the short wait is over)")
+    check(verdict([]) == .keep(.noReport), "reported before its tab was: not reported yet")
+    check(DockIconBlankWindow.verdict(onList: false, createdAt: soon, clickAt: click, newWindows: [reported([tab(nil)]), reported([tab(nil)])]) == .keep(.unclear),
+          "two new windows in its copy: which one it is can't be told, so minimized")
+    check(verdict([tab(nil)], onList: true) == .keep(.onList), "a window on the list is never closed, blank or not")
+    check(verdict([tab(nil)], createdAt: nil) == .keep(.notNew),
+          "a window that wasn't created on the click (macOS brought back a minimized one) is never closed")
+    check(verdict([tab(nil)], createdAt: click.addingTimeInterval(DockIconBlankWindow.appearedWithin + 0.5)) == .keep(.notNew),
+          "nor one that appeared long after the click")
+    check(verdict([tab(nil)], createdAt: click.addingTimeInterval(-0.2)) == .close, "one that appeared just before a click reported late counts")
+    check(verdict([tab(nil)], createdAt: click.addingTimeInterval(-2)) == .keep(.notNew), "one from well before the click doesn't")
+    check(DockIconBlankWindow.isUntouched(reported([tab(nil)])) && !DockIconBlankWindow.isUntouched(reported([tab("https://example.com/")])),
+          "untouched: one blank tab")
+
+    // While Side Tabs decides, sweeps leave that window alone.
+    let windows = [ProfileWindow(number: 1, profile: .profile(work)), ProfileWindow(number: 2, profile: .profile(home)), ProfileWindow(number: 3, profile: .profile(school))]
+    let spared = MinimizeRules.plan(current: work, left: nil, front: 1, windows: windows, list: MinimizedList(), spare: [3])
+    check(spared.minimize == [2], "a sweep spares the window the Dock icon brought out while its fate is decided")
+}
+
 if failures > 0 {
     print("\(failures) minimize check(s) failed")
     exit(1)

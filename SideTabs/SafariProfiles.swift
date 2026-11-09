@@ -51,7 +51,7 @@ final class SafariProfiles {
     @ObservationIgnored private lazy var switcher = ProfileSwitcher(reader: reader, minimizer: minimizer)
     /// "Minimize other profiles' windows" (#42).
     @ObservationIgnored private lazy var minimizing = MinimizeOtherProfiles(
-        host: self, settings: settings, tracker: tracker, reader: reader, minimizer: minimizer
+        host: self, settings: settings, tracker: tracker, store: store, reader: reader, minimizer: minimizer
     )
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "profiles")
@@ -946,8 +946,9 @@ final class SafariProfiles {
         case kAXWindowCreatedNotification:
             // Read its profile now, so a switch to it later doesn't have to. A window of a profile
             // the list doesn't have means the list is out of date.
+            let createdAt = Date()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                self?.windowAppeared(element)
+                self?.windowAppeared(element, createdAt: createdAt)
             }
         case kAXFocusedWindowChangedNotification:
             checkSettingsClosed()
@@ -961,7 +962,7 @@ final class SafariProfiles {
         minimizing.notified(name)
     }
 
-    private func windowAppeared(_ window: AXUIElement) {
+    private func windowAppeared(_ window: AXUIElement, createdAt: Date) {
         guard tracker.isTrusted else { return }
         let reader = reader
         reader.queue.async { [weak self] in
@@ -971,7 +972,7 @@ final class SafariProfiles {
                     guard let self else { return }
                     self.countLikeWindows()
                     let resolution = ProfileRules.resolve(toolbar, windowTitle: nil, profiles: self.profiles, copyWindows: [])
-                    self.minimizing.windowAppeared(number: number, profile: resolution)
+                    self.minimizing.windowAppeared(number: number, profile: resolution, createdAt: createdAt)
                     guard case .profile(let name, _) = toolbar, !name.isEmpty else { return }
                     if self.profiles.contains(where: { ProfileIdentifiers.sameName($0.name, name) }) {
                         self.learnSymbols(from: [toolbar])

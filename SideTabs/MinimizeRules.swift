@@ -217,10 +217,13 @@ nonisolated enum MinimizeRules {
     ///   earlier (one opened while Side Tabs wasn't running, say) doesn't take the mark.
     /// - **Brought back:** the current profile's windows on the list, except `front`. Back to front, ending
     ///   with the one used last. A window the user minimized isn't on the list, and stays minimized.
-    static func plan(current: UUID, left: UUID?, front: Int?, windows: [ProfileWindow], list: MinimizedList) -> MinimizePlan {
+    ///
+    /// `spare`: windows to leave alone for now, such as the window the Dock icon brought out while Side Tabs
+    /// decides whether to close it.
+    static func plan(current: UUID, left: UUID?, front: Int?, windows: [ProfileWindow], list: MinimizedList, spare: Set<Int> = []) -> MinimizePlan {
         var plan = MinimizePlan()
         var marked = Set<UUID>()
-        for window in windows where window.number != front && isMinimizable(window, current: current) {
+        for window in windows where window.number != front && !spare.contains(window.number) && isMinimizable(window, current: current) {
             plan.minimize.append(window.number)
             guard let profile = window.profile.profileID, !marked.contains(profile) else { continue }
             marked.insert(profile)
@@ -271,6 +274,73 @@ nonisolated enum DockIconRule {
         guard let current, let clickAt, let profile = windowProfile.profileID, profile != current else { return false }
         let after = windowAt.timeIntervalSince(clickAt)
         return after >= -lateClick && after <= clickWindow
+    }
+}
+
+// MARK: - The Dock icon's blank window
+
+/// With every window minimized, a click on Safari's Dock icon can make Safari open a new window, in whatever
+/// profile it picks, rather than bring one back. The Dock icon rule then opens a window in the current profile,
+/// and Safari's new window would be minimized and left in the Dock, empty, one more on every such click. So,
+/// decided with the maintainer (#42): once the current profile's window is in front, Side Tabs closes that
+/// window instead, while it's still untouched. It never closes any other window it didn't open.
+nonisolated enum DockIconBlankWindow {
+    /// What happens to the window the Dock icon brought out.
+    enum Verdict: Equatable, Sendable {
+        case close
+        /// Minimized, as any other profile's window: with why it wasn't closed, for the log.
+        case keep(Reason)
+    }
+
+    enum Reason: String, Equatable, Sendable {
+        case onList = "it's one Side Tabs minimized"
+        case notNew = "it didn't appear on the click"
+        case noReport = "its profile's copy hasn't reported it"
+        case unclear = "its profile's copy reports more than one new window"
+        case severalTabs = "it has more than one tab"
+        case loading = "a page is loading in it"
+        case notBlank = "a page is open in it"
+    }
+
+    /// How long after the click a window can appear and count as the click's doing (and how long before, for a
+    /// click reported late).
+    static let appearedWithin: TimeInterval = DockIconRule.clickWindow
+    /// How long to wait, once the current profile's window is in front, for the window's copy to report it.
+    static let reportWait: TimeInterval = 1
+
+    /// Whether a tab's address is Safari's blank Start Page (or an empty page): no page loaded. Addresses, not
+    /// titles, which are translated.
+    static func isBlank(url: String?) -> Bool {
+        guard let url, !url.isEmpty else { return true }
+        return url == "about:blank" || url.hasPrefix("favorites:")
+    }
+
+    /// Untouched, as the window's copy reports it: one tab, on the Start Page, with no page loading.
+    static func isUntouched(_ window: BrowserWindow) -> Bool {
+        verdict(of: window) == .close
+    }
+
+    private static func verdict(of window: BrowserWindow) -> Verdict {
+        // Reported before its tab was: not reported yet, as far as this goes.
+        guard let tab = window.tabs.first else { return .keep(.noReport) }
+        guard window.tabs.count == 1 else { return .keep(.severalTabs) }
+        if tab.loading { return .keep(.loading) }
+        return isBlank(url: tab.url) ? .close : .keep(.notBlank)
+    }
+
+    /// What happens to the window the Dock icon brought out, once the current profile's window is in front.
+    /// Closed only when it isn't on the list, it appeared on the click (`createdAt`, from Safari's window-created
+    /// notification, against `clickAt`), and its copy reports it untouched: of the copy's windows that weren't
+    /// there before the click (`newWindows`; nil without a live copy), it's the only one, with one tab, on the
+    /// Start Page, nothing loading. Anything else, or anything unclear, and it's minimized as before.
+    static func verdict(onList: Bool, createdAt: Date?, clickAt: Date, newWindows: [BrowserWindow]?) -> Verdict {
+        if onList { return .keep(.onList) }
+        guard let createdAt else { return .keep(.notNew) }
+        let after = createdAt.timeIntervalSince(clickAt)
+        guard after >= -DockIconRule.lateClick, after <= appearedWithin else { return .keep(.notNew) }
+        guard let newWindows, !newWindows.isEmpty else { return .keep(.noReport) }
+        guard newWindows.count == 1 else { return .keep(.unclear) }
+        return verdict(of: newWindows[0])
     }
 }
 

@@ -28,6 +28,8 @@ nonisolated final class WindowMinimizer: @unchecked Sendable {
         let resolve: ProfileResolver
         /// Runs on the reader's queue when the sweep is over.
         let completion: @Sendable (Outcome) -> Void
+        /// Windows to leave alone: the Dock icon's new window, while Side Tabs decides whether to close it.
+        var spare: Set<Int> = []
     }
 
     /// What a sweep did, for the log and the Dock icon rule.
@@ -126,6 +128,22 @@ nonisolated final class WindowMinimizer: @unchecked Sendable {
         unmatched = nil
         inFlight = [:]
         setList(MinimizedList())
+    }
+
+    /// Closes Safari's window `number` with its close button: the blank window Safari opened on a click on its
+    /// Dock icon (DockIconBlankWindow), and nothing else. Only while it's still open and not full screen, as it
+    /// was when its copy reported it untouched. Says whether the press went through. Call on `reader.queue`.
+    ///
+    /// The close button rather than the extension: it acts on exactly the window Accessibility knows by that
+    /// number, with no matching to the copy's window ids, and doesn't wait on the extension, which can run
+    /// seconds late under load. A window with one tab closes without Safari asking.
+    func closeBlankWindow(_ number: Int, application: AXUIElement) -> Bool {
+        query.clearTimedOut()
+        guard let window = query.elements(application, kAXWindowsAttribute).first(where: { reader.number(of: $0) == number }),
+              let state = query.copyMultiple(window, [kAXMinimizedAttribute, "AXFullScreen"]), state.count == 2,
+              state[0] as? Bool != true, state[1] as? Bool != true,
+              let button = query.element(window, kAXCloseButtonAttribute) else { return false }
+        return query.perform(button, kAXPressAction) == .success
     }
 
     /// Whether Side Tabs brought this window back a moment ago (a switch's target, or a sweep's), so its coming
@@ -235,7 +253,7 @@ nonisolated final class WindowMinimizer: @unchecked Sendable {
         matchIfNeeded(read.windows, complete: read.complete, current: sweep.current, outcome: &outcome)
         let windows = settledWindows(read.windows, now: started)
         reconcile(windows, complete: read.complete, outcome: &outcome)
-        let plan = MinimizeRules.plan(current: sweep.current, left: sweep.left, front: sweep.front, windows: windows, list: list)
+        let plan = MinimizeRules.plan(current: sweep.current, left: sweep.left, front: sweep.front, windows: windows, list: list, spare: sweep.spare)
         var steps = plan.minimize.map { Step.minimize($0, usedLast: plan.usedLast.contains($0)) } + plan.restore.map(Step.restore)
         if !plan.restore.isEmpty, Self.raisesFrontAfterRestoring, let front = sweep.front {
             steps.append(.raiseFront(front))

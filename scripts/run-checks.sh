@@ -93,7 +93,7 @@ swiftc -o "$WORK/profile-checks" \
 echo "== minimizing other profiles' windows"
 swiftc -o "$WORK/minimize-checks" \
     Tests/MinimizeChecks/main.swift SideTabs/MinimizeRules.swift SideTabs/ProfileRules.swift \
-    SideTabs/SafariProfile.swift SideTabs/ProfileKey.swift
+    SideTabs/SafariProfile.swift SideTabs/ProfileKey.swift SideTabs/Models.swift
 "$WORK/minimize-checks"
 
 # What the sidebar shows while a profile switch's window comes back from the Dock (#44): the switch's target matched

@@ -95,13 +95,31 @@ final class MinimizeOtherProfiles {
     /// Where the current profile's window last was, for the window the Dock icon opens.
     private var closedFrame: CGRect?
 
+    // The Dock icon's blank window (DockIconBlankWindow).
+    /// The window the Dock icon brought out that isn't on the list, while the current profile's window comes: once
+    /// it's in front, this one is closed if Safari opened it on the click and it's untouched, and otherwise
+    /// minimized. Sweeps leave it alone meanwhile.
+    private struct BlankCandidate {
+        let number: Int
+        let profile: UUID
+        let clickAt: Date
+    }
+    private var blankCandidate: BlankCandidate?
+    /// When each window was created, from Safari's notification, for a few seconds.
+    private var windowCreatedAt: [Int: Date] = [:]
+    /// The copies' windows when the Dock icon rule began to apply, by instance: a window not among them is new.
+    private var copyWindowsWhenArmed: [String: Set<Int>] = [:]
+
     private var workspaceTokens: [NSObjectProtocol] = []
 
-    init(host: SafariProfiles, settings: AppSettings, tracker: SafariTracker, reader: ProfileReader, minimizer: WindowMinimizer,
+    private let store: TabStore
+
+    init(host: SafariProfiles, settings: AppSettings, tracker: SafariTracker, store: TabStore, reader: ProfileReader, minimizer: WindowMinimizer,
          fileURL: URL = MinimizedWindowsFile.defaultURL) {
         self.host = host
         self.settings = settings
         self.tracker = tracker
+        self.store = store
         self.reader = reader
         self.minimizer = minimizer
         self.fileURL = fileURL
@@ -216,6 +234,7 @@ final class MinimizeOtherProfiles {
         deferred = nil
         cancelLateClick()
         setDockIconRule(applies: false)
+        blankCandidate = nil
         let generation = minimizer.supersede()
         guard let app = host.application else {
             reader.queue.async { minimizer.clear() }
@@ -341,7 +360,9 @@ final class MinimizeOtherProfiles {
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated { self?.sweepFinished(outcome) }
                 }
-            }
+            },
+            // The Dock icon's new window waits to be closed or minimized.
+            spare: blankCandidate.map { [$0.number] } ?? []
         )
     }
 
@@ -430,6 +451,14 @@ final class MinimizeOtherProfiles {
         if let current = currentProfileID, current != sweptFor || deferred != nil {
             wantSweep(.change, left: inFlight.left)
         }
+        if inFlight.reason == .dockIcon {
+            if succeeded {
+                // The current profile's window is in front: now the window Safari brought out goes.
+                settleBlankCandidate(waitingUntil: Date().addingTimeInterval(DockIconBlankWindow.reportWait))
+            } else {
+                blankCandidate = nil
+            }
+        }
     }
 
     // MARK: - Windows opening, Safari starting and quitting
@@ -454,7 +483,11 @@ final class MinimizeOtherProfiles {
     /// A window has appeared and its profile has been read. One that comes to the front is a change of
     /// profile; one of another profile that stays behind (History → Reopen All Windows from Last Session, say)
     /// is decided once it has settled.
-    func windowAppeared(number: Int?, profile: ProfileResolution) {
+    func windowAppeared(number: Int?, profile: ProfileResolution, createdAt: Date) {
+        if let number {
+            windowCreatedAt = windowCreatedAt.filter { createdAt.timeIntervalSince($0.value) < 10 }
+            windowCreatedAt[number] = createdAt
+        }
         guard isOn, let number, let id = profile.profileID, id != currentProfileID else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + ProfileReader.settleTime) { [weak self] in
             guard let self, self.isOn, self.lastFront?.number != number, self.currentProfileID != id else { return }
@@ -510,6 +543,8 @@ final class MinimizeOtherProfiles {
         lastFront = nil
         switchInFlight = nil
         deferred = nil
+        blankCandidate = nil
+        windowCreatedAt = [:]
         cancelLateClick()
         setDockIconRule(applies: false)
         // The list waits to be matched by UUID against the next Safari's windows; the file keeps it meanwhile.
@@ -533,6 +568,61 @@ final class MinimizeOtherProfiles {
     }
 
     // MARK: - The Dock icon
+
+    /// Decides about the window the Dock icon brought out, once the current profile's window is in front
+    /// (DockIconBlankWindow): closes it if Safari opened it on the click and its copy reports it untouched, and
+    /// otherwise minimizes it with a sweep, as before. Waits a little for the copy's report, and for Safari's word
+    /// that the window was created, if they haven't come yet.
+    private func settleBlankCandidate(waitingUntil deadline: Date) {
+        guard let candidate = blankCandidate else { return }
+        let createdAt = windowCreatedAt[candidate.number]
+        let verdict = DockIconBlankWindow.verdict(
+            onList: list.contains(candidate.number), createdAt: createdAt, clickAt: candidate.clickAt,
+            newWindows: newCopyWindows(of: candidate.profile)
+        )
+        let waiting = verdict == .keep(.noReport) || (verdict == .keep(.notNew) && createdAt == nil)
+        if waiting, Date() < deadline {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.settleBlankCandidate(waitingUntil: deadline)
+            }
+            return
+        }
+        blankCandidate = nil
+        let position = position(candidate.profile)
+        switch verdict {
+        case .close:
+            guard let app = host.application else { return }
+            let minimizer = minimizer
+            reader.queue.async { [weak self] in
+                let closed = minimizer.closeBlankWindow(candidate.number, application: app.element)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        if closed {
+                            self.log.notice("closed the blank window Safari opened in profile \(position, privacy: .public) on the Dock click")
+                        } else {
+                            self.log.notice("couldn't close the blank window Safari opened in profile \(position, privacy: .public) on the Dock click; minimizing it instead")
+                            self.wantSweep(.dockIcon, left: nil)
+                        }
+                    }
+                }
+            }
+        case .keep(let reason):
+            log.notice("kept the window Safari brought out in profile \(position, privacy: .public) on the Dock click, and minimized it: \(reason.rawValue, privacy: .public)")
+            wantSweep(.dockIcon, left: nil)
+        }
+    }
+
+    /// The windows of `profile`'s copy that weren't there when the Dock icon rule began to apply, private ones
+    /// left out. Nil when the profile's copy isn't known or isn't live.
+    private func newCopyWindows(of profile: UUID) -> [BrowserWindow]? {
+        guard let key = host.profiles.first(where: { $0.id == profile })?.key else { return nil }
+        let copies = store.liveSnapshots.values.filter { ProfileKey(snapshotProfile: $0.profile) == key }
+        guard !copies.isEmpty else { return nil }
+        return copies.flatMap { snapshot in
+            snapshot.windows.filter { !$0.incognito && !(copyWindowsWhenArmed[snapshot.instance]?.contains($0.id) ?? false) }
+        }
+    }
 
     private func scheduleDockIconCheck() {
         guard isOn else {
@@ -572,6 +662,8 @@ final class MinimizeOtherProfiles {
         dockIconArmed = applies
         dockIconClickAt = nil
         if applies {
+            // What the copies have now: a window the click makes Safari open is one not among these.
+            copyWindowsWhenArmed = store.liveSnapshots.mapValues { Set($0.windows.map(\.id)) }
             dockIconWatcher?.arm()
             log.notice("the current profile has no open window: watching for a click on Safari's Dock icon\(self.dockIconWatcher == nil ? " (no watcher yet)" : "", privacy: .public)")
         } else {
@@ -609,8 +701,15 @@ final class MinimizeOtherProfiles {
               let other = front.profile else { return }
         let onList = front.number.map(list.contains) ?? false
         log.notice("the Dock icon brought out a window of profile \(self.position(other), privacy: .public) (\(onList ? "one Side Tabs minimized" : "not on the list: Safari may have opened it", privacy: .public)); a window of profile \(self.position(current), privacy: .public) comes instead")
+        // One that isn't on the list may be a blank window Safari opened on the click: closed rather than minimized
+        // once the current profile's window is in front, if it's still untouched.
+        if !onList, let number = front.number, let clickAt {
+            blankCandidate = BlankCandidate(number: number, profile: other, clickAt: clickAt)
+        }
         // Timed from the click on the icon, not from the sidebar's last press.
         if !host.beginSwitch(to: profile, reason: .dockIcon, frame: closedFrame, clickAt: clickAt) {
+            // The window macOS brought out stays, as a change of profile.
+            blankCandidate = nil
             changeCurrent(to: other, front: front.number)
         }
     }
