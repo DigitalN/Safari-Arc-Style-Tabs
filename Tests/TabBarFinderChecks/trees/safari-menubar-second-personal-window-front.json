@@ -1,0 +1,3615 @@
+{
+ "actions": [
+  "AXCancel"
+ ],
+ "children": [
+  {
+   "actions": [
+    "AXCancel",
+    "AXPress",
+    "AXPick"
+   ],
+   "cmdModifiers": 0,
+   "enabled": true,
+   "frame": [
+    10,
+    0,
+    34,
+    39
+   ],
+   "role": "AXMenuBarItem",
+   "roleDescription": "menu bar item",
+   "selected": false,
+   "skipped": "not kept (only the Safari, File and View menus are recorded)",
+   "title": "Apple"
+  },
+  {
+   "actions": [
+    "AXCancel",
+    "AXPress",
+    "AXPick"
+   ],
+   "children": [
+    {
+     "actions": [
+      "AXCancel"
+     ],
+     "children": [
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 8,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "AboutSafari",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "About Safari"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "SafariExtensionsLibrary",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Safari Extensions…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:1303",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "attributes": [
+        "AXIdentifier",
+        "AXEnabled",
+        "AXFrame",
+        "AXParent",
+        "AXChildren",
+        "AXSize",
+        "AXMenuItemCmdGlyph",
+        "AXRole",
+        "AXMenuItemPrimaryUIElement",
+        "AXTopLevelUIElement",
+        "AXServesAsTitleForUIElements",
+        "AXMenuItemCmdModifiers",
+        "AXTitle",
+        "AXPosition",
+        "AXMenuItemCmdVirtualKey",
+        "AXMenuItemCmdChar",
+        "AXSubrole",
+        "AXSelected",
+        "AXMenuItemMarkChar"
+       ],
+       "cmdChar": ",",
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "Preferences",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Settings…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowPrivacyReport",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Privacy Report…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "attributes": [
+        "AXIdentifier",
+        "AXEnabled",
+        "AXFrame",
+        "AXParent",
+        "AXChildren",
+        "AXSize",
+        "AXMenuItemCmdGlyph",
+        "AXRole",
+        "AXMenuItemPrimaryUIElement",
+        "AXTopLevelUIElement",
+        "AXServesAsTitleForUIElements",
+        "AXMenuItemCmdModifiers",
+        "AXTitle",
+        "AXPosition",
+        "AXMenuItemCmdVirtualKey",
+        "AXMenuItemCmdChar",
+        "AXSubrole",
+        "AXSelected",
+        "AXMenuItemMarkChar"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowPerSitePreferencesMenuItem",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Settings for <site>…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowCertificate",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Connection Security Details…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:1304",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ClearHistory",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Clear History…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 10,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ClearHistoryAndKeepWebsiteData",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Clear History and Keep Website Data…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "attributes": [
+        "AXIdentifier",
+        "AXEnabled",
+        "AXFrame",
+        "AXParent",
+        "AXChildren",
+        "AXSize",
+        "AXMenuItemCmdGlyph",
+        "AXRole",
+        "AXMenuItemPrimaryUIElement",
+        "AXTopLevelUIElement",
+        "AXServesAsTitleForUIElements",
+        "AXMenuItemCmdModifiers",
+        "AXTitle",
+        "AXPosition",
+        "AXMenuItemCmdVirtualKey",
+        "AXMenuItemCmdChar",
+        "AXSubrole",
+        "AXSelected",
+        "AXMenuItemMarkChar"
+       ],
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ManageProfilesMenuItem",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Manage Profiles…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:1305",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "Services",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "skipped": "services submenu removed",
+       "title": "Services"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:1306",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "H",
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "HideApplication",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Hide Safari"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "H",
+       "cmdModifiers": 2,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "HideOthers",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Hide Others"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowAll",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Show All"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:1307",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "Q",
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "QuitApplication",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Quit Safari"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "attributes": [
+        "AXEnabled",
+        "AXFrame",
+        "AXParent",
+        "AXChildren",
+        "AXSize",
+        "AXMenuItemCmdGlyph",
+        "AXRole",
+        "AXMenuItemPrimaryUIElement",
+        "AXTopLevelUIElement",
+        "AXServesAsTitleForUIElements",
+        "AXMenuItemCmdModifiers",
+        "AXTitle",
+        "AXPosition",
+        "AXMenuItemCmdVirtualKey",
+        "AXMenuItemCmdChar",
+        "AXSubrole",
+        "AXSelected",
+        "AXMenuItemMarkChar",
+        "AXIdentifier"
+       ],
+       "cmdChar": "Q",
+       "cmdModifiers": 2,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "NSAlternateQuitMenuItem",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Quit and Keep Windows"
+      }
+     ],
+     "enabled": true,
+     "frame": [
+      0,
+      1329,
+      0,
+      0
+     ],
+     "identifier": "ApplicationMenu",
+     "role": "AXMenu",
+     "roleDescription": "menu",
+     "selected": false
+    }
+   ],
+   "cmdModifiers": 0,
+   "enabled": true,
+   "frame": [
+    43,
+    0,
+    59,
+    39
+   ],
+   "identifier": "_NS:1295",
+   "role": "AXMenuBarItem",
+   "roleDescription": "menu bar item",
+   "selected": false,
+   "title": "Safari"
+  },
+  {
+   "actions": [
+    "AXCancel",
+    "AXPress",
+    "AXPick"
+   ],
+   "children": [
+    {
+     "actions": [
+      "AXCancel"
+     ],
+     "children": [
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "attributes": [
+        "AXIdentifier",
+        "AXEnabled",
+        "AXFrame",
+        "AXParent",
+        "AXChildren",
+        "AXSize",
+        "AXMenuItemCmdGlyph",
+        "AXRole",
+        "AXMenuItemPrimaryUIElement",
+        "AXTopLevelUIElement",
+        "AXServesAsTitleForUIElements",
+        "AXMenuItemCmdModifiers",
+        "AXTitle",
+        "AXPosition",
+        "AXMenuItemCmdVirtualKey",
+        "AXMenuItemCmdChar",
+        "AXSubrole",
+        "AXSelected",
+        "AXMenuItemMarkChar"
+       ],
+       "children": [
+        {
+         "actions": [
+          "AXCancel"
+         ],
+         "children": [
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXIdentifier",
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar"
+           ],
+           "cmdChar": "0",
+           "cmdModifiers": 3,
+           "enabled": true,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "NewPersonalWindow?isDefaultProfile=true",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "New Personal Window"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXIdentifier",
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar"
+           ],
+           "cmdChar": "1",
+           "cmdModifiers": 3,
+           "enabled": true,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "NewPersonalWindow?isDefaultProfile=false",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "New Personal Window"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXIdentifier",
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar"
+           ],
+           "cmdChar": "N",
+           "cmdModifiers": 0,
+           "enabled": true,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "NewWorkWindow?isDefaultProfile=false",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "New Work Window"
+          }
+         ],
+         "enabled": true,
+         "frame": [
+          0,
+          1329,
+          0,
+          0
+         ],
+         "identifier": "NewWindowSubmenu",
+         "role": "AXMenu",
+         "roleDescription": "menu",
+         "selected": false
+        }
+       ],
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "NewWindowSubmenuItem",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "New Window"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "attributes": [
+        "AXIdentifier",
+        "AXEnabled",
+        "AXFrame",
+        "AXParent",
+        "AXChildren",
+        "AXSize",
+        "AXMenuItemCmdGlyph",
+        "AXRole",
+        "AXMenuItemPrimaryUIElement",
+        "AXTopLevelUIElement",
+        "AXServesAsTitleForUIElements",
+        "AXMenuItemCmdModifiers",
+        "AXTitle",
+        "AXPosition",
+        "AXMenuItemCmdVirtualKey",
+        "AXMenuItemCmdChar",
+        "AXSubrole",
+        "AXSelected",
+        "AXMenuItemMarkChar"
+       ],
+       "cmdChar": "N",
+       "cmdModifiers": 1,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "NewPrivateWindow",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "New Private Window"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "T",
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "NewTab",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "New Tab"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "T",
+       "cmdModifiers": 2,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "NewTab",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "New Tab at End"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "N",
+       "cmdModifiers": 4,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "NewEmptyTabGroupMenuItem",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "New Empty Tab Group"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "O",
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "OpenFile",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Open File…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "L",
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "OpenLocation",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Open Location…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:578",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "attributes": [
+        "AXIdentifier",
+        "AXEnabled",
+        "AXFrame",
+        "AXParent",
+        "AXChildren",
+        "AXSize",
+        "AXMenuItemCmdGlyph",
+        "AXRole",
+        "AXMenuItemPrimaryUIElement",
+        "AXTopLevelUIElement",
+        "AXServesAsTitleForUIElements",
+        "AXMenuItemCmdModifiers",
+        "AXTitle",
+        "AXPosition",
+        "AXMenuItemCmdVirtualKey",
+        "AXMenuItemCmdChar",
+        "AXSubrole",
+        "AXSelected",
+        "AXMenuItemMarkChar"
+       ],
+       "cmdChar": "W",
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "CloseWindow",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Close Window"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "attributes": [
+        "AXEnabled",
+        "AXFrame",
+        "AXDescription",
+        "AXParent",
+        "AXChildren",
+        "AXSize",
+        "AXMenuItemCmdGlyph",
+        "AXRole",
+        "AXMenuItemPrimaryUIElement",
+        "AXTopLevelUIElement",
+        "AXServesAsTitleForUIElements",
+        "AXMenuItemCmdModifiers",
+        "AXTitle",
+        "AXPosition",
+        "AXMenuItemCmdVirtualKey",
+        "AXMenuItemCmdChar",
+        "AXSubrole",
+        "AXSelected",
+        "AXMenuItemMarkChar",
+        "AXIdentifier"
+       ],
+       "cmdChar": "W",
+       "cmdModifiers": 1,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:249",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Close Window"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "attributes": [
+        "AXIdentifier",
+        "AXEnabled",
+        "AXFrame",
+        "AXParent",
+        "AXChildren",
+        "AXSize",
+        "AXMenuItemCmdGlyph",
+        "AXRole",
+        "AXMenuItemPrimaryUIElement",
+        "AXTopLevelUIElement",
+        "AXServesAsTitleForUIElements",
+        "AXMenuItemCmdModifiers",
+        "AXTitle",
+        "AXPosition",
+        "AXMenuItemCmdVirtualKey",
+        "AXMenuItemCmdChar",
+        "AXSubrole",
+        "AXSelected",
+        "AXMenuItemMarkChar"
+       ],
+       "cmdChar": "W",
+       "cmdModifiers": 2,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "CloseAllWindows",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Close All Windows"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "attributes": [
+        "AXEnabled",
+        "AXFrame",
+        "AXDescription",
+        "AXParent",
+        "AXChildren",
+        "AXSize",
+        "AXMenuItemCmdGlyph",
+        "AXRole",
+        "AXMenuItemPrimaryUIElement",
+        "AXTopLevelUIElement",
+        "AXServesAsTitleForUIElements",
+        "AXMenuItemCmdModifiers",
+        "AXTitle",
+        "AXPosition",
+        "AXMenuItemCmdVirtualKey",
+        "AXMenuItemCmdChar",
+        "AXSubrole",
+        "AXSelected",
+        "AXMenuItemMarkChar",
+        "AXIdentifier"
+       ],
+       "cmdChar": "W",
+       "cmdModifiers": 3,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:227",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Close All Windows"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "CloseTab",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Close Tab"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 2,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "CloseOtherTabs",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Close Other Tabs"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "W",
+       "cmdModifiers": 4,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "DeleteTabGroupMenuItem",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Delete Tab Group"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "S",
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "SaveAs",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Save As…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 1,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:584",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Save As…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:588",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 8,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "Share",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Share…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 8,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ExportAsPDF",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Export as PDF…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "AddToDock",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Add to Dock…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:593",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 8,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ImportBrowsingData",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Import Browsing Data from File or Folder…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 8,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "Export",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Export Browsing Data to File…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:608",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "P",
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "Print",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Print…"
+      }
+     ],
+     "enabled": true,
+     "frame": [
+      0,
+      1329,
+      0,
+      0
+     ],
+     "identifier": "SafariFileMenu",
+     "role": "AXMenu",
+     "roleDescription": "menu",
+     "selected": false
+    }
+   ],
+   "cmdModifiers": 0,
+   "enabled": true,
+   "frame": [
+    101,
+    0,
+    42,
+    39
+   ],
+   "identifier": "_NS:1309",
+   "role": "AXMenuBarItem",
+   "roleDescription": "menu bar item",
+   "selected": false,
+   "title": "File"
+  },
+  {
+   "actions": [
+    "AXCancel",
+    "AXPress",
+    "AXPick"
+   ],
+   "cmdModifiers": 0,
+   "enabled": true,
+   "frame": [
+    142,
+    0,
+    44,
+    39
+   ],
+   "identifier": "_NS:1312",
+   "role": "AXMenuBarItem",
+   "roleDescription": "menu bar item",
+   "selected": false,
+   "skipped": "not kept (only the Safari, File and View menus are recorded)",
+   "title": "Edit"
+  },
+  {
+   "actions": [
+    "AXCancel",
+    "AXPress",
+    "AXPick"
+   ],
+   "children": [
+    {
+     "actions": [
+      "AXCancel"
+     ],
+     "children": [
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 8,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "AlwaysShowToolbarInFullScreen",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Always Show Toolbar in Full Screen"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 8,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "CustomizeToolbar",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Customize Toolbar…"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:897",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "B",
+       "cmdModifiers": 1,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowFavoritesBar",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "skipped": "favorites/bookmarks, 0 children",
+       "title": "Show Favourites Bar"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "/",
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowStatusBarDisabled",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Show Status Bar"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:906",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "L",
+       "cmdModifiers": 1,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowSidebar",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Show Sidebar"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "1",
+       "cmdModifiers": 4,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowBookmarksSidebar",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "skipped": "favorites/bookmarks, 0 children",
+       "title": "Show Bookmarks Sidebar"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "2",
+       "cmdModifiers": 4,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowReadingListSidebar",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Show Reading List Sidebar"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 4,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "toggleSharedWithYou:",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Show Shared with You"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:920",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "R",
+       "cmdModifiers": 1,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowReader",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Show Reader"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "\\",
+       "cmdModifiers": 1,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowTabOverview",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Show Tab Overview"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "L",
+       "cmdModifiers": 2,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ShowDownloads",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Show Downloads"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:928",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": ".",
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "Stop",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Stop"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "R",
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ReloadPage",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Reload Page"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "R",
+       "cmdModifiers": 2,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ReloadPageFromOrigin",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Reload Page From Origin"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "reloadWithInvertedPrivateRelayEnabledSetting:",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Reload and Show IP Address"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 8,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ReloadingWithoutContentBlockers",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Reload Without Content Blockers"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "children": [
+        {
+         "actions": [
+          "AXCancel"
+         ],
+         "children": [
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "Translate-en_US",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Translate to English"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "PreferredLanguages",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Preferred Languages…"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "ViewOriginalTranslation",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "View Original"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "ReportTranslationIssue",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Report Translation Issue"
+          }
+         ],
+         "enabled": true,
+         "frame": [
+          0,
+          1329,
+          0,
+          0
+         ],
+         "identifier": "TranslationMenu",
+         "role": "AXMenu",
+         "roleDescription": "menu",
+         "selected": false
+        }
+       ],
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Translation"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:929",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "0",
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ActualSize",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Actual Size"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "+",
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ZoomIn",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Zoom In"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "+",
+       "cmdModifiers": 2,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "MakeTextBigger",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Make Text Bigger"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "-",
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "ZoomOut",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Zoom Out"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "-",
+       "cmdModifiers": 2,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "MakeTextSmaller",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Make Text Smaller"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 0,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:956",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "children": [
+        {
+         "actions": [
+          "AXCancel"
+         ],
+         "children": [
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "_NS:872",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Default"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Western (ISO Latin 1)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Western (Mac OS Roman)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Unicode (UTF-8)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Japanese (Shift JIS)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Japanese (ISO 2022-JP)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Japanese (EUC)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Japanese (Shift JIS X0213)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Traditional Chinese (Big 5)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Traditional Chinese (Big 5 HKSCS)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Traditional Chinese (Windows, DOS)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Korean (ISO 2022-KR)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Korean (Mac OS)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Korean (Windows, DOS)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Arabic (ISO 8859-6)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Arabic (Windows)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Hebrew (ISO 8859-8)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Hebrew (Windows)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Greek (ISO 8859-7)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Greek (Windows)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Cyrillic (ISO 8859-5)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Cyrillic (Mac OS)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Cyrillic (KOI8-R)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Cyrillic (Windows)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Ukrainian (KOI8-U)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Thai (Windows, DOS)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Simplified Chinese (GB 2312)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Simplified Chinese (HZ GB 2312)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Chinese (GB 18030)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Central European (ISO Latin 2)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Central European (Mac OS)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Central European (Windows Latin 2)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Vietnamese (Windows)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Turkish (ISO Latin 5)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Turkish (Windows Latin 5)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Central European (ISO Latin 4)"
+          },
+          {
+           "actions": [
+            "AXCancel",
+            "AXPress",
+            "AXPick"
+           ],
+           "attributes": [
+            "AXEnabled",
+            "AXFrame",
+            "AXParent",
+            "AXChildren",
+            "AXSize",
+            "AXMenuItemCmdGlyph",
+            "AXRole",
+            "AXMenuItemPrimaryUIElement",
+            "AXTopLevelUIElement",
+            "AXServesAsTitleForUIElements",
+            "AXMenuItemCmdModifiers",
+            "AXTitle",
+            "AXPosition",
+            "AXMenuItemCmdVirtualKey",
+            "AXMenuItemCmdChar",
+            "AXSubrole",
+            "AXSelected",
+            "AXMenuItemMarkChar",
+            "AXIdentifier"
+           ],
+           "cmdModifiers": 0,
+           "enabled": false,
+           "frame": [
+            0,
+            1329,
+            0,
+            0
+           ],
+           "identifier": "changeTextEncoding:",
+           "role": "AXMenuItem",
+           "roleDescription": "menu item",
+           "selected": false,
+           "title": "Baltic (Windows)"
+          }
+         ],
+         "enabled": true,
+         "frame": [
+          0,
+          1329,
+          0,
+          0
+         ],
+         "identifier": "_NS:868",
+         "role": "AXMenu",
+         "roleDescription": "menu",
+         "selected": false
+        }
+       ],
+       "cmdModifiers": 0,
+       "enabled": true,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "TextEncoding",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Text Encoding"
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdModifiers": 8,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "_NS:957",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false
+      },
+      {
+       "actions": [
+        "AXCancel",
+        "AXPress",
+        "AXPick"
+       ],
+       "cmdChar": "F",
+       "cmdModifiers": 24,
+       "enabled": false,
+       "frame": [
+        0,
+        1329,
+        0,
+        0
+       ],
+       "identifier": "EnterFullScreen",
+       "role": "AXMenuItem",
+       "roleDescription": "menu item",
+       "selected": false,
+       "title": "Enter Full Screen"
+      }
+     ],
+     "enabled": true,
+     "frame": [
+      0,
+      1329,
+      0,
+      0
+     ],
+     "identifier": "_NS:889",
+     "role": "AXMenu",
+     "roleDescription": "menu",
+     "selected": false
+    }
+   ],
+   "cmdModifiers": 0,
+   "enabled": true,
+   "frame": [
+    185,
+    0,
+    51,
+    39
+   ],
+   "identifier": "SafariViewMenu",
+   "role": "AXMenuBarItem",
+   "roleDescription": "menu bar item",
+   "selected": false,
+   "title": "View"
+  },
+  {
+   "actions": [
+    "AXCancel",
+    "AXPress",
+    "AXPick"
+   ],
+   "cmdModifiers": 0,
+   "enabled": true,
+   "frame": [
+    235,
+    0,
+    64,
+    39
+   ],
+   "identifier": "_NS:1315",
+   "role": "AXMenuBarItem",
+   "roleDescription": "menu bar item",
+   "selected": false,
+   "skipped": "not read (1 children)",
+   "title": "History"
+  },
+  {
+   "actions": [
+    "AXCancel",
+    "AXPress",
+    "AXPick"
+   ],
+   "cmdModifiers": 0,
+   "enabled": true,
+   "frame": [
+    298,
+    0,
+    88,
+    39
+   ],
+   "identifier": "SafariBookmarksMenu",
+   "role": "AXMenuBarItem",
+   "roleDescription": "menu bar item",
+   "selected": false,
+   "skipped": "not read (1 children)",
+   "title": "Bookmarks"
+  },
+  {
+   "actions": [
+    "AXCancel",
+    "AXPress",
+    "AXPick"
+   ],
+   "cmdModifiers": 0,
+   "enabled": true,
+   "frame": [
+    385,
+    0,
+    70,
+    39
+   ],
+   "identifier": "SafariWindowMenu",
+   "role": "AXMenuBarItem",
+   "roleDescription": "menu bar item",
+   "selected": false,
+   "skipped": "not read (1 children)",
+   "title": "Window"
+  },
+  {
+   "actions": [
+    "AXCancel",
+    "AXPress",
+    "AXPick"
+   ],
+   "cmdModifiers": 0,
+   "enabled": true,
+   "frame": [
+    454,
+    0,
+    49,
+    39
+   ],
+   "identifier": "SafariHelpMenu",
+   "role": "AXMenuBarItem",
+   "roleDescription": "menu bar item",
+   "selected": false,
+   "skipped": "not read (1 children)",
+   "title": "Help"
+  }
+ ],
+ "enabled": true,
+ "frame": [
+  0,
+  0,
+  2056,
+  39
+ ],
+ "identifier": "_NS:1290",
+ "role": "AXMenuBar",
+ "roleDescription": "menu bar",
+ "selected": false
+}

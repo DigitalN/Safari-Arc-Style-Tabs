@@ -38,10 +38,23 @@ final class SafariTracker {
     }
 
     var onEvent: ((Event) -> Void)?
+    /// Called when the docked window changes, to another window or to none (SafariProfiles reads the
+    /// new one's profile).
+    var onWindowChange: (() -> Void)?
+    /// Called with each Accessibility notification from Safari, after the tracker has handled it.
+    var onNotification: ((String, AXUIElement) -> Void)?
 
     private(set) var app: NSRunningApplication?
     /// The browser window the sidebar docks to.
-    private(set) var window: AXUIElement?
+    private(set) var window: AXUIElement? {
+        didSet {
+            switch (oldValue, window) {
+            case let (old?, new?) where CFEqual(old, new): break
+            case (nil, nil): break
+            default: onWindowChange?()
+            }
+        }
+    }
     /// What was last read from `window`: its frame, title and so on.
     private(set) var reading = WindowReading()
     /// Also read where Safari's toolbar ends in normal windows, not only in full screen: the sidebar
@@ -251,6 +264,7 @@ final class SafariTracker {
         default:
             refreshWindow { [weak self] _ in self?.onEvent?(.focusChanged) }
         }
+        onNotification?(name, element)
     }
 
     // MARK: - Choosing the window

@@ -70,6 +70,23 @@ swiftc -o "$WORK/overlay-checks" Tests/SidebarOverlayChecks/main.swift SideTabs/
     SideTabs/SafariBars.swift SideTabs/TabBarFinder.swift SideTabs/TabBarMatcher.swift
 "$WORK/overlay-checks"
 
+# Safari's profiles (#33): their identifiers in File → New Window and each window's toolbar, found in
+# trees #28 recorded; keeping the list and profiles.json; which profile a window is in, which extension
+# copy is a profile's, when Side Tabs counts as off in a profile, and which window a switch brings forward.
+echo "== profiles"
+swiftc -o "$WORK/profile-checks" \
+    Tests/ProfileChecks/main.swift SideTabs/ProfileKey.swift SideTabs/SafariProfile.swift \
+    SideTabs/ProfileTree.swift SideTabs/ProfileRules.swift
+"$WORK/profile-checks"
+# A profile's name is the user's own words, so it stays out of the log like titles and URLs do.
+# Positions, symbols and the copy's profile UUID are fine.
+if grep -nE '(\blog\.(notice|info|error|debug|warning|fault)|\bnote)\(.*\\\([^)]*\b(name|names|profileName|rowName)\b' \
+    SideTabs/*.swift SideTabs/Views/*.swift; then
+    echo "FAIL: a log line carries a profile's name; log its position instead"
+    exit 1
+fi
+echo "no profile names in the log"
+
 # A row has one mouse gesture, the one sidebarRowGesture attaches. A press gesture of its own,
 # inside the reorder gesture, wins every press and the reorder never starts (#20).
 echo "== row gestures"

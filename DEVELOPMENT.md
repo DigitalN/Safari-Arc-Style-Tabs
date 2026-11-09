@@ -182,6 +182,12 @@ separate window that the app keeps attached to Safari's window:
     the list of them for reopening. `TabCleanupScheduler` runs it every few minutes and when
     Safari comes forward.
   - `FaviconStore` asks the extension for icons and keeps them.
+  - `SafariProfiles` runs the profile buttons in the bottom bar. `ProfileReader` reads Safari's
+    profiles through Accessibility (File → New Window, and each window's toolbar profile button),
+    `ProfileSwitcher` brings a profile's window forward in place of the current one, and
+    `ProfileRules` decides which profile a window is in and when Side Tabs counts as off in one.
+    What it learns (names, symbols, order, each profile's extension copy) is kept in
+    `profiles.json`, beside `state.json`.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
   - `AppLocation` offers to move the app into Applications.
   - `Updater` checks GitHub for new releases, verifies the download's code signature
