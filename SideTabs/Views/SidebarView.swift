@@ -8,10 +8,17 @@ struct SidebarView: View {
     @Environment(SidebarRows.self) private var rows
     @State private var drag = SidebarDrag()
     @State private var showsClosedTabs = false
+    @Environment(SafariProfiles.self) private var profiles
 
     var body: some View {
         VStack(spacing: 0) {
-            if let selection = store.currentWindow {
+            if profiles.profileToTurnOn != nil {
+                // Side Tabs is off in the front window's profile (#33): one row to turn it on, in place
+                // of the sections, which would list another window's tabs.
+                TurnOnSideTabsRow()
+                    .replaced(by: ClosedTabsList(isShown: $showsClosedTabs), when: showsClosedTabs && settings.closesUnviewedTabs)
+                BottomBar(showsClosedTabs: $showsClosedTabs)
+            } else if let selection = store.currentWindow {
                 // Centered on the same line as Safari's toolbar when docked.
                 AddressBar()
                     .padding(.horizontal, 8)

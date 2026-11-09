@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let tracker = SafariTracker()
     private let accessibilityWatcher = AccessibilityWatcher()
     private var dock: DockController?
+    /// The profile buttons in the bottom bar, and switching between profiles (#33).
+    private lazy var safariProfiles = SafariProfiles(tracker: tracker, store: store)
     private var welcomeWindow: NSWindow?
     private var settingsWindow: NSWindow?
     /// Set while Side Tabs activates itself to show one of its own windows.
@@ -52,7 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .environment(store)
             .environment(settings)
             .environment(favicons)
-            .environment(rows))
+            .environment(rows)
+            .environment(safariProfiles))
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
         self.dock = dock
 
@@ -112,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         dock.start()
+        safariProfiles.start()
         store.requestSnapshot()
         tabCleanup.start()
 
@@ -171,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             dock?.restoreSafariFrame(waiting: true)
         }
         store.save()
+        safariProfiles.saveIfNeeded()
     }
 
     /// Side Tabs only becomes the active app to show its own windows, or when the sidebar
