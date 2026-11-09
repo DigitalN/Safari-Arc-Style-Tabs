@@ -54,6 +54,8 @@ nonisolated struct SafariWindowInfo: @unchecked Sendable {
     /// The page's title after the profile's name. Never logged.
     let title: String?
     let toolbar: ToolbarProfile
+    /// `SafariWindow?IsSecure=…&UUID=…`, whose UUID may survive a relaunch (#42).
+    var identifier: String? = nil
 }
 
 /// Reads what Safari says about its profiles through Accessibility, off the main thread: the
@@ -77,7 +79,8 @@ nonisolated final class ProfileReader: @unchecked Sendable {
     /// When each window was first seen, so a toolbar read right after it opened, before Safari has
     /// added the profile button (it takes up to 50 ms), isn't kept as "no profile".
     private var firstSeen: [Int: Date] = [:]
-    private static let settleTime: TimeInterval = 0.5
+    /// Also how long a window opened behind the front one is given before deciding about it (#42).
+    static let settleTime: TimeInterval = 0.5
 
     struct MenuReading: Sendable {
         let profiles: [MenuProfile]
@@ -161,10 +164,22 @@ nonisolated final class ProfileReader: @unchecked Sendable {
     /// Safari's browser windows, front to back, with each one's profile. Settings and other
     /// windows that aren't browser windows are left out. Call on `queue`.
     func windows(application: AXUIElement) -> [SafariWindowInfo] {
+        windowsRead(application: application).windows
+    }
+
+    /// The same, with whether Safari answered for every window: a window it didn't answer for is left out,
+    /// so an incomplete read can't tell that a window has closed (#42). Call on `queue`.
+    func windowsRead(application: AXUIElement) -> (windows: [SafariWindowInfo], complete: Bool) {
         query.clearTimedOut()
         var result: [SafariWindowInfo] = []
-        for element in query.elements(application, kAXWindowsAttribute) {
+        let elements = query.elements(application, kAXWindowsAttribute)
+        var complete = !query.timedOut
+        for element in elements {
+            query.clearTimedOut()
             let values = query.copyMultiple(element, ["AXIdentifier", kAXMinimizedAttribute, "AXFullScreen", kAXTitleAttribute]) ?? []
+            if query.timedOut {
+                complete = false
+            }
             func value(_ index: Int) -> CFTypeRef? { values.indices.contains(index) ? values[index] : nil }
             guard ProfileIdentifiers.isBrowserWindow(value(0) as? String), let number = number(of: element) else { continue }
             let toolbar = toolbarProfile(of: element).profile
@@ -174,10 +189,11 @@ nonisolated final class ProfileReader: @unchecked Sendable {
                 isMinimized: value(1) as? Bool ?? false,
                 isFullScreen: value(2) as? Bool ?? false,
                 title: value(3) as? String,
-                toolbar: toolbar
+                toolbar: toolbar,
+                identifier: value(0) as? String
             ))
         }
-        return result
+        return (result, complete)
     }
 
     /// The numbers of Safari's windows, to spot a new one. Call on `queue`.

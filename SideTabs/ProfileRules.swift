@@ -39,6 +39,17 @@ nonisolated enum ProfileResolution: Equatable, Sendable {
     }
 }
 
+/// Which profile a window belongs to (ProfileRules.resolve), with the profiles and copies' windows known when
+/// it was made, for work done off the main thread.
+nonisolated struct ProfileResolver: Sendable {
+    let profiles: [SafariProfile]
+    let copyWindows: [CopyWindow]
+
+    func callAsFunction(_ toolbar: ToolbarProfile, _ windowTitle: String?) -> ProfileResolution {
+        ProfileRules.resolve(toolbar, windowTitle: windowTitle, profiles: profiles, copyWindows: copyWindows)
+    }
+}
+
 /// A Safari window, for choosing the one a switch brings forward.
 nonisolated struct WindowFacts: Equatable, Sendable {
     let number: Int
@@ -157,11 +168,21 @@ nonisolated enum ProfileRules {
 
     // MARK: - Which window a switch brings forward
 
-    /// Of Safari's windows, front to back, the one to bring forward for `profile`: its frontmost
-    /// window, which is the one used last; a minimized one only if it has no other. Nil if it has
-    /// none, and a new window has to be opened.
-    static func switchTarget(for profile: UUID, among windows: [WindowFacts]) -> WindowFacts? {
+    /// Of Safari's windows, front to back, the one to bring forward for `profile`, in this order:
+    /// 1. its frontmost open window, which is the one used last;
+    /// 2. the window noted as used last when the profile was left (`usedLast`), which Side Tabs
+    ///    minimized ("Minimize other profiles' windows", #42): once all of a profile's windows are
+    ///    minimized, the order Accessibility lists them in says nothing about which was used last;
+    /// 3. another window on Side Tabs' list of windows it minimized (`listed`);
+    /// 4. a window the user minimized, only when the profile has no other.
+    ///
+    /// With the setting off the list is empty, and this is the frontmost open window, else a minimized
+    /// one. Nil if the profile has no window, and a new one has to be opened.
+    static func switchTarget(for profile: UUID, among windows: [WindowFacts], usedLast: Int? = nil, listed: Set<Int> = []) -> WindowFacts? {
         let own = windows.filter { $0.profile == .profile(profile) }
-        return own.first(where: { !$0.isMinimized }) ?? own.first
+        return own.first(where: { !$0.isMinimized })
+            ?? own.first(where: { $0.isMinimized && $0.number == usedLast && listed.contains($0.number) })
+            ?? own.first(where: { $0.isMinimized && listed.contains($0.number) })
+            ?? own.first
     }
 }

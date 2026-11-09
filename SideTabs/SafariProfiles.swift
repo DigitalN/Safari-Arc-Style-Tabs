@@ -16,6 +16,9 @@ import os.log
 ///
 /// Nothing here waits for Safari: ProfileReader and ProfileSwitcher do their Accessibility calls on
 /// their own queue, and this class uses the answers when they arrive.
+///
+/// "Minimize other profiles' windows" (#42) is MinimizeOtherProfiles', which this tells about the docked
+/// window, and whose switches (the Dock icon, a closed tab reopening) run here like the buttons'.
 @Observable
 final class SafariProfiles {
     /// In Safari's order.
@@ -42,8 +45,14 @@ final class SafariProfiles {
 
     @ObservationIgnored private let tracker: SafariTracker
     @ObservationIgnored private let store: TabStore
+    @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private let reader = ProfileReader()
-    @ObservationIgnored private lazy var switcher = ProfileSwitcher(reader: reader)
+    @ObservationIgnored private lazy var minimizer = WindowMinimizer(reader: reader)
+    @ObservationIgnored private lazy var switcher = ProfileSwitcher(reader: reader, minimizer: minimizer)
+    /// "Minimize other profiles' windows" (#42).
+    @ObservationIgnored private lazy var minimizing = MinimizeOtherProfiles(
+        host: self, settings: settings, tracker: tracker, reader: reader, minimizer: minimizer
+    )
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "profiles")
 
@@ -97,9 +106,10 @@ final class SafariProfiles {
     /// A one-off look when the docked window has been open long enough to call it unseen.
     @ObservationIgnored private var settleCheck: DispatchWorkItem?
 
-    init(tracker: SafariTracker, store: TabStore, fileURL: URL = ProfilesFile.defaultURL) {
+    init(tracker: SafariTracker, store: TabStore, settings: AppSettings, fileURL: URL = ProfilesFile.defaultURL) {
         self.tracker = tracker
         self.store = store
+        self.settings = settings
         self.fileURL = fileURL
         profiles = ProfilesFile.load(from: fileURL)
         unseenTabs = UnseenWindowTabs(tracker: tracker, store: store)
@@ -107,9 +117,20 @@ final class SafariProfiles {
 
     // MARK: - Lifecycle
 
+    /// Watches for a click on Safari's Dock icon, for "Minimize other profiles' windows" (#42). Nil until
+    /// wired; set it before `start`.
+    var dockIconWatcher: (any SafariDockIconWatching)? {
+        get { minimizing.dockIconWatcher }
+        set { minimizing.dockIconWatcher = newValue }
+    }
+
     /// Call after the tracker has started.
     func start() {
         startedAt = Date()
+        minimizing.start()
+        store.switchProfileFirst = { [weak self] profile, then in
+            self?.minimizing.switchBeforeReopening(profileKey: profile, then: then) ?? false
+        }
         tracker.onWindowChange = { [weak self] in self?.dockedWindowChanged() }
         tracker.onNotification = { [weak self] name, element in self?.safariNotified(name, element: element) }
 
@@ -119,6 +140,7 @@ final class SafariProfiles {
             guard app?.bundleIdentifier == SafariTracker.safariBundleID else { return }
             MainActor.assumeIsolated {
                 self?.safariLaunchedAt = Date()
+                self?.minimizing.safariLaunched()
                 // The tracker attaches half a second after launch; the menus take a moment longer.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                     self?.readMenu(because: "Safari launched", attempts: 5)
@@ -137,8 +159,10 @@ final class SafariProfiles {
         dockedWindowChanged()
     }
 
-    /// Writes profiles.json now if a change is waiting to be saved. For when the app quits.
+    /// Writes profiles.json, and the list of windows Side Tabs minimized, now if a change is waiting to be
+    /// saved. For when the app quits.
     func saveIfNeeded() {
+        minimizing.saveIfNeeded()
         guard saveWork != nil else { return }
         save()
     }
@@ -163,6 +187,7 @@ final class SafariProfiles {
     private func safariQuit() {
         let reader = reader
         reader.queue.async { reader.forget() }
+        minimizing.safariQuit()
         windowFirstSeen = [:]
         newWindowShortcut = nil
         settingsFocused = false
@@ -209,7 +234,7 @@ final class SafariProfiles {
 
     // MARK: - The menu
 
-    private var application: (element: AXUIElement, pid: pid_t)? {
+    var application: (element: AXUIElement, pid: pid_t)? {
         guard tracker.isTrusted, let app = tracker.app, !app.isTerminated else { return nil }
         return (AXUIElementCreateApplication(app.processIdentifier), app.processIdentifier)
     }
@@ -366,6 +391,8 @@ final class SafariProfiles {
     // MARK: - The docked window
 
     private func dockedWindowChanged() {
+        // Where the current profile's window was, if it's the one going (#42).
+        minimizing.dockedWindowChanging(from: tracker.previousReading, profile: dockedResolved ? dockedProfileID : nil)
         let window = tracker.window
         dockedWindow = window
         dockedNumber = nil
@@ -532,6 +559,9 @@ final class SafariProfiles {
         tellStoreDockedProfile()
         countLikeWindows()
         evaluateOff()
+        // Not while a toolbar Safari hasn't answered for yet is being read again.
+        let isFinal = dockedWindow == nil || dockedToolbar != .unknown || toolbarRetries >= 5
+        minimizing.frontResolved(id, number: dockedNumber, isFinal: isFinal)
     }
 
     /// What the docked window, now known to be in profile `id`, tells about that profile: its symbol,
@@ -647,9 +677,23 @@ final class SafariProfiles {
     /// without Accessibility access. Says whether a switch started (it brings Safari forward).
     @discardableResult
     func select(_ profile: SafariProfile) -> Bool {
+        guard profile.id != highlightedID else { return false }
+        return beginSwitch(to: profile)
+    }
+
+    /// Which profile a window belongs to, with what's known now, for work done off the main thread.
+    func makeResolver() -> ProfileResolver {
+        ProfileResolver(profiles: profiles, copyWindows: copyWindows)
+    }
+
+    /// Brings `profile`'s window forward in place of the docked one, or opens one. `frame`: where it goes,
+    /// if not the docked window's spot. `then` runs on the main thread when it's done, with whether the
+    /// profile's window came to the front. Says whether a switch started.
+    @discardableResult
+    func beginSwitch(to profile: SafariProfile, reason: MinimizeReason = .switched, frame override: CGRect? = nil,
+                     then: ((Bool) -> Void)? = nil) -> Bool {
         guard let app = application,
-              let position = profiles.firstIndex(where: { $0.id == profile.id }),
-              profile.id != highlightedID else { return false }
+              let position = profiles.firstIndex(where: { $0.id == profile.id }) else { return false }
         let clickAt = store.lastPointerDown?() ?? Date()
         let pending = PendingSwitch(id: profile.id, at: Date())
         pendingSwitch = pending
@@ -660,24 +704,32 @@ final class SafariProfiles {
         }
 
         let docked = tracker.window
-        let frame = docked.flatMap { tracker.isFullScreen($0) ? nil : tracker.frame(of: $0) }
-        let known = profiles
-        let windows = copyWindows
-        let request = ProfileSwitcher.Request(
+        let frame = override ?? docked.flatMap { tracker.isFullScreen($0) ? nil : tracker.frame(of: $0) }
+        var request = ProfileSwitcher.Request(
             application: app.element,
             processIdentifier: app.pid,
             profile: profile,
             position: position,
             frame: frame,
-            resolve: { toolbar, title in
-                ProfileRules.resolve(toolbar, windowTitle: title, profiles: known, copyWindows: windows)
-            }
+            resolve: makeResolver()
         )
-        log.notice("switching to profile \(position)")
+        let sweepStart = minimizing.switchStarting(to: profile.id, reason: reason)
+        request.sweep = sweepStart.sweep
+        request.sweepGeneration = sweepStart.generation
+        log.notice("switching to profile \(position)\(reason == .switched ? "" : " (\(reason.rawValue))", privacy: .public)")
+        let profileID = profile.id
         switcher.switchTo(request, clickAt: clickAt) { [weak self] outcome in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self?.switchFinished(outcome, pending: pending, position: position)
+                    guard let self else { return }
+                    self.switchFinished(outcome, pending: pending, position: position)
+                    let succeeded: Bool
+                    switch outcome {
+                    case .raised, .opened: succeeded = true
+                    case .menuOutOfDate, .superseded, .failed: succeeded = false
+                    }
+                    self.minimizing.switchFinished(token: sweepStart.token, profile: profileID, succeeded: succeeded)
+                    then?(succeeded)
                 }
             }
         }
@@ -753,17 +805,20 @@ final class SafariProfiles {
         default:
             break
         }
+        minimizing.notified(name)
     }
 
     private func windowAppeared(_ window: AXUIElement) {
         guard tracker.isTrusted else { return }
         let reader = reader
         reader.queue.async { [weak self] in
-            let toolbar = reader.toolbarProfile(of: window).profile
+            let (number, toolbar) = reader.toolbarProfile(of: window)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.countLikeWindows()
+                    let resolution = ProfileRules.resolve(toolbar, windowTitle: nil, profiles: self.profiles, copyWindows: [])
+                    self.minimizing.windowAppeared(number: number, profile: resolution)
                     guard case .profile(let name, _) = toolbar, !name.isEmpty else { return }
                     if self.profiles.contains(where: { ProfileIdentifiers.sameName($0.name, name) }) {
                         self.learnSymbols(from: [toolbar])

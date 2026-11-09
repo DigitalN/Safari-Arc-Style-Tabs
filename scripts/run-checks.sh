@@ -79,6 +79,16 @@ swiftc -o "$WORK/profile-checks" \
     Tests/ProfileChecks/main.swift SideTabs/ProfileKey.swift SideTabs/SafariProfile.swift \
     SideTabs/ProfileTree.swift SideTabs/ProfileRules.swift SideTabs/ProfileBarLayout.swift
 "$WORK/profile-checks"
+
+# "Minimize other profiles' windows" (#42): the current profile, which windows a change of profile minimizes and
+# which come back, in what order, which window a switch brings forward, the list of windows Side Tabs minimized,
+# saving it and matching it after a restart, and when a click on Safari's Dock icon opens a window in the current
+# profile.
+echo "== minimizing other profiles' windows"
+swiftc -o "$WORK/minimize-checks" \
+    Tests/MinimizeChecks/main.swift SideTabs/MinimizeRules.swift SideTabs/ProfileRules.swift \
+    SideTabs/SafariProfile.swift SideTabs/ProfileKey.swift
+"$WORK/minimize-checks"
 # A profile's name is the user's own words, so it stays out of the log like titles and URLs do.
 # Positions, symbols and the copy's profile UUID are fine.
 if grep -nE '(\blog\.(notice|info|error|debug|warning|fault)|\bnote)\(.*\\\([^)]*\b(name|names|profileName|rowName)\b' \

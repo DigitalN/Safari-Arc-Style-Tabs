@@ -128,6 +128,11 @@ final class TabStore {
     @ObservationIgnored var onOpenAddressBar: (() -> Void)?
     /// When the pointer last went down on the sidebar, so a switch is timed from the click.
     @ObservationIgnored var lastPointerDown: (() -> Date)?
+    /// With "Minimize other profiles' windows" on (#42), switches to the profile with this key (a snapshot's
+    /// `profile`) the way its button does, when it isn't the current profile, so a closed tab of it can reopen
+    /// in its window, which may be minimized. Says whether a switch started; the closure it's given runs on the
+    /// main thread once it's done, with whether the profile's window came to the front.
+    @ObservationIgnored var switchProfileFirst: ((_ profile: String?, _ then: @escaping (Bool) -> Void) -> Bool)?
     /// Switches a tab by pressing its button in Safari's tab bar (see TabBarPresser). The
     /// completion runs on the main thread and says whether it worked or the extension has to do it.
     @ObservationIgnored var pressTab: ((TabBarTarget, @escaping (TabBarPressOutcome) -> Void) -> Void)?

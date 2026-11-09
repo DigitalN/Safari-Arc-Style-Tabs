@@ -561,6 +561,73 @@ do {
     now = start
 }
 
+// With "Minimize other profiles' windows" on (#42), a closed tab of another profile reopens after a switch to that
+// profile, the way its button switches, in the window that's then in front. With the setting off (the hook says no
+// switch started), nothing changes: the checks above.
+do {
+    now = start
+    let (store, commands) = twoProfiles()
+    var asked: [String?] = []
+    var finish: ((Bool) -> Void)?
+    store.switchProfileFirst = { profile, then in
+        asked.append(profile)
+        finish = then
+        return true
+    }
+    var work = closedTab(1, closedAt: start)
+    work.profile = "work"
+    var home = closedTab(2, closedAt: start)
+    home.profile = "home"
+    store.cleanup.record([work, home])
+
+    let before = creates(commands()).count
+    store.reopen(home)
+    check(asked.isEmpty && creates(commands()).count == before + 1, "a tab of the current window's profile needs no switch")
+
+    store.reopen(work)
+    check(asked == ["work"], "a tab of another profile switches to that profile first")
+    check(creates(commands()).count == before + 1, "and opens nothing until the switch is done")
+    check(!store.cleanup.closedTabs.contains(work), "it's taken off the list right away")
+    // The switch brings work's window to the front, and the sidebar follows it.
+    send(store, snapshotObject("B", seq: 2, profile: "work", focused: 5, focusChangedAt: 20, [
+        windowObject(4, incognito: true, [tabObject(40, window: 4, active: true)]),
+        windowObject(5, [tabObject(50, window: 5, active: true)]),
+    ]))
+    store.dockedWindowProfile = "work"
+    finish?(true)
+    var create = creates(commands()).last ?? [:]
+    check(creates(commands()).count == before + 2, "then the tab opens")
+    check(create["instance"] as? String == "B" && create["windowId"] as? Int == 5, "in the window now in front, which is the profile's")
+    check(create["focus"] == nil, "without asking Safari to bring a window forward: it's in front already")
+
+    // A switch that didn't work: as without the setting.
+    var again = closedTab(3, closedAt: start)
+    again.profile = "home"
+    store.cleanup.record([again])
+    asked = []
+    store.reopen(again)
+    check(asked == ["home"], "back in work's window, a tab of home switches to home")
+    finish?(false)
+    create = creates(commands()).last ?? [:]
+    check(create["instance"] as? String == "A" && create["windowId"] as? Int == 1 && create["focus"] as? Bool == true,
+          "and if the switch didn't work, it opens in home's window and asks for it to come forward, as without the setting")
+
+    // The default profile's copy sends no profile.
+    let (plain, _) = makeStore()
+    send(plain, snapshotObject("A", seq: 1, profile: "work", focused: 1, focusChangedAt: 10, [windowObject(1, [tabObject(1, active: true)])]))
+    send(plain, snapshotObject("D", seq: 1, focused: 7, focusChangedAt: 5, [windowObject(7, [tabObject(70, window: 7, active: true)])]))
+    var askedPlain: [String?] = ["unset"]
+    plain.switchProfileFirst = { profile, _ in
+        askedPlain = [profile]
+        return true
+    }
+    let personal = closedTab(4, closedAt: start)
+    plain.cleanup.record([personal])
+    plain.reopen(personal)
+    check(askedPlain.count == 1 && askedPlain[0] == nil, "a tab of the default profile asks for a switch to the default profile")
+    now = start
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

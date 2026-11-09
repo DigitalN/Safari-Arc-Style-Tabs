@@ -40,7 +40,9 @@ Accessibility requests are still wanted; which notifications the docked window i
 where the sidebar slides out over the page in full screen or when it hides automatically, below which
 of Safari's bars (against trees in `Tests/SidebarOverlayChecks/trees`), and what
 brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
-and where they reopen),
+and where they reopen; with *Minimize other profiles' windows* on, which windows a change of profile
+minimizes and brings back, which window a switch brings forward, the list of windows Side Tabs minimized
+and how it's matched after a restart, and when a click on Safari's Dock icon opens a window),
 a check that no log line carries a window or tab title or a page's URL, and a compile check of the app's sources. It doesn't touch the
 installed app, Safari, or your saved bookmarks and names. Anything that needs the real
 Safari (clicks, windows, timing) still has to be tried by hand.
@@ -191,6 +193,12 @@ separate window that the app keeps attached to Safari's window:
     open when the extension reloaded from it), `UnseenWindowTabs` lists its tabs from its tab bar instead.
     What it learns (names, symbols, order, each profile's extension copy) is kept in
     `profiles.json`, beside `state.json`.
+  - With *Minimize other profiles' windows* on, `MinimizeOtherProfiles` keeps the current profile and
+    decides when to sweep, `WindowMinimizer` minimizes the other profiles' windows and brings the
+    current one's back, on `ProfileReader`'s queue one window at a time, and `MinimizeRules` holds the
+    rules. The windows Side Tabs minimized are listed in `minimized-windows.json`, beside
+    `profiles.json`; a minimized window that isn't on it is the user's. Quitting Side Tabs brings
+    nothing back: turning the setting off does.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
   - `AppLocation` offers to move the app into Applications.
   - `Updater` checks GitHub for new releases, verifies the download's code signature

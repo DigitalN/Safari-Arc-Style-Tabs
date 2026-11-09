@@ -5,13 +5,13 @@ import os.log
 /// Private but long-stable window server calls (also used by most window managers) that
 /// say which Spaces a window is on and which Space each display is showing.
 @_silgen_name("CGSMainConnectionID")
-private func CGSMainConnectionID() -> Int32
+nonisolated private func CGSMainConnectionID() -> Int32
 
 @_silgen_name("CGSCopySpacesForWindows")
-private func CGSCopySpacesForWindows(_ connection: Int32, _ mask: Int32, _ windowIDs: CFArray) -> Unmanaged<CFArray>?
+nonisolated private func CGSCopySpacesForWindows(_ connection: Int32, _ mask: Int32, _ windowIDs: CFArray) -> Unmanaged<CFArray>?
 
 @_silgen_name("CGSCopyManagedDisplaySpaces")
-private func CGSCopyManagedDisplaySpaces(_ connection: Int32) -> Unmanaged<CFArray>?
+nonisolated private func CGSCopyManagedDisplaySpaces(_ connection: Int32) -> Unmanaged<CFArray>?
 
 /// Watches Safari through the Accessibility API: which browser window is in front, where
 /// it is, and whether it's full screen, minimized or hidden.
@@ -51,12 +51,18 @@ final class SafariTracker {
             switch (oldValue, window) {
             case let (old?, new?) where CFEqual(old, new): break
             case (nil, nil): break
-            default: onWindowChange?()
+            default:
+                // `reading` is still the old window's here: it's replaced after `window`.
+                previousReading = reading
+                onWindowChange?()
             }
         }
     }
     /// What was last read from `window`: its frame, title and so on.
     private(set) var reading = WindowReading()
+    /// What was last read from the window docked to before `window`, kept when the docked window changes:
+    /// where the current profile's last window was when it closed (#42).
+    private(set) var previousReading = WindowReading()
     /// Also read where Safari's toolbar ends in normal windows, not only in full screen: the sidebar
     /// that hides automatically comes out below it.
     var readsToolbarInWindows = false
@@ -412,6 +418,11 @@ final class SafariTracker {
 
     /// The same check for any window, such as the sidebar's own.
     func isOnActiveSpace(windowNumber number: Int) -> Bool {
+        Self.isOnShownSpace(windowNumber: number)
+    }
+
+    /// The same, from any thread: it asks the window server, not Safari.
+    nonisolated static func isOnShownSpace(windowNumber number: Int) -> Bool {
         let connection = CGSMainConnectionID()
         let allSpaces: Int32 = 0x7 // current, other and user Spaces
         let windowSpaces = CGSCopySpacesForWindows(connection, allSpaces, [number] as CFArray)?
