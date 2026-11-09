@@ -32,7 +32,7 @@ nonisolated enum OverlayPlace: Equatable {
 }
 
 /// Where the pointer has to be to bring the sidebar out. Its edges count as inside. It runs beside
-/// the panel, up to the bottom of Safari's toolbar, or to the panel's top if the panel's minimum
+/// the panel, up to the bottom of Safari's lowest bar, or to the panel's top if the panel's minimum
 /// height takes it higher (a very short window, or a toolbar reported lower than the screen goes).
 nonisolated struct RevealStrip: Equatable {
     var minX: CGFloat
@@ -53,10 +53,11 @@ nonisolated struct OverlayLayout: Equatable {
     var panel: CGRect
     var strip: RevealStrip
 
-    /// Space between the panel and the edges around it.
+    /// Space between the panel and the edges around it, Safari's bars included.
     static let inset: CGFloat = 8
-    /// Safari's full-screen toolbar is about 52 pt tall. The panel never starts higher than this
-    /// below the top, even if Safari doesn't say where its toolbar ends.
+    /// Safari's toolbar is about 52 pt tall. When Safari reports none of its bars (SafariBars.swift),
+    /// as with its full-screen toolbar slid out of sight, the panel keeps this far below the top. Only
+    /// then: a toolbar Safari reports is followed even when it's shorter (#35).
     static let minimumToolbar: CGFloat = 60
     static let minimumHeight: CGFloat = 200
     /// How far the strip along a window's left edge reaches out of the window and into it. A
@@ -69,14 +70,14 @@ nonisolated struct OverlayLayout: Equatable {
     /// display, whose every point is left of this screen's edge (#30).
     static let screenStripOutside: CGFloat = 1
 
-    /// Full screen: the panel runs down the screen's left side below Safari's toolbar, and the
-    /// strip is the screen's left edge beside it. Not above that: pointing at the top of the screen
-    /// slides Safari's toolbar down, and a strip in that corner would bring the sidebar out where the
-    /// pointer isn't, so it would go away again at once, and come back (#30).
+    /// Full screen: the panel runs down the screen's left side below Safari's toolbar and the bars
+    /// under it, and the strip is the screen's left edge beside it. Not above that: pointing at the
+    /// top of the screen slides Safari's toolbar down, and a strip in that corner would bring the
+    /// sidebar out where the pointer isn't, so it would go away again at once, and come back (#30).
     ///
-    /// `toolbarBottom` is where Safari's toolbar and tab bar end, in Accessibility coordinates
-    /// (y down from the top of the main display), if Safari said. `mainHeight` is the main
-    /// display's height, which converts between the two.
+    /// `toolbarBottom` is where the lowest of Safari's bars ends (its toolbar, the Favourites bar, the
+    /// tab bar, the find bar), in Accessibility coordinates (y down from the top of the main display),
+    /// if Safari reported any. `mainHeight` is the main display's height, which converts between the two.
     static func fullScreen(screen: CGRect, toolbarBottom: CGFloat?, mainHeight: CGFloat, width: CGFloat) -> OverlayLayout {
         let top = belowToolbar(areaTop: screen.maxY, toolbarBottom: toolbarBottom, mainHeight: mainHeight)
         let panel = panelFrame(left: screen.minX, bottom: screen.minY, top: top, width: width)
@@ -86,7 +87,7 @@ nonisolated struct OverlayLayout: Equatable {
         )
     }
 
-    /// A normal window: the panel runs down the window's left side below its toolbar, over the
+    /// A normal window: the panel runs down the window's left side below its bars, over the
     /// page, and the strip is the window's left edge beside the page. Only the part of the window
     /// inside `visible` counts (the visible frame of the screen that has most of the window), so a
     /// window pushed partly off the screen, or under the Dock, still has its strip and panel where
@@ -108,11 +109,15 @@ nonisolated struct OverlayLayout: Equatable {
         return CGRect(x: left + inset, y: bottom, width: width, height: max(top - bottom, minimumHeight)).integral
     }
 
-    /// The AppKit y of the bottom of Safari's toolbar and tab bar, never less than
-    /// `minimumToolbar` below `areaTop` (the AppKit y of the top of the screen or window).
+    /// The AppKit y of the bottom of Safari's lowest bar, or `minimumToolbar` below `areaTop` (the
+    /// AppKit y of the top of the screen or window) if Safari reported none. A bottom at or above
+    /// `areaTop` isn't a bar Safari shows, so it counts as none.
     private static func belowToolbar(areaTop: CGFloat, toolbarBottom: CGFloat?, mainHeight: CGFloat) -> CGFloat {
         let areaTopFromAbove = mainHeight - areaTop
-        return mainHeight - max(toolbarBottom ?? 0, areaTopFromAbove + minimumToolbar)
+        if let toolbarBottom, toolbarBottom > areaTopFromAbove {
+            return mainHeight - toolbarBottom
+        }
+        return mainHeight - (areaTopFromAbove + minimumToolbar)
     }
 }
 

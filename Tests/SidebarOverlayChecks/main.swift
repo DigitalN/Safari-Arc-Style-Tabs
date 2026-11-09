@@ -24,9 +24,11 @@ check(SidebarPlacement.choose(fullScreen: true, hidesAutomatically: false) == .o
 check(SidebarPlacement.choose(fullScreen: true, hidesAutomatically: true) == .overlay(.fullScreen),
       "full screen with the setting on: still the full-screen overlay")
 
-// MARK: - Full-screen layout, unchanged
+// MARK: - Full-screen layout
 
-// The layout DockController.layOutOverlay worked out before the setting existed, transcribed.
+// The layout DockController.layOutOverlay worked out before the setting existed, transcribed. It kept
+// the 60-point floor even below a shorter toolbar Safari reported; since #35 the floor applies only
+// when Safari reports no bars, so the two agree when it reports none or bars taller than 60 points.
 func oldFullScreenPanel(screen: CGRect, toolbarBottom: CGFloat?, mainHeight: CGFloat, width: CGFloat) -> CGRect {
     let inset: CGFloat = 8
     let minimumToolbar: CGFloat = 60
@@ -42,13 +44,32 @@ let besideRight = CGRect(x: 1512, y: -200, width: 1920, height: 1080)
 let above = CGRect(x: 200, y: 982, width: 1280, height: 720)
 for screen in [laptop, besideRight, above] {
     let screenTop = laptop.height - screen.maxY
-    for toolbar: CGFloat? in [nil, screenTop + 20, screenTop + 52, screenTop + 97.5, screenTop + 900] {
+    for toolbar: CGFloat? in [nil, screenTop + 97.5, screenTop + 900] {
+        // The old formula took an unknown toolbar for y 0, the main display's top. On a display above
+        // the main one that is below the display's own top, so the panel shrank to its minimum height
+        // at the bottom of the screen. Checked below instead.
+        if toolbar == nil && screenTop < 0 { continue }
         for width: CGFloat in [180, 260, 333, 420] {
             let layout = OverlayLayout.fullScreen(screen: screen, toolbarBottom: toolbar, mainHeight: laptop.height, width: width)
             let old = oldFullScreenPanel(screen: screen, toolbarBottom: toolbar, mainHeight: laptop.height, width: width)
             check(layout.panel == old, "full screen \(screen), toolbar \(toolbar.map { "\($0)" } ?? "unknown"), width \(width): the panel is where it was (\(layout.panel) vs \(old))")
         }
     }
+    // A toolbar shorter than the floor: the panel starts 8 points below it, not 8 below the floor (#35).
+    for bars: CGFloat in [20, 52] {
+        let layout = OverlayLayout.fullScreen(screen: screen, toolbarBottom: screenTop + bars, mainHeight: laptop.height, width: 260)
+        check(layout.panel.maxY == screen.maxY - bars - 8, "full screen \(screen), bars \(bars) points tall: the panel starts 8 below them: \(layout.panel)")
+        check(layout.panel.minY == screen.minY + 8 && layout.panel.minX == screen.minX + 8, "and 8 in from the left and bottom, as before")
+        check(layout.strip.maxY == screen.maxY - bars, "the strip stops at their bottom: \(layout.strip)")
+    }
+}
+
+do {
+    // Full screen on a display above the main one, with Safari reporting no bars: the floor is
+    // measured from that display's top, so the panel runs its whole height below it (#35).
+    let layout = OverlayLayout.fullScreen(screen: above, toolbarBottom: nil, mainHeight: laptop.height, width: 260)
+    check(layout.panel == CGRect(x: 208, y: 990, width: 260, height: 720 - 60 - 16), "the panel fills the display above below the floor: \(layout.panel)")
+    check(layout.strip.maxY == above.maxY - 60, "and the strip stops 60 points below its top: \(layout.strip)")
 }
 
 do {
@@ -140,11 +161,12 @@ let window = CGRect(x: 300, y: 100, width: 1000, height: 700)
 let windowTopAX = laptop.height - window.maxY
 
 do {
-    // A 52-point toolbar: shorter than the 60 points full screen keeps clear, which win, as there.
+    // A 52-point toolbar, Safari's compact one: the panel starts 8 points below it, not below the
+    // 60-point floor, which is only for when Safari reports no bars (#35).
     let layout = OverlayLayout.window(frame: window, visible: visible, toolbarBottom: windowTopAX + 52, mainHeight: laptop.height, width: 260)
-    // Kept clear down to AppKit y 740; the panel is 8 pt in from the window's left and bottom and from that.
-    check(layout.panel == CGRect(x: 308, y: 108, width: 260, height: 624), "the panel is over the page, below the toolbar: \(layout.panel)")
-    check(layout.strip == RevealStrip(minX: 296, maxX: 304, minY: 100, maxY: 740), "the strip is the window's left edge beside the page: \(layout.strip)")
+    // The toolbar ends at AppKit y 748; the panel is 8 pt in from the window's left and bottom and from that.
+    check(layout.panel == CGRect(x: 308, y: 108, width: 260, height: 632), "the panel is over the page, 8 below the toolbar: \(layout.panel)")
+    check(layout.strip == RevealStrip(minX: 296, maxX: 304, minY: 100, maxY: 748), "the strip is the window's left edge beside the page: \(layout.strip)")
     check(layout.panel.minX > window.minX && layout.panel.maxX < window.maxX, "the panel is inside the window: Safari isn't moved for it")
     check(!layout.strip.contains(CGPoint(x: 302, y: 760)), "the left edge beside the toolbar isn't part of the strip")
     check(!layout.strip.contains(CGPoint(x: 302, y: 99)), "nor below the window")
@@ -161,11 +183,18 @@ do {
 }
 
 do {
-    // Safari didn't say where its toolbar ends, or gave a value inside the title bar.
+    // Safari reported none of its bars: the floor. A bottom at or above the window's top isn't a bar
+    // Safari shows, so it's the same.
     let unknown = OverlayLayout.window(frame: window, visible: visible, toolbarBottom: nil, mainHeight: laptop.height, width: 260)
-    let tooHigh = OverlayLayout.window(frame: window, visible: visible, toolbarBottom: windowTopAX + 10, mainHeight: laptop.height, width: 260)
-    check(unknown.panel.maxY == 800 - 60 - 8, "without the toolbar's bottom, the panel starts 60 points down the window")
-    check(tooHigh == unknown, "and never higher than that")
+    check(unknown.panel.maxY == 800 - 60 - 8, "without any bars, the panel starts 60 points down the window, and 8 more")
+    check(unknown.strip.maxY == 800 - 60, "and the strip stops 60 points down")
+    for bottom in [windowTopAX, windowTopAX - 5, 0] {
+        check(OverlayLayout.window(frame: window, visible: visible, toolbarBottom: bottom, mainHeight: laptop.height, width: 260) == unknown,
+              "a bottom at or above the window's top (\(bottom)) counts as no bars")
+    }
+    // Any bar Safari does report is followed, however short: the floor is only for none (#35).
+    let short = OverlayLayout.window(frame: window, visible: visible, toolbarBottom: windowTopAX + 10, mainHeight: laptop.height, width: 260)
+    check(short.panel.maxY == 800 - 10 - 8 && short.strip.maxY == 800 - 10, "a 10-point bar: 8 below it: \(short.panel)")
 }
 
 do {
@@ -186,7 +215,7 @@ do {
     let flush = CGRect(x: 0, y: 70, width: 1512, height: 879)
     let layout = OverlayLayout.window(frame: flush, visible: visible, toolbarBottom: 33 + 52, mainHeight: laptop.height, width: 260)
     check(layout.strip.contains(CGPoint(x: 0, y: 500)), "the pointer against the screen's left edge is on the strip")
-    check(layout.panel == CGRect(x: 8, y: 78, width: 260, height: 949 - 60 - 8 - 78), "the panel is 8 points in: \(layout.panel)")
+    check(layout.panel == CGRect(x: 8, y: 78, width: 260, height: 949 - 52 - 8 - 78), "the panel is 8 points in: \(layout.panel)")
 }
 
 do {
@@ -196,7 +225,7 @@ do {
     let layout = OverlayLayout.window(frame: offLeft, visible: visible, toolbarBottom: windowTopAX + 52, mainHeight: laptop.height, width: 260)
     check(layout.strip.contains(CGPoint(x: 0, y: 400)), "the strip is at the screen's edge")
     check(layout.panel.minX == 8, "and the panel starts on the screen: \(layout.panel)")
-    check(layout.panel.maxY == 740 - 8, "still below the window's toolbar")
+    check(layout.panel.maxY == 748 - 8, "still below the window's toolbar")
 }
 
 do {
@@ -214,7 +243,7 @@ do {
     let there = CGRect(x: 1700, y: -100, width: 1200, height: 900)
     let topAX = laptop.height - there.maxY
     let layout = OverlayLayout.window(frame: there, visible: external, toolbarBottom: topAX + 52, mainHeight: laptop.height, width: 300)
-    check(layout.panel == CGRect(x: 1708, y: -92, width: 300, height: 900 - 60 - 16), "the panel is on that display, in the window: \(layout.panel)")
+    check(layout.panel == CGRect(x: 1708, y: -92, width: 300, height: 900 - 52 - 16), "the panel is on that display, in the window: \(layout.panel)")
     check(layout.strip.contains(CGPoint(x: 1700, y: 0)), "and so is the strip")
 }
 
@@ -234,6 +263,271 @@ do {
             check(corners.allSatisfy(kept.contains), "window \(frame), width \(width): all of the strip keeps the sidebar out")
         }
     }
+}
+
+// MARK: - Safari's bars (#35)
+
+// Which of a window's elements are bars Safari shows above the page (SafariBars.swift), against trees
+// in trees/. All of them are made up (constructed-*), from what the live test of #26 measured on
+// Safari 27.2 in a window at y 39: the compact toolbar at y 39–91, and the Favourites bar, when shown,
+// a direct child of the window (an AXGroup with identifier FavoritesBarView) at y 91–119. The separate
+// tab layout follows Tests/TabBarFinderChecks/trees/constructed-separate.json (its tab bar inside the
+// split group), the full-screen toolbar inside a group, as compact-fullscreen.json recorded. Where the
+// find bar goes isn't known; it's tried as a direct child of the window and inside the split group.
+// Frames are [x, y, width, height] in Accessibility coordinates.
+
+/// Which elements the search read the children of, as `role#identifier`. Each read costs a round
+/// trip to Safari, every second while the sidebar can slide out.
+nonisolated(unsafe) var barReads: [String] = []
+
+struct BarTreeNode: Decodable, SafariBarNode {
+    var role: String?
+    var identifier: String?
+    /// Kept to show it plays no part: Safari translates it.
+    var descriptionText: String?
+    var frame: CGRect?
+    var kids: [BarTreeNode]
+
+    enum CodingKeys: String, CodingKey {
+        case role, identifier, frame
+        case descriptionText = "description"
+        case kids = "children"
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        role = try values.decodeIfPresent(String.self, forKey: .role)
+        identifier = try values.decodeIfPresent(String.self, forKey: .identifier)
+        descriptionText = try values.decodeIfPresent(String.self, forKey: .descriptionText)
+        frame = try values.decodeIfPresent([CGFloat].self, forKey: .frame).map { CGRect(x: $0[0], y: $0[1], width: $0[2], height: $0[3]) }
+        kids = try values.decodeIfPresent([BarTreeNode].self, forKey: .kids) ?? []
+    }
+
+    func children() -> [BarTreeNode] {
+        barReads.append("\(role ?? "?")#\(identifier ?? "")")
+        return kids
+    }
+
+    /// This node and everything under it, with `change` made to each.
+    func edited(_ change: (inout BarTreeNode) -> Void) -> BarTreeNode {
+        var node = self
+        change(&node)
+        node.kids = node.kids.map { $0.edited(change) }
+        return node
+    }
+}
+
+let overlayChecksFolder = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+
+func barTree(_ name: String, in folder: URL = overlayChecksFolder.appending(path: "trees")) -> BarTreeNode {
+    do {
+        return try JSONDecoder().decode(BarTreeNode.self, from: Data(contentsOf: folder.appending(path: "\(name).json")))
+    } catch {
+        print("FAIL: can't read tree \(name): \(error)")
+        exit(1)
+    }
+}
+
+/// The bars in a window's tree, the way SafariWindowReader looks for them.
+func bars(in window: BarTreeNode) -> [SafariBar] {
+    SafariBars.bars(among: window.kids, windowFrame: window.frame!)
+}
+
+func barsBottom(_ window: BarTreeNode) -> CGFloat? {
+    SafariBars.bottom(of: bars(in: window))
+}
+
+/// What SafariWindowReader logs about a window's bars.
+func logged(_ window: BarTreeNode) -> String {
+    SafariBars.summary(bars(in: window), windowTop: window.frame!.minY)
+}
+
+func describe(_ value: CGFloat?) -> String {
+    value.map { "\($0)" } ?? "none"
+}
+
+/// How SafariWindowReader found the toolbar before #35, transcribed: the window's direct children with
+/// role AXToolbar or AXTabGroup, under 200 points tall and starting in its top 200.
+func previousToolbarBottom(_ window: BarTreeNode) -> CGFloat? {
+    var bottom: CGFloat?
+    for child in window.kids where child.role == "AXToolbar" || child.role == "AXTabGroup" {
+        guard let frame = child.frame, frame.height < 200, frame.minY < window.frame!.minY + 200 else { continue }
+        bottom = max(bottom ?? frame.maxY, frame.maxY)
+    }
+    return bottom
+}
+
+let compactTree = barTree("constructed-bars-compact")
+let favouritesTree = barTree("constructed-bars-favourites")
+let separateTree = barTree("constructed-bars-separate")
+let separateFavouritesTree = barTree("constructed-bars-separate-favourites")
+let separateDirectTree = barTree("constructed-bars-separate-direct")
+let findTree = barTree("constructed-bars-find")
+let fullScreenTree = barTree("constructed-bars-fullscreen")
+let fullScreenFavouritesTree = barTree("constructed-bars-fullscreen-favourites")
+let noBarsTree = barTree("constructed-bars-none")
+
+do {
+    // Each bar on its own, and stacked.
+    let expected: [(String, BarTreeNode, CGFloat?)] = [
+        ("the compact toolbar", compactTree, 91),
+        ("the Favourites bar under it", favouritesTree, 119),
+        ("the separate tab bar, inside the split group", separateTree, 127),
+        ("the Favourites bar and the separate tab bar", separateFavouritesTree, 155),
+        ("the separate tab bar as a direct child of the window", separateDirectTree, 155),
+        ("the find bar under the Favourites bar", findTree, 155),
+        ("the full-screen toolbar, in its group", fullScreenTree, 52),
+        ("the full-screen toolbar with the Favourites bar", fullScreenFavouritesTree, 80),
+        ("no bars at all", noBarsTree, nil),
+    ]
+    for (what, tree, bottom) in expected {
+        check(barsBottom(tree) == bottom, "\(what): the bars end at \(describe(bottom)), found \(describe(barsBottom(tree))) (\(logged(tree)))")
+    }
+}
+
+do {
+    // What counted, and how the log says it.
+    check(bars(in: compactTree).map(\.role) == ["AXToolbar"], "the compact window's only bar is its toolbar, not its buttons or the page")
+    check(bars(in: favouritesTree).map(\.identifier) == [nil, "FavoritesBarView"], "then the Favourites bar")
+    // The log measures from the window's top, so a window that moves doesn't log again.
+    check(logged(favouritesTree) == "AXToolbar 0–52, AXGroup FavoritesBarView 52–80", "the log line: \(logged(favouritesTree))")
+    check(logged(separateTree) == "AXToolbar 0–52, AXGroup 52–88", "the separate tab bar's group: \(logged(separateTree))")
+    check(logged(separateDirectTree).hasSuffix("AXOpaqueProviderGroup TabBar 80–116"), "an identifier is cut at its ?: \(logged(separateDirectTree))")
+    check(logged(fullScreenTree) == "AXGroup 0–52", "the full-screen toolbar's group: \(logged(fullScreenTree))")
+    let movedWindow = favouritesTree.edited { $0.frame = $0.frame?.offsetBy(dx: 300, dy: 120) }
+    check(logged(movedWindow) == logged(favouritesTree), "moving the window changes nothing in it: \(logged(movedWindow))")
+    check(SafariBars.summary([], windowTop: 39) == "none", "and none says so")
+}
+
+do {
+    // Only the split group's children are read: never the toolbar's, a bar's, or the page's.
+    for (name, tree) in [("compact", compactTree), ("favourites", favouritesTree), ("separate", separateTree), ("find", findTree),
+                         ("full screen", fullScreenTree), ("full screen with favourites", fullScreenFavouritesTree), ("none", noBarsTree)] {
+        barReads = []
+        _ = bars(in: tree)
+        check(barReads == ["AXSplitGroup#"], "\(name): only the split group's children are read: \(barReads)")
+    }
+    // The same on the windows #20 recorded in Safari 26, which have no frames: nothing counts, and
+    // the reads stay the same.
+    let recorded = overlayChecksFolder.deletingLastPathComponent().appending(path: "TabBarFinderChecks/trees")
+    for name in ["compact-window", "compact-fullscreen"] {
+        barReads = []
+        let tree = barTree(name, in: recorded)
+        check(SafariBars.bars(among: tree.kids, windowFrame: CGRect(x: 0, y: 0, width: 1512, height: 982)).isEmpty, "\(name) without frames: no bars")
+        check(barReads == ["AXSplitGroup#"], "\(name): only the split group's children are read: \(barReads)")
+    }
+}
+
+do {
+    // The Favourites bar is found by its identifier. Its description is translated and plays no part,
+    // and its identifier counts even with a gap above it, where an unnamed bar wouldn't.
+    let german = favouritesTree.edited { if $0.identifier == "FavoritesBarView" { $0.descriptionText = "Favoritenleiste" } }
+    check(barsBottom(german) == 119, "a translated description changes nothing")
+    let gapped = favouritesTree.edited { if $0.identifier == "FavoritesBarView" { $0.frame = CGRect(x: 100, y: 101, width: 1200, height: 28) } }
+    check(barsBottom(gapped) == 129, "the Favourites bar 10 points below the toolbar still counts: \(describe(barsBottom(gapped)))")
+    let unnamed = gapped.edited { if $0.identifier == "FavoritesBarView" { $0.identifier = nil } }
+    check(barsBottom(unnamed) == 91, "an unnamed bar 10 points below doesn't: \(describe(barsBottom(unnamed)))")
+    let touching = favouritesTree.edited { if $0.identifier == "FavoritesBarView" { $0.identifier = nil; $0.frame = CGRect(x: 100, y: 94, width: 1200, height: 28) } }
+    check(barsBottom(touching) == 122, "but one within 4 points of the bar above does: \(describe(barsBottom(touching)))")
+}
+
+do {
+    // The separate tab bar counts by its identifier, or as the bar under the toolbar without one.
+    let unnamed = separateTree.edited { if $0.identifier?.hasPrefix("TabBar?") == true { $0.identifier = nil } }
+    check(barsBottom(unnamed) == 127, "the tab bar's group counts by where it is, not its identifier")
+    let directUnnamed = separateDirectTree.edited { if $0.identifier?.hasPrefix("TabBar?") == true { $0.identifier = nil; $0.role = "AXGroup" } }
+    check(barsBottom(directUnnamed) == 155, "so does an unnamed group under the Favourites bar")
+    // The page beside it never counts, even in a window too short for it to look tall.
+    let tiny = separateTree.edited { node in
+        if node.role == "AXTabGroup" { node.frame = CGRect(x: 100, y: 127, width: 1200, height: 120) }
+    }
+    check(barsBottom(tiny) == 127, "the page in a short window isn't a bar: \(describe(barsBottom(tiny)))")
+}
+
+do {
+    // The find bar: nothing names it, so it counts by sitting under the other bars, as a direct child
+    // of the window or inside the split group, above the page.
+    let underToolbar = findTree.edited { node in
+        if node.identifier == "FavoritesBarView" { node.frame = nil }
+        if node.descriptionText == "find banner" { node.frame = CGRect(x: 100, y: 91, width: 1200, height: 36) }
+    }
+    check(barsBottom(underToolbar) == 127, "the find bar right under the toolbar: \(describe(barsBottom(underToolbar)))")
+    var inSplit = compactTree
+    inSplit.kids[0].kids.insert(barTree("constructed-bars-find").kids[3].edited { $0.frame = $0.frame.map { CGRect(x: $0.minX, y: 91, width: $0.width, height: $0.height) } }, at: 1)
+    check(barsBottom(inSplit) == 127, "the find bar inside the split group, above the page: \(describe(barsBottom(inSplit)))")
+    // Something lower down that isn't stacked under the bars isn't one of them.
+    let lower = findTree.edited { if $0.descriptionText == "find banner" { $0.frame = CGRect(x: 100, y: 180, width: 1200, height: 36) } }
+    check(barsBottom(lower) == 119, "a group further down the window doesn't count: \(describe(barsBottom(lower)))")
+}
+
+do {
+    // Never the window's buttons, a sheet or anything tall or narrow.
+    var withSheet = compactTree
+    withSheet.kids.append(barTree("constructed-bars-compact").kids[1].edited { $0.role = "AXSheet"; $0.frame = CGRect(x: 400, y: 91, width: 600, height: 150) })
+    check(barsBottom(withSheet) == 91, "a sheet under the toolbar isn't a bar: \(describe(barsBottom(withSheet)))")
+    let tallButtons = compactTree.edited { if $0.role == "AXButton" { $0.frame = CGRect(x: 112, y: 39, width: 200, height: 120) } }
+    check(barsBottom(tallButtons) == 91, "nor are the window's buttons, whatever their size")
+    let narrow = favouritesTree.edited { if $0.identifier == "FavoritesBarView" { $0.frame = CGRect(x: 100, y: 91, width: 20, height: 28) } }
+    check(barsBottom(narrow) == 91, "nor something taller than it is wide")
+    let tall = favouritesTree.edited { if $0.identifier == "FavoritesBarView" { $0.frame = CGRect(x: 100, y: 91, width: 1200, height: 250) } }
+    check(barsBottom(tall) == 91, "nor something 200 points tall or more")
+}
+
+do {
+    // Full screen: the toolbar slides down from the top. Slid away, or on its way, it isn't shown, and
+    // Safari reports no bars, so the overlay keeps to its floor.
+    func movingToolbar(to y: CGFloat) -> BarTreeNode {
+        var tree = fullScreenFavouritesTree
+        tree.kids[1] = tree.kids[1].edited { $0.frame = $0.frame?.offsetBy(dx: 0, dy: y) }
+        return tree
+    }
+    check(barsBottom(movingToolbar(to: -80)) == nil, "slid out of sight above the screen: no bars")
+    check(barsBottom(movingToolbar(to: -30)) == nil, "partly slid down: still none")
+    check(barsBottom(movingToolbar(to: 0)) == 80, "all the way down: the toolbar and the Favourites bar")
+    // On a display with a notch, the toolbar may come down below the menu bar rather than at the top.
+    check(barsBottom(movingToolbar(to: 37)) == 117, "below a menu bar: \(describe(barsBottom(movingToolbar(to: 37))))")
+    // A toolbar Safari reports far down the window isn't its toolbar.
+    let farDown = compactTree.edited { if $0.role == "AXToolbar" { $0.frame = CGRect(x: 100, y: 300, width: 1200, height: 52) } }
+    check(barsBottom(farDown) == nil, "a toolbar more than 200 points down doesn't count")
+}
+
+do {
+    // Before #35 only the toolbar counted, and in full screen nothing did: these are the cases the
+    // live test found, and the ones the issue adds.
+    check(previousToolbarBottom(compactTree) == 91 && barsBottom(compactTree) == 91, "the compact toolbar was found before, and still is")
+    check(previousToolbarBottom(favouritesTree) == 91, "the Favourites bar was missed, so the sidebar covered it")
+    check(previousToolbarBottom(separateTree) == 91 && previousToolbarBottom(findTree) == 91, "so were the separate tab bar and the find bar")
+    check(previousToolbarBottom(fullScreenTree) == nil, "and the full-screen toolbar, in its group")
+}
+
+do {
+    // The whole way, with the live test's window at y 39 (AppKit y 143 to 943): the panel starts 8
+    // points below the lowest bar, and the strip stops at it. Before, it started at y 107 every time.
+    let liveWindow = CGRect(x: 100, y: laptop.height - 39 - 800, width: 1200, height: 800)
+    func tops(_ tree: BarTreeNode) -> (panel: CGFloat, strip: CGFloat) {
+        let layout = OverlayLayout.window(frame: liveWindow, visible: visible, toolbarBottom: barsBottom(tree), mainHeight: laptop.height, width: 260)
+        return (laptop.height - layout.panel.maxY, laptop.height - layout.strip.maxY)
+    }
+    let cases: [(String, BarTreeNode, CGFloat)] = [
+        ("compact toolbar", compactTree, 91), ("Favourites bar", favouritesTree, 119), ("separate tab bar", separateTree, 127),
+        ("Favourites and separate tab bars", separateFavouritesTree, 155), ("find bar", findTree, 155),
+    ]
+    for (what, tree, bottom) in cases {
+        let (panel, strip) = tops(tree)
+        check(panel == bottom + 8, "\(what): the panel starts at y \(bottom + 8), 8 below the bars: y \(panel)")
+        check(strip == bottom, "\(what): the strip stops at y \(bottom): y \(strip)")
+    }
+    let (panel, strip) = tops(noBarsTree)
+    check(panel == 39 + 60 + 8 && strip == 39 + 60, "no bars: the floor, 60 points down and 8 more: y \(panel), strip y \(strip)")
+
+    // Full screen on the laptop, the same way.
+    func fullScreenTop(_ bottom: CGFloat?) -> (panel: CGFloat, strip: CGFloat) {
+        let layout = OverlayLayout.fullScreen(screen: laptop, toolbarBottom: bottom, mainHeight: laptop.height, width: 260)
+        return (laptop.height - layout.panel.maxY, laptop.height - layout.strip.maxY)
+    }
+    check(fullScreenTop(barsBottom(fullScreenTree)) == (60, 52), "full screen: 8 below the toolbar: \(fullScreenTop(barsBottom(fullScreenTree)))")
+    check(fullScreenTop(barsBottom(fullScreenFavouritesTree)) == (88, 80), "full screen with the Favourites bar: below it: \(fullScreenTop(barsBottom(fullScreenFavouritesTree)))")
+    check(fullScreenTop(nil) == (68, 60), "full screen with the toolbar slid away: the floor, as before")
 }
 
 // MARK: - Coming out and going away

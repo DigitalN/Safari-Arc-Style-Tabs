@@ -36,7 +36,8 @@ of its buttons a tab matches and which one Safari has selected, checked against 
 `Tests/TabBarFinderChecks/trees`; what a press on a row turns into; which row is under a
 middle click; which queued
 Accessibility requests are still wanted; which notifications the docked window is watched for;
-where the sidebar slides out over the page in full screen or when it hides automatically, and what
+where the sidebar slides out over the page in full screen or when it hides automatically, below which
+of Safari's bars (against trees in `Tests/SidebarOverlayChecks/trees`), and what
 brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
 and where they reopen),
 a check that no log line carries a window or tab title or a page's URL, and a compile check of the app's sources. It doesn't touch the
@@ -167,7 +168,9 @@ separate window that the app keeps attached to Safari's window:
   - `DockController` positions the panel directly behind Safari's window, narrows Safari
     to fit, and handles full screen. In full screen, and in any window when *Hide sidebar
     automatically* is on, the sidebar is an overlay that slides out from the left edge;
-    `SidebarOverlay` holds where it goes and when it comes out and goes away.
+    `SidebarOverlay` holds where it goes and when it comes out and goes away. It starts below
+    the lowest of Safari's bars (toolbar, Favourites bar, tab bar, find bar), which `SafariBars`
+    finds among the window's children.
   - `TabStore` holds tabs, bookmarks and custom names.
   - `TabCleanup` closes tabs nobody has looked at for a while, when that's turned on, and keeps
     the list of them for reopening. `TabCleanupScheduler` runs it every few minutes and when
