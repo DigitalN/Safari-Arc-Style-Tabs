@@ -1520,6 +1520,47 @@ do {
     check(renamed.map { store.displayTitle(for: $0, instance: "newer-copy") } == "Mine", "the custom name goes to the new copy's tab on that page")
 }
 
+// MARK: - Asking for a missing snapshot without relying on a reply (#37)
+
+/// The `snapshot` commands sent to a copy, or to every copy.
+func snapshotCommands(_ commands: [[String: Any]], to copy: String) -> Int {
+    commands.filter { $0["action"] as? String == "snapshot" && $0["instance"] as? String == copy }.count
+}
+
+do {
+    // Replies can be lost for minutes after the extension reloads, so when a heartbeat shows a snapshot is
+    // missing, the app asks with a command as well as in the reply.
+    let (store, commands) = makeStore()
+    var answer = reply(store, message("heartbeat", from: instance, ["seq": 1]))
+    check(snapshotCommands(commands(), to: instance) == 0 && answer["needSnapshot"] as? Bool == false,
+        "a heartbeat naming the snapshot the app has asks for nothing")
+    answer = reply(store, message("heartbeat", from: instance, ["seq": 3]))
+    check(answer["needSnapshot"] as? Bool == true, "one naming a newer snapshot asks for it in the reply")
+    check(snapshotCommands(commands(), to: instance) == 1, "and with a snapshot command to that copy")
+    send(store, snapshotObject(seq: 3, active: 1))
+    _ = reply(store, message("heartbeat", from: instance, ["seq": 3]))
+    check(snapshotCommands(commands(), to: instance) == 1, "once the snapshot is there, no more commands")
+
+    _ = reply(store, message("heartbeat", from: "work-copy", in: "WORK", ["seq": 0]))
+    check(snapshotCommands(commands(), to: "work-copy") == 1, "a copy the app has no snapshot from is sent a snapshot command")
+
+    // A copy that loses every reply never learns its snapshots were delivered, so its heartbeats say 0. The
+    // app has its snapshot, so it doesn't make the copy build one every 5 s.
+    _ = reply(store, message("heartbeat", from: instance, ["seq": 0]))
+    check(snapshotCommands(commands(), to: instance) == 1, "a heartbeat saying 0 from a copy whose snapshot the app has sends no command")
+}
+
+do {
+    // A copy back from being quiet is asked for a snapshot by command too.
+    let (store, commands) = makeStore()
+    var ahead: TimeInterval = 0
+    store.clock = { Date().addingTimeInterval(ahead) }
+    ahead = 31
+    store.noteQuietCopies()
+    _ = reply(store, message("activated", from: instance, ["windowId": 1, "tabId": 2, "seq": 2]))
+    check(snapshotCommands(commands(), to: instance) == 1, "a copy that speaks again after going quiet is sent a snapshot command")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

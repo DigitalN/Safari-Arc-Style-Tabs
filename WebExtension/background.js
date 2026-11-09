@@ -228,7 +228,7 @@ function postToApp(message) {
 function handleReply(reply) {
     if (!reply || typeof reply !== "object") return;
     if (reply.needSnapshot) scheduleSnapshot(0);
-    if (Array.isArray(reply.commands)) reply.commands.forEach(runCommand);
+    if (Array.isArray(reply.commands)) reply.commands.forEach((command) => runCommand(command, "reply"));
 }
 
 // A reply that came after its message's time limit. By then the message counted as not delivered,
@@ -252,39 +252,75 @@ async function postUntilDelivered(message, tries = 3) {
     return null;
 }
 
-// Messages that got no reply in time, and replies that came late, are told to the app's log (see
-// DEVELOPMENT.md), a limited number of times per copy. Only message types and counts: nothing about
-// the tabs.
-let noReplyCount = 0;
-let lateReplyCount = 0;
-let replyNotesLeft = 20;
+// Puts a line in the app's log (see DEVELOPMENT.md), which names the copy it came from. Only message
+// types, numbers and counts go in it: nothing about the tabs.
+function logToApp(message) {
+    postToApp({ type: "log", instance, message });
+}
 
+// Counts things worth logging, each under its own name, and says whether this one should be logged: the
+// first five, then the 10th, 20th, 50th, 100th, 200th and so on, so something that keeps happening
+// stays in the log without filling it.
+const notedCounts = new Map();
+
+function noteCount(name) {
+    const count = (notedCounts.get(name) ?? 0) + 1;
+    notedCounts.set(name, count);
+    return { count, log: count <= 5 || /^[125]0+$/.test(String(count)) };
+}
+
+// Messages that got no reply in time, and replies that came late, by message type, so the live test can
+// see which copies lose replies, and to what.
 function noteNoReply(message) {
-    noReplyCount++;
-    if (message.type === "log" || replyNotesLeft <= 0) return;
-    replyNotesLeft--;
-    postToApp({
-        type: "log", instance,
-        message: `no reply within ${REPLY_TIME_LIMIT_MS} ms to "${message.type}" (${noReplyCount} so far); counted as not delivered`,
-    });
+    if (message.type === "log") return;
+    const { count, log } = noteCount(`no reply:${message.type}`);
+    if (log) logToApp(`no reply within ${REPLY_TIME_LIMIT_MS} ms to "${message.type}" (${count} so far); counted as not delivered`);
 }
 
 function noteLateReply(message, milliseconds) {
-    lateReplyCount++;
-    if (message.type === "log" || replyNotesLeft <= 0) return;
-    replyNotesLeft--;
-    postToApp({
-        type: "log", instance,
-        message: `the reply to "${message.type}" came ${milliseconds} ms after it was sent, past the time limit (${lateReplyCount} so far)`,
-    });
+    if (message.type === "log") return;
+    const { count, log } = noteCount(`late reply:${message.type}`);
+    if (log) logToApp(`the reply to "${message.type}" came ${milliseconds} ms after it was sent, past the time limit (${count} so far)`);
 }
 
 // ---------------------------------------------------------------------------
 // Commands from the app
 
-async function runCommand(command) {
+// The ids of the commands run lately, each with how it came (a port's number, or "reply"). The app gives
+// every command an id (ExtensionBridge.send). Safari has delivered a command twice to a copy after the
+// extension reloaded (#37): run twice, a reopened tab opened twice. Ids are unique across launches of the
+// app, so a few hundred is plenty.
+const recentCommands = new Map();
+const RECENT_COMMAND_LIMIT = 300;
+
+// Whether a command with this id has already been run, in which case it's skipped. Commands without an id
+// (from an app older than ids) always run.
+function isRepeat(command, via) {
+    if (command.id == null) return false;
+    const first = recentCommands.get(command.id);
+    if (first !== undefined) {
+        const same = first === via;
+        const { count, log } = noteCount(same ? "repeat:same" : "repeat:other");
+        if (log) {
+            const how = same ? `both times through ${describeVia(via)}` : `first through ${describeVia(first)}, then through ${describeVia(via)}`;
+            logToApp(`skipped a repeated command ("${command.action}"), ${how} (${count} so far ${same ? "the same way" : "two ways"})`);
+        }
+        return true;
+    }
+    recentCommands.set(command.id, via);
+    if (recentCommands.size > RECENT_COMMAND_LIMIT) recentCommands.delete(recentCommands.keys().next().value);
+    return false;
+}
+
+function describeVia(via) {
+    return typeof via === "number" ? `port ${via}` : via;
+}
+
+// Runs a command from the app once. `via` says how it came, for the log: a port's number, or "reply".
+async function runCommand(command, via = "unknown") {
     if (!command || typeof command !== "object") return;
     if (command.instance && command.instance !== instance) return;
+    if (isRepeat(command, via)) return;
 
     try {
         switch (command.action) {
@@ -364,24 +400,64 @@ async function duplicateTab(tabId) {
     if (tab.url) await browser.tabs.create({ windowId: tab.windowId, index: tab.index + 1, url: tab.url });
 }
 
+// The port the app's commands come through (SFSafariApplication.dispatchMessage). There is only ever one:
+// a second port would get every command too (#37). The current port is the one connected last. It stays
+// current after Safari says it disconnected, until the next one replaces it, so a command that still comes
+// through it meanwhile isn't lost. An older port is disconnected when it's replaced, and anything Safari
+// still delivers through it, a message or a disconnect, is ignored.
 let port = null;
+let portNumber = 0;
+let reconnectTimer = null;
 
 function connectPort() {
+    reconnectTimer = null;
+    const old = port;
+    port = null;
+    if (old) {
+        try {
+            old.disconnect();
+        } catch {
+            // Already gone.
+        }
+    }
+    let current;
     try {
-        port = browser.runtime.connectNative(NATIVE_APP_ID);
-        port.onMessage.addListener((message) => {
-            const payload = message && message.userInfo ? message.userInfo : message;
-            if (payload && Array.isArray(payload.commands)) payload.commands.forEach(runCommand);
-            else runCommand(payload);
-        });
-        port.onDisconnect.addListener(() => {
-            port = null;
-            setTimeout(connectPort, 3000);
-        });
+        current = browser.runtime.connectNative(NATIVE_APP_ID);
     } catch (error) {
         console.warn("Side Tabs: connectNative failed", error);
-        setTimeout(connectPort, 5000);
+        reconnectSoon(5000);
+        return;
     }
+    const number = ++portNumber;
+    port = current;
+    if (number > 1) logToApp(`connected port ${number}`);
+    current.onMessage.addListener((message) => {
+        if (current !== port) {
+            const { count, log } = noteCount("old port message");
+            if (log) logToApp(`ignored a message through port ${number}, which port ${portNumber} replaced (${count} so far)`);
+            return;
+        }
+        const payload = message && message.userInfo ? message.userInfo : message;
+        if (payload && Array.isArray(payload.commands)) payload.commands.forEach((command) => runCommand(command, number));
+        else runCommand(payload, number);
+    });
+    current.onDisconnect.addListener(() => {
+        if (current !== port) {
+            const { count, log } = noteCount("old port disconnect");
+            if (log) logToApp(`ignored a disconnect of port ${number}, which port ${portNumber} replaced (${count} so far)`);
+            return;
+        }
+        const { count, log } = noteCount("disconnect");
+        if (log) logToApp(`port ${number} disconnected (${count} so far); connecting again in 3 s`);
+        reconnectSoon(3000);
+    });
+}
+
+// Connects a new port after `delay`, unless that's already on its way: a second disconnect or a failed
+// connect must not end up with two ports.
+function reconnectSoon(delay) {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(connectPort, delay);
 }
 
 // ---------------------------------------------------------------------------

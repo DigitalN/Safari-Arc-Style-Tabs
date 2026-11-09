@@ -161,9 +161,11 @@ final class TabStore {
             return [:]
         }
         var reply = answer(type: type, payload: payload, object: object)
-        if sender == .backFromQuiet {
-            // Its snapshot is from before it went quiet. The extension acts on `needSnapshot` in any reply.
+        if sender == .backFromQuiet, let instance = object["instance"] as? String {
+            // Its snapshot is from before it went quiet. The extension acts on `needSnapshot` in any reply,
+            // but replies get lost (#37), so it's asked with a command too.
             reply["needSnapshot"] = true
+            send(["action": "snapshot"], to: instance)
         }
         return reply
     }
@@ -191,7 +193,9 @@ final class TabStore {
         case "log":
             // Something the extension wants in the system log, which is where its console
             // output can be read without Safari's developer tools.
-            log.notice("extension: \(object["message"] as? String ?? "", privacy: .public)")
+            // Each copy of the extension sends its own, so the line says which (#37).
+            let copy = (object["instance"] as? String).map { " \($0.prefix(8))" } ?? ""
+            log.notice("extension\(copy, privacy: .public): \(object["message"] as? String ?? "", privacy: .public)")
             return [:]
 
         case "hello":
@@ -202,6 +206,11 @@ final class TabStore {
             let instance = object["instance"] as? String ?? ""
             let seq = object["seq"] as? Int ?? 0
             let applied = snapshots[instance]?.seq ?? -1
+            if !instance.isEmpty, applied < seq || snapshots[instance] == nil {
+                // A snapshot is missing. The reply asks for it, but replies can be lost for minutes after
+                // the extension reloads (#37), so a command asks too: it doesn't depend on the reply.
+                send(["action": "snapshot"], to: instance)
+            }
             return ["needSnapshot": applied < seq || seq == 0]
 
         case "toggleSidebar":

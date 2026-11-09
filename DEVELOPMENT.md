@@ -161,7 +161,8 @@ separate window that the app keeps attached to Safari's window:
   message after 4 seconds and counts it as not delivered. Each Safari profile runs its own
   copy of `background.js`; the app hides a copy's windows after 30 seconds without a
   message from it, and drops the copy once a newer copy of the same profile reports (after
-  the extension reloads or is reinstalled).
+  the extension reloads or is reinstalled). Every command from the app carries an id, and
+  `background.js` skips one it has already run, since Safari has delivered commands twice.
 - `SideTabsExtension/`: the extension's native handler. It passes messages to the app
   over a CFMessagePort named after the app group, which is what lets the sandboxed
   extension reach the app.
