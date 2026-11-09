@@ -389,6 +389,11 @@ extension TabStore {
     /// Opens a closed tab's page in a new tab, in a window of the profile it came from if one is open,
     /// otherwise in the current window, and takes it off the list. A window other than the current one
     /// is brought forward, so the tab doesn't open out of sight.
+    ///
+    /// With "Minimize other profiles' windows" on (#42), a window of another profile is brought forward by
+    /// switching to that profile the way its button does (`switchProfileFirst`), and the tab opens in the
+    /// window that's then in front: Safari's own way of bringing a window forward may not bring back a
+    /// minimized one. With the setting off, nothing changes.
     func reopen(_ closed: ClosedTab) {
         cleanup.remove(closed.id)
         let current = currentWindow.map { TabCleanup.Window(instance: $0.instance, windowId: $0.window.id) }
@@ -398,11 +403,43 @@ extension TabStore {
             newTab(url: closed.url)
             return
         }
-        var command: [String: Any] = ["action": "create", "instance": target.instance, "windowId": target.windowId, "url": closed.url]
-        if target != current {
+        // The default profile's copy sends no profile: nil is the default profile.
+        if target != current, let profile = liveSnapshots[target.instance].map(\.profile),
+           switchProfileFirst?(profile, { [weak self] switched in
+               self?.reopenAfterSwitch(closed, profile: profile, fallback: target, switched: switched)
+           }) == true {
+            return
+        }
+        open(closed, in: target, focus: target != current)
+        cleanup.log.notice("reopened a closed tab in \(target == current ? "the current window" : "a window of its profile", privacy: .public)")
+    }
+
+    /// How long to wait, after a switch for a closed tab, for the sidebar to show the profile's window.
+    private static let reopenWait: TimeInterval = 1.5
+
+    /// After the switch: opens the tab in the window now in front, once the sidebar shows that it's the
+    /// profile's. If the switch didn't work, or the sidebar doesn't catch up, as without the setting.
+    private func reopenAfterSwitch(_ closed: ClosedTab, profile: String?, fallback: TabCleanup.Window, switched: Bool, since: Date = Date()) {
+        if switched, let window = currentWindow, let snapshot = liveSnapshots[window.instance], snapshot.profile == profile {
+            open(closed, in: TabCleanup.Window(instance: window.instance, windowId: window.window.id), focus: false)
+            cleanup.log.notice("reopened a closed tab in the window of its profile now in front")
+            return
+        }
+        if switched, Date().timeIntervalSince(since) < Self.reopenWait {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.reopenAfterSwitch(closed, profile: profile, fallback: fallback, switched: switched, since: since)
+            }
+            return
+        }
+        open(closed, in: fallback, focus: true)
+        cleanup.log.notice("reopened a closed tab in a window of its profile, \(switched ? "after a switch the sidebar didn't follow in time" : "after a switch that didn't work", privacy: .public)")
+    }
+
+    private func open(_ closed: ClosedTab, in window: TabCleanup.Window, focus: Bool) {
+        var command: [String: Any] = ["action": "create", "instance": window.instance, "windowId": window.windowId, "url": closed.url]
+        if focus {
             command["focus"] = true
         }
         sendCommand?(command)
-        cleanup.log.notice("reopened a closed tab in \(target == current ? "the current window" : "a window of its profile", privacy: .public)")
     }
 }
