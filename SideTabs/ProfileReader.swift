@@ -190,6 +190,12 @@ nonisolated final class ProfileReader: @unchecked Sendable {
         return ProfileIdentifiers.isBrowserWindow(identifier)
     }
 
+    /// Forgets each window's profile, which changes when a profile is renamed or given another symbol
+    /// in Settings. Call on `queue`.
+    func forgetToolbars() {
+        toolbars = [:]
+    }
+
     /// Forgets everything that belongs to one Safari launch. Call on `queue`.
     func forget() {
         newWindowItems = []

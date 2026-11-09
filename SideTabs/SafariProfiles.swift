@@ -181,9 +181,7 @@ final class SafariProfiles {
         let reader = reader
         reader.queue.async { [weak self] in
             let reading = reader.readMenu(application: element)
-            if reading != nil, readingWindows {
-                _ = reader.windows(application: element)
-            }
+            let toolbars = reading != nil && readingWindows ? reader.windows(application: element).map(\.toolbar) : []
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
@@ -198,6 +196,7 @@ final class SafariProfiles {
                         return
                     }
                     self.menuRead(reading, because: reason, window: window)
+                    self.learnSymbols(from: toolbars)
                 }
             }
         }
@@ -338,6 +337,36 @@ final class SafariProfiles {
         if let key = ProfileRules.keyToLearn(for: updated[index], windowTitle: dockedTitle, in: copyWindows, profiles: updated),
            ProfileList.assign(key, to: id, in: &updated) {
             log.notice("profile \(index) is the extension copy with profile \(key.rawValue.prefix(8), privacy: .public)")
+        }
+        if updated != profiles {
+            profiles = updated
+            scheduleSave()
+        }
+    }
+
+    /// Symbols from windows that aren't docked (read at launch, or as they open), for profiles whose
+    /// windows say which profile they are without a doubt. Profiles sharing a name are told apart by
+    /// elimination as symbols become known, so this goes round until nothing more is learned.
+    private func learnSymbols(from toolbars: [ToolbarProfile]) {
+        var updated = profiles
+        // Each profile's symbol is set once per call, so two readings that disagree (one from before
+        // the symbol was changed) can't take turns.
+        var settled = Set<UUID>()
+        var learned = true
+        var passes = 0
+        while learned, passes <= updated.count {
+            learned = false
+            passes += 1
+            for toolbar in toolbars {
+                guard case .profile(_, let symbol?) = toolbar,
+                      let id = ProfileRules.resolve(toolbar, windowTitle: nil, profiles: updated, copyWindows: []).profileID,
+                      !settled.contains(id),
+                      let index = updated.firstIndex(where: { $0.id == id }), updated[index].symbol != symbol else { continue }
+                updated[index].symbol = symbol
+                settled.insert(id)
+                learned = true
+                log.notice("profile \(index) has the symbol \(symbol, privacy: .public)")
+            }
         }
         if updated != profiles {
             profiles = updated
@@ -521,9 +550,12 @@ final class SafariProfiles {
             let toolbar = reader.toolbarProfile(of: window).profile
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, case .profile(let name, _) = toolbar, !name.isEmpty,
-                          !self.profiles.contains(where: { ProfileIdentifiers.sameName($0.name, name) }) else { return }
-                    self.lookUp(toolbar, because: "a window of a profile the list doesn't have")
+                    guard let self, case .profile(let name, _) = toolbar, !name.isEmpty else { return }
+                    if self.profiles.contains(where: { ProfileIdentifiers.sameName($0.name, name) }) {
+                        self.learnSymbols(from: [toolbar])
+                    } else {
+                        self.lookUp(toolbar, because: "a window of a profile the list doesn't have")
+                    }
                 }
             }
         }
@@ -542,7 +574,12 @@ final class SafariProfiles {
                         self.settingsFocused = true
                     } else if self.settingsFocused {
                         self.settingsFocused = false
-                        self.readMenu(because: "Settings closed")
+                        // Names and symbols change in Settings, so every window's profile is read again.
+                        reader.queue.async { reader.forgetToolbars() }
+                        self.readMenu(because: "Settings closed", readingWindows: true)
+                        if let window = self.dockedWindow {
+                            self.readDockedToolbar(window)
+                        }
                     }
                 }
             }
