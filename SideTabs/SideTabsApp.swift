@@ -115,6 +115,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         dock.start()
+        // Notices clicks on Safari's Dock icon while the minimize setting needs it (#42).
+        safariProfiles.dockIconWatcher = SafariDockIconWatcher()
         safariProfiles.start()
         store.requestSnapshot()
         tabCleanup.start()
@@ -274,3 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window?.orderFrontRegardless()
     }
 }
+
+/// The core of #42 talks to the Dock icon watcher through this protocol (SafariDockIconWatching.swift).
+/// Declared here, where both are compiled, since the checks compile each on its own.
+extension SafariDockIconWatcher: SafariDockIconWatching {}
