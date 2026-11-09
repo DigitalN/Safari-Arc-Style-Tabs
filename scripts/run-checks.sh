@@ -117,5 +117,8 @@ echo "no URLs in the log"
 # A quick compile check of the app's Swift sources (no signing, no packaging). The full
 # build is scripts/build.sh.
 echo "== app sources"
-swiftc -typecheck -swift-version 5 -default-isolation MainActor -target arm64-apple-macosx26.0 -parse-as-library \
+# The same upcoming feature as the app target (SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY), so a
+# file that uses a module it doesn't import fails here, as it does in Xcode.
+swiftc -typecheck -swift-version 5 -default-isolation MainActor -enable-upcoming-feature MemberImportVisibility \
+    -target arm64-apple-macosx26.0 -parse-as-library \
     SideTabs/*.swift SideTabs/Views/*.swift Shared/Bridge.swift

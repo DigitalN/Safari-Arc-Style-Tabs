@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The favorites (#34): a grid of square tiles at the top of the sidebar, shared by every profile
 /// and shown in private windows too. With no favorites it takes no room, except during a drag, when
