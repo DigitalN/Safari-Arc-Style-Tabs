@@ -190,10 +190,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return false
     }
 
-    /// The toolbar button, its keyboard shortcut, and the menu bar item. In full screen the
-    /// sidebar is a hover overlay, so this slides it out or away instead of turning it off.
+    /// The toolbar button, its keyboard shortcut, and the menu bar item. In full screen, and when
+    /// the sidebar hides automatically, it's a hover overlay, so this slides it out or away instead
+    /// of turning it off.
     func toggleSidebar() {
-        if settings.sidebarVisible, let dock, dock.isShowingFullScreenOverlay {
+        if settings.sidebarVisible, let dock, dock.togglesOverlay {
             dock.toggleOverlay()
         } else {
             settings.sidebarVisible.toggle()

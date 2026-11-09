@@ -293,6 +293,10 @@ struct SettingsView: View {
         Form {
             Section("Sidebar") {
                 Toggle("Show sidebar", isOn: $settings.sidebarVisible)
+                Toggle(isOn: $settings.hidesAutomatically) {
+                    Text("Hide sidebar automatically")
+                    Text("Safari keeps its whole window. The sidebar slides out when you point at the window's left edge or click the Side Tabs button.")
+                }
                 LabeledContent("Width") {
                     HStack {
                         Slider(value: $settings.width, in: AppSettings.widthRange, step: 10)

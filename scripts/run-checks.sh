@@ -49,6 +49,10 @@ echo "== docked window notifications"
 swiftc -o "$WORK/docked-window-checks" Tests/DockedWindowChecks/main.swift SideTabs/DockedWindowNotifications.swift
 "$WORK/docked-window-checks"
 
+echo "== sidebar overlay"
+swiftc -o "$WORK/overlay-checks" Tests/SidebarOverlayChecks/main.swift SideTabs/SidebarOverlay.swift
+"$WORK/overlay-checks"
+
 # A row has one mouse gesture, the one sidebarRowGesture attaches. A press gesture of its own,
 # inside the reorder gesture, wins every press and the reorder never starts (#20).
 echo "== row gestures"
