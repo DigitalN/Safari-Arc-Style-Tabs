@@ -136,7 +136,7 @@ do {
     // pinned items both own tabs that way (#34).
     let (store, _) = makeStore()
     send(store, simpleSnapshot(seq: 1, active: 1, tabs: [1, 2, 3, 4]))
-    store.addBookmark(from: store.tab(for: key(2))!, instance: "A", to: .favorites)
+    store.addBookmark(from: store.tab(for: key(2))!, instance: "A", to: .favorites(.defaultProfile))
     check(store.bookmarkTabKeys == [key(2)], "a tab made into a favorite is that favorite's tab")
     store.addBookmark(from: store.tab(for: key(3))!, instance: "A", to: .pinned(.defaultProfile))
     check(store.bookmarkTabKeys == [key(2), key(3)], "and a tab pinned in the profile's Pinned list is that pinned item's")

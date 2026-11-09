@@ -125,13 +125,11 @@ struct BookmarkMenu: View {
         Button("Replace with Current Page") { store.replaceBookmarkWithCurrentPage(bookmark) }
         Button("Copy Link") { store.copyLink(bookmark.url) }
         Divider()
-        if isFavorite {
-            // A private window has no Pinned list to move it to.
-            if let pinned = store.currentPinnedList {
-                Button("Move to Pinned") { store.moveBookmark(bookmark.id, to: pinned, at: store.bookmarks(in: pinned).count) }
-            }
-        } else {
-            Button("Move to Favorites") { store.moveBookmark(bookmark.id, to: .favorites, at: store.favorites.count) }
+        // Within the profile whose window the sidebar shows, the only one whose lists it shows.
+        if isFavorite, let pinned = store.currentPinnedList {
+            Button("Move to Pinned") { store.moveBookmark(bookmark.id, to: pinned, at: store.bookmarks(in: pinned).count) }
+        } else if !isFavorite, let favorites = store.currentFavoritesList {
+            Button("Move to Favorites") { store.moveBookmark(bookmark.id, to: favorites, at: store.bookmarks(in: favorites).count) }
         }
         if isOpen {
             Button("Close Tab") { store.closeBookmarkTab(bookmark.id) }

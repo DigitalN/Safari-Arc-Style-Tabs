@@ -58,28 +58,23 @@ struct SidebarView: View {
     }
 }
 
-/// Favorites, Pinned and Tabs, top to bottom (#34). Pinned is the list of the profile whose window the
-/// sidebar shows, so it swaps when another profile's window comes in front; a private window belongs
-/// to no profile and has none. With Favorites and Pinned turned off in Settings, only Tabs.
+/// Favorites, Pinned and Tabs, top to bottom (#34). Favorites and Pinned are the lists of the profile whose
+/// window the sidebar shows (#38), so both swap at once when another profile's window comes in front. A
+/// private window belongs to no profile and shows Tabs only, and so does every window with Favorites and
+/// Pinned turned off in Settings.
 private struct SidebarSections: View {
     let selection: TabStore.WindowSelection
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
-    @Environment(SidebarDrag.self) private var drag
 
     var body: some View {
-        if settings.showBookmarks {
-            let pinned = store.profile(of: selection.window, instance: selection.instance).map(BookmarkList.pinned)
-            FavoritesSection()
-            if let pinned {
-                PinnedSection(list: pinned)
-            }
-            // Nothing to set apart in a private window without favorites.
-            if pinned != nil || !store.favorites.isEmpty || drag.isActive {
-                Divider()
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 7)
-            }
+        // A private window belongs to no profile, so it shows Tabs only (#38).
+        if settings.showBookmarks, let profile = store.profile(of: selection.window, instance: selection.instance) {
+            FavoritesSection(list: .favorites(profile))
+            PinnedSection(list: .pinned(profile))
+            Divider()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
         }
         TabsSection(selection: selection)
     }

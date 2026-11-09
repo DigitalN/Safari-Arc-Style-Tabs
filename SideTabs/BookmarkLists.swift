@@ -1,42 +1,48 @@
 import Foundation
 
-// Favorites and the Pinned lists (#34). Each space is a Safari profile, and each profile has a Pinned
-// list of its own. Favorites, the grid at the top of the sidebar, are shared by every profile and
-// show in private windows too. Both hold bookmarks with #25's rules (BookmarkTabs.swift): opening one
-// gives it a tab of its own in that window. The rules are kept here, apart from SwiftUI and Safari, so
+// Favorites and the Pinned lists (#34, #38). Each space is a Safari profile, and each profile has its own
+// Favorites (the grid at the top of the sidebar) and its own Pinned list. Private windows belong to no
+// profile and have neither. Both hold bookmarks with #25's rules (BookmarkTabs.swift): opening one gives
+// it a tab of its own in that window. The rules are kept here, apart from SwiftUI and Safari, so
 // Tests/StoreChecks can check them; TabStore keeps one of these and saves it in state.json.
 
-/// Which list a bookmark is in.
+/// Which list a bookmark is in: one profile's Favorites or Pinned list.
 nonisolated enum BookmarkList: Hashable, Sendable, CustomStringConvertible {
-    /// Shared by every profile, and shown in private windows too.
-    case favorites
-    /// One profile's own list. Private windows belong to no profile and have none.
+    case favorites(ProfileKey)
     case pinned(ProfileKey)
+
+    /// The profile the list belongs to.
+    var profile: ProfileKey {
+        switch self {
+        case .favorites(let profile), .pinned(let profile): profile
+        }
+    }
 
     /// For the log: never a profile's name, which the log doesn't get. A profile's UUID is shortened.
     var description: String {
+        let owner = profile.isDefault ? "the default profile's" : "profile \(profile.rawValue.prefix(8))'s"
         switch self {
-        case .favorites: "Favorites"
-        case .pinned(let profile) where profile.isDefault: "the default profile's Pinned"
-        case .pinned(let profile): "profile \(profile.rawValue.prefix(8))'s Pinned"
+        case .favorites: return "\(owner) Favorites"
+        case .pinned: return "\(owner) Pinned"
         }
     }
 }
 
-/// The favorites and every profile's Pinned list. A bookmark is in exactly one list, and its id is
-/// unique across all of them, so #25's links (keyed by bookmark id) serve both.
+/// Every profile's Favorites and Pinned list. A bookmark is in exactly one list, and its id is unique
+/// across all of them, so #25's links (keyed by bookmark id) serve every list.
 struct BookmarkLists: Equatable {
-    private(set) var favorites: [Bookmark] = []
-    /// Only profiles with something pinned have an entry. A profile deleted in Safari keeps its list,
-    /// which is harmless: nothing shows it.
+    /// Only profiles with something in a list have an entry there. A profile deleted in Safari keeps its
+    /// lists, which is harmless: nothing shows them.
+    private(set) var favorites: [ProfileKey: [Bookmark]] = [:]
     private(set) var pinned: [ProfileKey: [Bookmark]] = [:]
 
     init() {}
 
-    /// The lists as state.json keeps them: `bookmarks` holds the favorites (as it held every bookmark
-    /// before there were Pinned lists, so an older file needs no converting), and `pinned` the Pinned
-    /// lists by `ProfileKey.rawValue`. An id that turns up twice is given a new one, so ids stay unique.
-    init(favorites: [Bookmark], pinned: [String: [Bookmark]]) {
+    /// The lists as state.json keeps them, by `ProfileKey.rawValue`. `favorites` is nil in a file saved
+    /// before favorites belonged to profiles (#38), or by a version that doesn't know the key and dropped it:
+    /// then `bookmarks`, which held the bookmarks before there were profiles' lists, becomes the default
+    /// profile's favorites. An id that turns up twice is given a new one, so ids stay unique.
+    init(favorites: [String: [Bookmark]]?, bookmarks: [Bookmark], pinned: [String: [Bookmark]]) {
         var seen = Set<UUID>()
         func unique(_ list: [Bookmark]) -> [Bookmark] {
             list.map { bookmark in
@@ -47,11 +53,23 @@ struct BookmarkLists: Equatable {
                 return bookmark
             }
         }
-        self.favorites = unique(favorites)
-        // In a fixed order, so which copy keeps a repeated id doesn't change from launch to launch.
-        for (profile, list) in pinned.sorted(by: { $0.key < $1.key }) where !list.isEmpty {
+        // In a fixed order, the default profile's first, so which copy keeps a repeated id doesn't change
+        // from launch to launch.
+        func ordered(_ lists: [String: [Bookmark]]) -> [(key: String, value: [Bookmark])] {
+            let rank = { (key: String) in key == ProfileKey.defaultProfile.rawValue ? 0 : 1 }
+            return lists.sorted { (rank($0.key), $0.key) < (rank($1.key), $1.key) }
+        }
+        for (profile, list) in ordered(favorites ?? [ProfileKey.defaultProfile.rawValue: bookmarks]) where !list.isEmpty {
+            self.favorites[ProfileKey(rawValue: profile)] = unique(list)
+        }
+        for (profile, list) in ordered(pinned) where !list.isEmpty {
             self.pinned[ProfileKey(rawValue: profile)] = unique(list)
         }
+    }
+
+    /// The favorites keyed the way state.json keeps them.
+    var savedFavorites: [String: [Bookmark]] {
+        Dictionary(uniqueKeysWithValues: favorites.map { ($0.key.rawValue, $0.value) })
     }
 
     /// The Pinned lists keyed the way state.json keeps them.
@@ -63,33 +81,32 @@ struct BookmarkLists: Equatable {
 
     func items(in list: BookmarkList) -> [Bookmark] {
         switch list {
-        case .favorites: favorites
+        case .favorites(let profile): favorites[profile] ?? []
         case .pinned(let profile): pinned[profile] ?? []
         }
     }
 
     /// Every bookmark in every list.
     var all: [Bookmark] {
-        favorites + pinned.values.joined()
+        Array(favorites.values.joined()) + pinned.values.joined()
     }
 
-    var allIds: Set<UUID> { Set(all.map(\.id)) }
-
     func bookmark(_ id: UUID) -> Bookmark? {
-        favorites.first { $0.id == id } ?? pinned.values.lazy.compactMap { $0.first { $0.id == id } }.first
+        all.first { $0.id == id }
     }
 
     func list(containing id: UUID) -> BookmarkList? {
-        if favorites.contains(where: { $0.id == id }) {
-            return .favorites
+        if let profile = favorites.first(where: { $0.value.contains { $0.id == id } })?.key {
+            return .favorites(profile)
         }
         return pinned.first { $0.value.contains { $0.id == id } }.map { .pinned($0.key) }
     }
 
-    /// What a window shows: the favorites, then its profile's Pinned list. `profile` is nil for a
-    /// private window, which shows only the favorites.
+    /// What a window shows: its profile's favorites, then its Pinned list. `profile` is nil for a private
+    /// window, which shows neither.
     func shown(in profile: ProfileKey?) -> [Bookmark] {
-        favorites + (profile.flatMap { pinned[$0] } ?? [])
+        guard let profile else { return [] }
+        return items(in: .favorites(profile)) + items(in: .pinned(profile))
     }
 
     // MARK: Changes
@@ -140,12 +157,16 @@ struct BookmarkLists: Equatable {
 
     private mutating func change(_ list: BookmarkList, _ body: (inout [Bookmark]) -> Void) {
         switch list {
-        case .favorites:
-            body(&favorites)
+        case .favorites(let profile):
+            Self.change(&favorites, profile, body)
         case .pinned(let profile):
-            var items = pinned[profile] ?? []
-            body(&items)
-            pinned[profile] = items.isEmpty ? nil : items
+            Self.change(&pinned, profile, body)
         }
+    }
+
+    private static func change(_ lists: inout [ProfileKey: [Bookmark]], _ profile: ProfileKey, _ body: (inout [Bookmark]) -> Void) {
+        var items = lists[profile] ?? []
+        body(&items)
+        lists[profile] = items.isEmpty ? nil : items
     }
 }

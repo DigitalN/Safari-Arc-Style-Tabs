@@ -83,11 +83,11 @@ struct BookmarkTabs: Equatable {
         restorable.removeAll { $0.bookmark == bookmark }
     }
 
-    /// Lets go of the tabs in `snapshot` whose bookmark the tab's window doesn't show (#34): `shown`
-    /// gives the ids of the bookmarks a window shows, which are the favorites and its profile's Pinned
-    /// list. A pinned item moved to another profile's list leaves its tabs in this profile, and a
-    /// favorite moved to Pinned leaves its tabs in other profiles and in private windows. They go back
-    /// under Tabs there, rather than belonging to a bookmark nothing in that window stands for.
+    /// Lets go of the tabs in `snapshot` whose bookmark the tab's window doesn't show (#34, #38): `shown`
+    /// gives the ids of the bookmarks a window shows, which are its profile's Favorites and Pinned list,
+    /// and none in a private window. So links never cross profiles: a tab of another profile's window, or
+    /// of a private one (as a state.json from when favorites were shared can have), goes back under Tabs,
+    /// rather than belonging to a bookmark nothing in that window stands for.
     mutating func unlinkTabs(in snapshot: Snapshot, notShown shown: (BrowserWindow) -> Set<UUID>) {
         for window in snapshot.windows {
             let ids = shown(window)

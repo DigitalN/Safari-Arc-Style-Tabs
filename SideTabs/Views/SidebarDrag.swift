@@ -24,8 +24,8 @@ final class SidebarDrag {
         case pinned(Bookmark)
     }
 
-    /// Where the item would land: a slot index in one of the lists, or nowhere. `pinned` is the
-    /// Pinned list the sidebar shows (`TabStore.currentPinnedList`).
+    /// Where the item would land: a slot index in one of the lists, or nowhere. `favorites` and `pinned`
+    /// are the lists the sidebar shows (`TabStore.currentFavoritesList` and `currentPinnedList`).
     enum Target: Equatable {
         case none
         case tabs(Int)
@@ -35,8 +35,8 @@ final class SidebarDrag {
 
     /// What the sections hold while the pointer moves, which bounds the slots.
     struct Counts {
-        var favorites: Int
-        /// Nil when there's no Pinned section (a private window).
+        /// Both nil when there are no Favorites or Pinned sections (a private window).
+        var favorites: Int?
         var pinned: Int?
         var tabs: Int
         /// Whether Favorites and Pinned show (Settings). Without them every tab is in the Tabs list.
@@ -106,14 +106,14 @@ final class SidebarDrag {
         let tileGrab = startsAsTile ? grab : CGPoint(x: tile / 2, y: tile / 2)
         let tileOrigin = CGPoint(x: pointer.x - tileGrab.x, y: pointer.y - tileGrab.y)
 
-        // Favorites are at the top, then Pinned (not in a private window), then Tabs.
+        // Favorites are at the top, then Pinned, then Tabs. A private window has Tabs only.
         enum Region { case favorites, pinned, tabs }
         let region: Region
-        if !counts.sectionsShown {
+        if !counts.sectionsShown || counts.favorites == nil || counts.pinned == nil {
             region = .tabs
-        } else if pointer.y < (counts.pinned != nil ? pinnedSectionTop : tabsSectionTop) {
+        } else if pointer.y < pinnedSectionTop {
             region = .favorites
-        } else if counts.pinned != nil && pointer.y < tabsSectionTop {
+        } else if pointer.y < tabsSectionTop {
             region = .pinned
         } else {
             region = .tabs
@@ -128,9 +128,9 @@ final class SidebarDrag {
         case (.tab, .pinned), (.favorite, .pinned):
             newTarget = .pinned(slot(rowTop: rowTop, rowsTop: pinnedRowsTop, others: counts.pinned ?? 0))
         case (.favorite, .favorites):
-            newTarget = .favorites(gridSlot(at: pointer, others: counts.favorites - 1))
+            newTarget = .favorites(gridSlot(at: pointer, others: (counts.favorites ?? 0) - 1))
         case (.tab, .favorites), (.pinned, .favorites):
-            newTarget = .favorites(gridSlot(at: pointer, others: counts.favorites))
+            newTarget = .favorites(gridSlot(at: pointer, others: counts.favorites ?? 0))
         case (.favorite, .tabs), (.pinned, .tabs):
             newTarget = .none
         }
@@ -170,7 +170,9 @@ final class SidebarDrag {
         withAnimation(.snappy(duration: 0.18)) {
             switch (item, target) {
             case (.favorite(let bookmark), .favorites(let index)), (.pinned(let bookmark), .favorites(let index)):
-                store.moveBookmark(bookmark.id, to: .favorites, at: index)
+                if let list = store.currentFavoritesList {
+                    store.moveBookmark(bookmark.id, to: list, at: index)
+                }
             case (.favorite(let bookmark), .pinned(let index)), (.pinned(let bookmark), .pinned(let index)):
                 if let list = store.currentPinnedList {
                     store.moveBookmark(bookmark.id, to: list, at: index)
@@ -178,7 +180,9 @@ final class SidebarDrag {
             case (.tab(let tab, let instance), .tabs(let index)):
                 store.moveTab(tab, instance: instance, toListedSlot: index, bookmarksShown: sectionsVisible)
             case (.tab(let tab, let instance), .favorites(let index)):
-                store.addBookmark(from: tab, instance: instance, to: .favorites, at: index)
+                if let list = store.currentFavoritesList {
+                    store.addBookmark(from: tab, instance: instance, to: list, at: index)
+                }
             case (.tab(let tab, let instance), .pinned(let index)):
                 if let list = store.currentPinnedList {
                     store.addBookmark(from: tab, instance: instance, to: list, at: index)
@@ -336,7 +340,7 @@ private struct SidebarRowGesture: ViewModifier {
     private var counts: SidebarDrag.Counts {
         let selection = store.currentWindow
         return SidebarDrag.Counts(
-            favorites: store.favorites.count,
+            favorites: store.currentFavoritesList.map { store.bookmarks(in: $0).count },
             pinned: store.currentPinnedList.map { store.bookmarks(in: $0).count },
             tabs: selection.map {
                 store.tabsListed(in: $0.window, instance: $0.instance, bookmarksShown: settings.showBookmarks).count

@@ -149,13 +149,15 @@ struct TabRow: View {
             Button("Reset Name") { store.resetName(key) }
         }
         Divider()
-        // A private window has no Pinned list.
+        // A private window has neither list (#38).
         if let pinned = store.currentPinnedList {
             Button("Add to Pinned") { store.addBookmark(from: tab, instance: instance, to: pinned) }
                 .disabled(tab.url == nil)
         }
-        Button("Add to Favorites") { store.addBookmark(from: tab, instance: instance, to: .favorites) }
-            .disabled(tab.url == nil)
+        if let favorites = store.currentFavoritesList {
+            Button("Add to Favorites") { store.addBookmark(from: tab, instance: instance, to: favorites) }
+                .disabled(tab.url == nil)
+        }
         Button("Copy Link") { store.copyLink(tab.url) }
             .disabled(tab.url == nil)
         Button("Duplicate Tab") { store.duplicate(tab, instance: instance) }

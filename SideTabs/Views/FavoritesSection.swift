@@ -1,10 +1,13 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The favorites (#34): a grid of square tiles at the top of the sidebar, shared by every profile
-/// and shown in private windows too. With no favorites it takes no room, except during a drag, when
+/// The favorites (#34): a grid of square tiles at the top of the sidebar. They're the Favorites of the
+/// profile whose window is in front (#38); a private window has none. With no favorites it takes no
+/// room, except during a drag, when
 /// a drop area shows where the grid would be.
 struct FavoritesSection: View {
+    /// The Favorites of the profile whose window the sidebar shows.
+    let list: BookmarkList
     @Environment(TabStore.self) private var store
     @Environment(SidebarDrag.self) private var drag
     @State private var width: CGFloat = 0
@@ -24,7 +27,7 @@ struct FavoritesSection: View {
     /// Favorites in display order. While a favorite is dragged over the grid it moves to the target
     /// cell (and draws itself as the slot); a dragged tab or pinned item gets a slot of its own.
     private var slots: [Slot] {
-        var favorites = store.favorites
+        var favorites = store.bookmarks(in: list)
         switch (drag.item, drag.target) {
         case (.favorite(let dragged)?, .favorites(let index)):
             if let from = favorites.firstIndex(where: { $0.id == dragged.id }) {
@@ -50,11 +53,11 @@ struct FavoritesSection: View {
     /// The favorite being renamed: tiles have no room for the name, so it's edited in a row below.
     private var renamed: Bookmark? {
         guard case .bookmark(let id) = store.renaming else { return nil }
-        return store.favorites.first { $0.id == id }
+        return store.bookmarks(in: list).first { $0.id == id }
     }
 
     var body: some View {
-        let isEmpty = store.favorites.isEmpty
+        let isEmpty = store.bookmarks(in: list).isEmpty
         VStack(alignment: .leading, spacing: 0) {
             if !isEmpty {
                 TileGrid(metrics: metrics) {
@@ -70,9 +73,9 @@ struct FavoritesSection: View {
                 .onSidebarFrame { drag.favoritesFrame = $0 }
                 // Links dragged in from a web page or Safari's address bar.
                 .onDrop(of: [.url], isTargeted: nil) { providers, location in
-                    let index = metrics.slot(at: location, count: store.favorites.count)
+                    let index = metrics.slot(at: location, count: store.bookmarks(in: list).count)
                     return loadDroppedURL(from: providers) { url in
-                        store.addBookmark(url: url, to: .favorites, at: index)
+                        store.addBookmark(url: url, to: list, at: index)
                     }
                 }
                 if let renamed {
