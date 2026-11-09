@@ -447,6 +447,59 @@ do {
     check(ProfilesFile.load(from: url).isEmpty, "a damaged file: no profiles, nothing breaks")
 }
 
+// MARK: - Where the buttons go in the bottom bar, and when the dropdown takes over (#39)
+
+do {
+    // Settings → Width: 180 to 420 points, 260 by default (AppSettings.widthRange and its registered default).
+    let narrowest = ProfileBarLayout.barWidth(sidebarWidth: 180)
+    let standard = ProfileBarLayout.barWidth(sidebarWidth: 260)
+    let widest = ProfileBarLayout.barWidth(sidebarWidth: 420)
+    check(narrowest == 164 && standard == 244 && widest == 404, "the bar is the sidebar less its insets")
+
+    let side = ProfileBarLayout.sideButtonWidth
+    func fitting(_ bar: CGFloat, leading: CGFloat) -> Int {
+        ProfileBarLayout.buttonsFitting(in: ProfileBarLayout.room(barWidth: bar, leading: leading, trailing: side))
+    }
+    check(fitting(narrowest, leading: side) == 3, "3 buttons fit at the narrowest, got \(fitting(narrowest, leading: side))")
+    check(fitting(standard, leading: side) == 6, "6 fit at the default width, got \(fitting(standard, leading: side))")
+    check(fitting(widest, leading: side) == 12, "12 fit at the widest, got \(fitting(widest, leading: side))")
+    for bar in [narrowest, standard, widest] {
+        check(fitting(bar, leading: 0) == fitting(bar, leading: side), "without Closed Tabs, as many fit: the + on the other side is as wide")
+    }
+    check(fitting(standard, leading: 60) < fitting(standard, leading: side), "a wider item at one end leaves less room on both sides")
+    check(ProfileBarLayout.room(barWidth: standard, leading: 0, trailing: 0) == standard, "with nothing at the ends, the whole bar")
+
+    // The room is the same on both sides: the buttons are centred in the sidebar, clear of both ends.
+    for (bar, leading) in [(narrowest, side), (standard, 0), (standard, side), (widest, 0)] {
+        let count = fitting(bar, leading: leading)
+        let width = ProfileBarLayout.buttonsWidth(count: count)
+        let place = ProfileBarLayout.centred(width: width, barWidth: bar)
+        check(abs(place.minX - (bar - place.maxX)) < 0.001, "equal room on both sides at \(bar), \(count) buttons")
+        check(place.minX >= max(leading, side) + ProfileBarLayout.gap - 0.001, "the buttons clear the ends at \(bar)")
+        check(ProfileBarLayout.buttonsWidth(count: count + 1) > ProfileBarLayout.room(barWidth: bar, leading: leading, trailing: side),
+              "and one more wouldn't fit at \(bar)")
+    }
+    check(ProfileBarLayout.buttonsWidth(count: 1) == 26 && ProfileBarLayout.buttonsWidth(count: 3) == 82 && ProfileBarLayout.buttonsWidth(count: 0) == 0,
+          "buttons with the spacing between them")
+    check(ProfileBarLayout.buttonsFitting(in: 25) == 0 && ProfileBarLayout.buttonsFitting(in: 26) == 1 && ProfileBarLayout.buttonsFitting(in: 54) == 2,
+          "a button fits only whole")
+
+    // When the dropdown takes over.
+    func middle(_ count: Int, _ bar: CGFloat, leading: CGFloat = 0) -> ProfileBarLayout.Middle {
+        ProfileBarLayout.middle(profileCount: count, barWidth: bar, leading: leading, trailing: side)
+    }
+    check(middle(1, standard) == .nothing && middle(0, standard) == .nothing, "one profile: only the + shows")
+    check(middle(2, narrowest) == .buttons && middle(3, narrowest) == .buttons, "at the narrowest, 3 profiles are buttons")
+    check(middle(4, narrowest) == .dropdown(maxWidth: 100), "and a 4th turns them into a dropdown, as wide as the room")
+    check(middle(6, standard, leading: side) == .buttons && middle(7, standard, leading: side) == .dropdown(maxWidth: 180), "at the default width, the 7th")
+    check(middle(12, widest) == .buttons && middle(13, widest) == .dropdown(maxWidth: 340), "at the widest, the 13th")
+    check(middle(4, narrowest) == .dropdown(maxWidth: 100) && middle(4, standard) == .buttons, "widening the sidebar turns the dropdown back into buttons")
+    if case .dropdown(let maxWidth) = middle(9, standard) {
+        let place = ProfileBarLayout.centred(width: maxWidth, barWidth: standard)
+        check(abs(place.minX - (standard - place.maxX)) < 0.001 && place.minX >= side + ProfileBarLayout.gap - 0.001, "the dropdown is centred in the same room")
+    }
+}
+
 if failures > 0 {
     print("\(failures) profile check(s) failed")
     exit(1)

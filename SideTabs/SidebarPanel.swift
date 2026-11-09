@@ -63,7 +63,11 @@ final class SidebarPanel: NSPanel {
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown || event.type == .otherMouseDown {
             lastMouseDown = Date(timeIntervalSinceNow: event.timestamp - ProcessInfo.processInfo.systemUptime)
-            onMouseDown?()
+            // A view that opens a menu on mouse-down (the profile dropdown, #39) runs this itself once the
+            // menu has closed: Safari coming forward now would close the menu as it opens.
+            if !(event.type == .leftMouseDown && opensMenu(at: event)) {
+                onMouseDown?()
+            }
         }
         if event.type == .otherMouseDown, event.buttonNumber == 2, let onMiddleClick, let view = contentView {
             let local = view.convert(event.locationInWindow, from: nil)
@@ -73,6 +77,25 @@ final class SidebarPanel: NSPanel {
             }
         }
         super.sendEvent(event)
+    }
+
+    /// Runs what a left mouse-down normally does first (`onMouseDown`: bringing Safari forward), for a
+    /// view that opens a menu on mouse-down, once its menu has closed.
+    func finishMenuMouseDown() {
+        onMouseDown?()
+    }
+
+    /// Whether the click lands on a view that opens a menu on mouse-down. The hit can land on the view
+    /// SwiftUI wraps an AppKit view in, so this also looks at the topmost views inside it under the click.
+    private func opensMenu(at event: NSEvent) -> Bool {
+        guard let contentView, let frameView = contentView.superview,
+              var view = contentView.hitTest(frameView.convert(event.locationInWindow, from: nil)) else { return false }
+        while !(view is OpensMenuOnMouseDown) {
+            let point = view.convert(event.locationInWindow, from: nil)
+            guard let inner = view.subviews.last(where: { !$0.isHidden && $0.frame.contains(point) }) else { return false }
+            view = inner
+        }
+        return true
     }
 
     /// Needed for renaming; `becomesKeyOnlyIfNeeded` keeps plain clicks from taking focus.

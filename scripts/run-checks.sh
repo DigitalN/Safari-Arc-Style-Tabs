@@ -73,10 +73,11 @@ swiftc -o "$WORK/overlay-checks" Tests/SidebarOverlayChecks/main.swift SideTabs/
 # Safari's profiles (#33): their identifiers in File → New Window and each window's toolbar, found in
 # trees #28 recorded; keeping the list and profiles.json; which profile a window is in, which extension
 # copy is a profile's, when Side Tabs counts as off in a profile, and which window a switch brings forward.
+# Also where the profile buttons go in the bottom bar, and when a dropdown takes their place (#39).
 echo "== profiles"
 swiftc -o "$WORK/profile-checks" \
     Tests/ProfileChecks/main.swift SideTabs/ProfileKey.swift SideTabs/SafariProfile.swift \
-    SideTabs/ProfileTree.swift SideTabs/ProfileRules.swift
+    SideTabs/ProfileTree.swift SideTabs/ProfileRules.swift SideTabs/ProfileBarLayout.swift
 "$WORK/profile-checks"
 # A profile's name is the user's own words, so it stays out of the log like titles and URLs do.
 # Positions, symbols and the copy's profile UUID are fine.

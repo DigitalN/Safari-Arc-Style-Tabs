@@ -449,11 +449,12 @@ final class SafariProfiles {
     // MARK: - Actions
 
     /// Switches to `profile` in place. On mouse-down; does nothing for the current profile, or
-    /// without Accessibility access.
-    func select(_ profile: SafariProfile) {
+    /// without Accessibility access. Says whether a switch started (it brings Safari forward).
+    @discardableResult
+    func select(_ profile: SafariProfile) -> Bool {
         guard let app = application,
               let position = profiles.firstIndex(where: { $0.id == profile.id }),
-              profile.id != highlightedID else { return }
+              profile.id != highlightedID else { return false }
         let clickAt = store.lastPointerDown?() ?? Date()
         let pending = PendingSwitch(id: profile.id, at: Date())
         pendingSwitch = pending
@@ -485,6 +486,7 @@ final class SafariProfiles {
                 }
             }
         }
+        return true
     }
 
     private func switchFinished(_ outcome: ProfileSwitcher.Outcome, pending: PendingSwitch, position: Int) {
