@@ -29,6 +29,7 @@ final class AppSettings {
         didSet { defaults.set(closeButtonMode.rawValue, forKey: "closeButtonMode") }
     }
 
+    /// Show Favorites and Pinned (#34). The key is still the one from when they were Bookmarks.
     var showBookmarks: Bool {
         didSet { defaults.set(showBookmarks, forKey: "showBookmarks") }
     }

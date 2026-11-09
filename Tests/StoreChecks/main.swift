@@ -1001,10 +1001,10 @@ func closes(_ commands: [[String: Any]]) -> [[Int]] {
     commands.filter { $0["action"] as? String == "close" }.compactMap { $0["tabIds"] as? [Int] }
 }
 
-/// Adds a bookmark for `url` and returns it.
-func bookmark(_ store: TabStore, _ url: String) -> Bookmark {
-    store.addBookmark(url: URL(string: url)!)
-    return store.bookmarks.last!
+/// Adds a bookmark for `url` to `list` (Favorites, where #25's bookmarks went) and returns it.
+func bookmark(_ store: TabStore, _ url: String, to list: BookmarkList = .favorites) -> Bookmark {
+    store.addBookmark(url: URL(string: url)!, to: list)
+    return store.bookmarks(in: list).last!
 }
 
 /// Opens the bookmark as a click does, and answers the extension's `create` with tab `tabId`.
@@ -1201,18 +1201,18 @@ do {
 do {
     // Dragging a tab onto Bookmarks, Replace with Current Page, and Remove Bookmark.
     let (store, _) = makeStore()
-    store.addBookmark(from: store.tab(for: TabKey(instance: instance, tabId: 3))!, instance: instance, at: 0)
-    let dragged = store.bookmarks[0]
+    store.addBookmark(from: store.tab(for: TabKey(instance: instance, tabId: 3))!, instance: instance, to: .favorites, at: 0)
+    let dragged = store.favorites[0]
     check(dragged.url == "https://example.com/3", "a tab dragged onto Bookmarks makes a bookmark of its page")
     check(store.openTab(for: dragged)?.id == 3, "which owns the tab")
     check(listedIds(store) == [1, 2, 4], "so the tab moves up out of Tabs")
 
     send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (2, "https://example.com/2"), (3, elsewhere), (4, "https://example.com/4")])], active: [3]))
     store.replaceBookmarkWithCurrentPage(dragged)
-    check(store.bookmarks[0].url == elsewhere, "Replace with Current Page saves the tab's current page as the bookmark's")
-    check(store.openTab(for: store.bookmarks[0])?.id == 3, "and the tab stays the bookmark's")
+    check(store.favorites[0].url == elsewhere, "Replace with Current Page saves the tab's current page as the bookmark's")
+    check(store.openTab(for: store.favorites[0])?.id == 3, "and the tab stays the bookmark's")
 
-    store.removeBookmark(store.bookmarks[0])
+    store.removeBookmark(store.favorites[0])
     check(store.bookmarkTabs.owners.isEmpty, "removing the bookmark lets go of its tab")
     check(listedIds(store) == [1, 2, 3, 4], "which goes back under Tabs, still open")
 }
@@ -1306,7 +1306,7 @@ do {
     let old = #"{"bookmarks":[{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","title":"Old","url":"https://old.example/"}],"names":[],"orphanNames":{}}"#
     try! old.write(to: url, atomically: true, encoding: .utf8)
     let store = TabStore(stateURL: url)
-    check(store.bookmarks.map(\.title) == ["Old"], "an older state.json without bookmarks' tabs still loads its bookmarks")
+    check(store.favorites.map(\.title) == ["Old"], "an older state.json without bookmarks' tabs still loads its bookmarks")
 }
 
 try? FileManager.default.removeItem(at: stateFolder)

@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// A row in the Pinned list (#34): a pinned item, with #25's rules for its tab.
 struct BookmarkRow: View {
     let bookmark: Bookmark
 
@@ -18,22 +19,17 @@ struct BookmarkRow: View {
     @State private var closeFrame = CGRect.zero
 
     private var isRenaming: Bool { store.renaming == .bookmark(bookmark.id) }
-    private var isSlot: Bool { drag.isSlot(bookmark: bookmark) }
+    private var isSlot: Bool { drag.isSlot(pinned: bookmark) }
 
     /// The first event of a press, with where it landed (sidebar coordinates). Says whether the
     /// row took it.
     private func pressBegan(at point: CGPoint) -> Bool {
         opensOnRelease = false
         guard !isRenaming else { return false }
-        let isOpen = store.openTab(for: bookmark) != nil
-        if isOpen && closeFrame.containsCircle(point) {
+        if store.openTab(for: bookmark) != nil && closeFrame.containsCircle(point) {
             return false
         }
-        if isOpen && !NSEvent.modifierFlags.contains(.command) {
-            store.open(bookmark)
-        } else {
-            opensOnRelease = true
-        }
+        opensOnRelease = store.pressBookmark(bookmark, command: NSEvent.modifierFlags.contains(.command))
         return true
     }
 
@@ -92,7 +88,7 @@ struct BookmarkRow: View {
         // rows. One that isn't open opens a tab on mouse-up instead: on mouse-down, starting a drag
         // to reorder would create a tab, and a press that turned into a drag never opens one.
         .sidebarRowGesture(
-            .bookmark(bookmark),
+            .pinned(bookmark),
             drag: drag,
             store: store,
             settings: settings,
@@ -106,21 +102,40 @@ struct BookmarkRow: View {
         // Where the row is, so a middle click on it can be found (SidebarPanel.sendEvent).
         .onWindowFrame { rows.setFrame($0, forBookmark: bookmark.id) }
         .onDisappear { rows.removeBookmark(bookmark.id) }
-        .contextMenu {
-            Button("Open") { store.open(bookmark) }
-            Button("Open in New Tab") { store.open(bookmark, inNewTab: true) }
-            Divider()
-            Button("Rename…") { store.beginRename(.bookmark(bookmark.id)) }
-            Button("Replace with Current Page") { store.replaceBookmarkWithCurrentPage(bookmark) }
-            Button("Copy Link") { store.copyLink(bookmark.url) }
-            Divider()
-            if openTab != nil {
-                Button("Close Tab") { store.closeBookmarkTab(bookmark.id) }
-            }
-            Button("Remove Bookmark") { store.removeBookmark(bookmark) }
-        }
+        .contextMenu { BookmarkMenu(bookmark: bookmark, isFavorite: false, isOpen: openTab != nil) }
         .help("\(bookmark.title)\n\(bookmark.url)")
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(openTab?.active == true ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+/// The menu of a favorite's tile and of a pinned row.
+struct BookmarkMenu: View {
+    let bookmark: Bookmark
+    let isFavorite: Bool
+    /// Whether its tab is open in the window the sidebar shows.
+    let isOpen: Bool
+    @Environment(TabStore.self) private var store
+
+    var body: some View {
+        Button("Open") { store.open(bookmark) }
+        Button("Open in New Tab") { store.open(bookmark, inNewTab: true) }
+        Divider()
+        Button("Rename…") { store.beginRename(.bookmark(bookmark.id)) }
+        Button("Replace with Current Page") { store.replaceBookmarkWithCurrentPage(bookmark) }
+        Button("Copy Link") { store.copyLink(bookmark.url) }
+        Divider()
+        if isFavorite {
+            // A private window has no Pinned list to move it to.
+            if let pinned = store.currentPinnedList {
+                Button("Move to Pinned") { store.moveBookmark(bookmark.id, to: pinned, at: store.bookmarks(in: pinned).count) }
+            }
+        } else {
+            Button("Move to Favorites") { store.moveBookmark(bookmark.id, to: .favorites, at: store.favorites.count) }
+        }
+        if isOpen {
+            Button("Close Tab") { store.closeBookmarkTab(bookmark.id) }
+        }
+        Button(isFavorite ? "Remove from Favorites" : "Remove from Pinned") { store.removeBookmark(bookmark) }
     }
 }

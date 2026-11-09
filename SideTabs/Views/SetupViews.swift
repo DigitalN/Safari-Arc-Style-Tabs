@@ -196,7 +196,7 @@ struct WelcomeView: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 SetupTip(systemImage: "sidebar.left", text: "Side Tabs lives in your menu bar. Use it to show or hide the sidebar and to open Settings.")
-                SetupTip(systemImage: "star", text: "Drag a tab up into Bookmarks to keep a site at the top.")
+                SetupTip(systemImage: "pin", text: "Drag a tab up into Pinned or Favorites to keep a site at the top.")
                 SetupTip(systemImage: "pencil", text: "Double-click a tab to rename it.")
             }
         }
@@ -310,13 +310,13 @@ struct SettingsView: View {
                     Text("Current tab and on hover").tag(AppSettings.CloseButtonMode.hover)
                     Text("Every tab").tag(AppSettings.CloseButtonMode.always)
                 }
-                Toggle("Show bookmarks", isOn: $settings.showBookmarks)
+                Toggle("Show Favorites and Pinned", isOn: $settings.showBookmarks)
             }
 
             Section("Tabs") {
                 Toggle(isOn: $settings.closesUnviewedTabs) {
                     Text("Close tabs I haven't looked at")
-                    Text("Closed tabs are listed at the bottom left of the sidebar, where you can reopen them. Bookmarks, pinned tabs, tabs playing sound and private windows stay open.")
+                    Text("Closed tabs are listed at the bottom left of the sidebar, where you can reopen them. Tabs of favorites and pinned items, tabs pinned in Safari, tabs playing sound and private windows stay open.")
                 }
                 Picker("Close after", selection: $settings.unviewedTabInterval) {
                     ForEach(CleanupInterval.allCases) { interval in

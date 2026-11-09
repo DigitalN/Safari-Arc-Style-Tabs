@@ -336,8 +336,8 @@ final class TabCleanup {
 }
 
 extension TabStore {
-    /// The tabs that belong to bookmarks, which cleanup leaves open: a bookmark owns one tab in each
-    /// window it's open in, through `bookmarkTabs` (#25).
+    /// The tabs that belong to favorites and pinned items, which cleanup leaves open: each owns one
+    /// tab in each window it's open in, through `bookmarkTabs` (#25, #34).
     var bookmarkTabKeys: Set<TabKey> {
         Set(bookmarkTabs.owners.keys)
     }

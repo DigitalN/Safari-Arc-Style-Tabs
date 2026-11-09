@@ -132,17 +132,18 @@ do {
 }
 
 do {
-    // The bookmark exemption goes through one function, which follows #25's links.
+    // The bookmark exemption goes through one function, which follows #25's links. Favorites and
+    // pinned items both own tabs that way (#34).
     let (store, _) = makeStore()
-    send(store, simpleSnapshot(seq: 1, active: 1))
-    let tab = store.tab(for: key(2))!
-    let bookmarks = store.bookmarks.count
-    store.addBookmark(from: tab, instance: "A")
-    check(store.bookmarkTabKeys == [key(2)], "a tab made into a bookmark is that bookmark's tab")
+    send(store, simpleSnapshot(seq: 1, active: 1, tabs: [1, 2, 3, 4]))
+    store.addBookmark(from: store.tab(for: key(2))!, instance: "A", to: .favorites)
+    check(store.bookmarkTabKeys == [key(2)], "a tab made into a favorite is that favorite's tab")
+    store.addBookmark(from: store.tab(for: key(3))!, instance: "A", to: .pinned(.defaultProfile))
+    check(store.bookmarkTabKeys == [key(2), key(3)], "and a tab pinned in the profile's Pinned list is that pinned item's")
     now = start + 2 * day
     store.runCleanup(after: day)
-    check(tabIds(store) == [1, 2], "so cleanup leaves it open and closes the other idle tab")
-    if let bookmark = store.bookmarks.last, store.bookmarks.count == bookmarks + 1 {
+    check(tabIds(store) == [1, 2, 3], "so cleanup leaves both open and closes the other idle tab")
+    for bookmark in store.bookmarkLists.all {
         store.removeBookmark(bookmark)
     }
     now = start

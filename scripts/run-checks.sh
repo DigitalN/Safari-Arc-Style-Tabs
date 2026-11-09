@@ -20,7 +20,8 @@ node Tests/ExtensionChecks/background-checks.js
 echo "== TabStore"
 swiftc -o "$WORK/store-checks" \
     Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift SideTabs/TabBarMatcher.swift \
-    SideTabs/BookmarkTabs.swift Shared/Bridge.swift SideTabs/TabCleanup.swift
+    SideTabs/BookmarkTabs.swift Shared/Bridge.swift SideTabs/TabCleanup.swift \
+    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift
 "$WORK/store-checks"
 
 # Which tabs cleanup closes, the clocks it keeps, its list of closed tabs and reopening them (#27).
@@ -28,7 +29,8 @@ swiftc -o "$WORK/store-checks" \
 echo "== tab cleanup"
 swiftc -o "$WORK/cleanup-checks" \
     Tests/TabCleanupChecks/main.swift SideTabs/TabCleanup.swift SideTabs/TabStore.swift SideTabs/Models.swift \
-    SideTabs/TabBarMatcher.swift SideTabs/AppSettings.swift SideTabs/BookmarkTabs.swift Shared/Bridge.swift
+    SideTabs/TabBarMatcher.swift SideTabs/AppSettings.swift SideTabs/BookmarkTabs.swift Shared/Bridge.swift \
+    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift
 "$WORK/cleanup-checks"
 
 echo "== click actions"
@@ -64,7 +66,7 @@ swiftc -o "$WORK/overlay-checks" Tests/SidebarOverlayChecks/main.swift SideTabs/
 # A row has one mouse gesture, the one sidebarRowGesture attaches. A press gesture of its own,
 # inside the reorder gesture, wins every press and the reorder never starts (#20).
 echo "== row gestures"
-if grep -n "DragGesture" SideTabs/Views/TabRow.swift SideTabs/Views/BookmarkRow.swift; then
+if grep -n "DragGesture" SideTabs/Views/TabRow.swift SideTabs/Views/BookmarkRow.swift SideTabs/Views/FavoritesSection.swift; then
     echo "FAIL: rows must not attach a DragGesture of their own; use sidebarRowGesture (SidebarDrag.swift)"
     exit 1
 fi
