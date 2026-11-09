@@ -12,6 +12,12 @@ import os
 /// every profile, including ones where Side Tabs is off; the new window gets the frame as soon as it
 /// appears (about 0.5–0.8 s).
 ///
+/// With "Minimize other profiles' windows" on (#42), the target is chosen with the list of windows Side
+/// Tabs minimized (ProfileRules.switchTarget), and once it's Safari's main window, with no delay, the
+/// windows left behind are minimized and the profile's other windows come back behind it
+/// (WindowMinimizer). Not before: that would show the empty desktop for a moment, and Safari answers
+/// Accessibility on its main thread, so a minimize sent first could hold up the raise.
+///
 /// Runs on ProfileReader's queue, so it uses what the reader keeps (each window's profile, the menu).
 nonisolated final class ProfileSwitcher: @unchecked Sendable {
     enum Outcome: Sendable {
@@ -39,10 +45,15 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
         let frame: CGRect?
         /// Which profile a window belongs to, from its toolbar and title (ProfileRules.resolve, with
         /// what the app knew at the click).
-        let resolve: @Sendable (ToolbarProfile, String?) -> ProfileResolution
+        let resolve: ProfileResolver
+        /// "Minimize other profiles' windows" (#42): the sweep to run once the window is Safari's main
+        /// window, and the generation it was asked for in. Nil with the setting off.
+        var sweep: WindowMinimizer.Sweep? = nil
+        var sweepGeneration = 0
     }
 
     private let reader: ProfileReader
+    private let minimizer: WindowMinimizer
     private var query: AXQuery { reader.query }
     private let latest = OSAllocatedUnfairLock(initialState: 0)
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "profiles")
@@ -51,9 +62,13 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
     private static let newWindowWait: TimeInterval = 3
     /// How long to wait for a raised window to become Safari's main window before raising it again.
     private static let mainWindowWait: TimeInterval = 0.4
+    /// How much longer for a window that was minimized: it plays the un-minimize animation, which apps
+    /// can't skip or shorten (#42). An unknown the live test settles.
+    static let unminimizeAllowance: TimeInterval = 0.6
 
-    init(reader: ProfileReader) {
+    init(reader: ProfileReader, minimizer: WindowMinimizer) {
         self.reader = reader
+        self.minimizer = minimizer
     }
 
     // MARK: - Switching
@@ -74,12 +89,33 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
             let facts = windows.map {
                 WindowFacts(number: $0.number, profile: request.resolve($0.toolbar, $0.title), isMinimized: $0.isMinimized)
             }
-            if let target = ProfileRules.switchTarget(for: request.profile.id, among: facts),
-               let window = windows.first(where: { $0.number == target.number }) {
-                completion(bringForward(window, request: request, clickAt: clickAt, isStale: isStale))
+            let list = minimizer.list
+            let target = ProfileRules.switchTarget(for: request.profile.id, among: facts,
+                                                   usedLast: list.usedLast(in: request.profile.id), listed: list.numbers)
+            let outcome: Outcome
+            let front: Int?
+            if let target, let window = windows.first(where: { $0.number == target.number }) {
+                outcome = bringForward(window, request: request, clickAt: clickAt, isStale: isStale)
+                front = window.number
             } else {
-                completion(openWindow(request, clickAt: clickAt, isStale: isStale))
+                (outcome, front) = openWindow(request, clickAt: clickAt, isStale: isStale)
             }
+            completion(outcome)
+            sweepAfter(outcome, front: front, request: request)
+        }
+    }
+
+    /// Once the profile's window is Safari's main window: the windows left behind are minimized, and the
+    /// profile's other windows come back behind it. After a switch that didn't get that far, SafariProfiles
+    /// sweeps for whatever ended up in front.
+    private func sweepAfter(_ outcome: Outcome, front: Int?, request: Request) {
+        guard var sweep = request.sweep else { return }
+        switch outcome {
+        case .raised, .opened:
+            sweep.front = front
+            minimizer.sweep(sweep, generation: request.sweepGeneration)
+        case .menuOutOfDate, .superseded, .failed:
+            break
         }
     }
 
@@ -91,48 +127,51 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
             // case Safari ignores one made while the window is in the Dock.
             if let frame { setFrame(frame, of: window.element) }
             query.set(window.element, kAXMinimizedAttribute, kCFBooleanFalse)
+            minimizer.broughtBack(window.number)
         }
         if let frame { setFrame(frame, of: window.element) }
         guard !isStale() else { return .superseded }
         raise(window.element, application: request.application)
         activate(request.processIdentifier)
-        if !waitUntilMain(window.number, application: request.application, isStale: isStale) {
+        let wait = Self.mainWindowWait + (window.isMinimized ? Self.unminimizeAllowance : 0)
+        if !waitUntilMain(window.number, application: request.application, within: wait, isStale: isStale) {
             guard !isStale() else { return .superseded }
             // Something raised another window after this one (the click itself brings the docked
             // window forward, from another queue): once more.
             raise(window.element, application: request.application)
-            guard waitUntilMain(window.number, application: request.application, isStale: isStale) else {
+            guard waitUntilMain(window.number, application: request.application, within: Self.mainWindowWait, isStale: isStale) else {
                 return isStale() ? .superseded : .failed(query.timedOut ? "Safari didn't answer in time" : "the window didn't become Safari's main window")
             }
         }
         return .raised(milliseconds: milliseconds(since: clickAt), minimized: window.isMinimized)
     }
 
-    private func openWindow(_ request: Request, clickAt: Date, isStale: () -> Bool) -> Outcome {
+    /// Opens a window for the profile; with the outcome, the new window's number.
+    private func openWindow(_ request: Request, clickAt: Date, isStale: () -> Bool) -> (Outcome, Int?) {
         var item = ProfileTree.newWindowItem(for: request.profile, at: request.position, among: reader.newWindowItems)
         if item == nil {
             _ = reader.readMenu(application: request.application)
             item = ProfileTree.newWindowItem(for: request.profile, at: request.position, among: reader.newWindowItems)
         }
-        guard var item else { return .menuOutOfDate }
+        guard var item else { return (.menuOutOfDate, nil) }
         let before = reader.windowNumbers(application: request.application)
-        guard !isStale() else { return .superseded }
+        guard !isStale() else { return (.superseded, nil) }
         query.clearTimedOut()
         if query.perform(item.element, kAXPressAction) != .success {
             // The menu has changed since it was read (Safari keeps its items for a launch, but a
             // profile added or removed rebuilds them): read it again and press once more.
             _ = reader.readMenu(application: request.application)
             guard let again = ProfileTree.newWindowItem(for: request.profile, at: request.position, among: reader.newWindowItems) else {
-                return .menuOutOfDate
+                return (.menuOutOfDate, nil)
             }
             item = again
             guard query.perform(item.element, kAXPressAction) == .success else {
-                return .failed("pressing File → New Window failed")
+                return (.failed("pressing File → New Window failed"), nil)
             }
         }
         let deadline = Date().addingTimeInterval(Self.newWindowWait)
         while Date() < deadline {
-            if isStale() { return .superseded }
+            if isStale() { return (.superseded, nil) }
             for element in query.elements(request.application, kAXWindowsAttribute) {
                 guard let number = reader.number(of: element), !before.contains(number) else { continue }
                 let appeared = milliseconds(since: clickAt)
@@ -141,11 +180,11 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
                     setFrame(frame, of: element)
                     settle(element, at: frame, isStale: isStale)
                 }
-                return .opened(milliseconds: appeared)
+                return (.opened(milliseconds: appeared), number)
             }
             usleep(15_000)
         }
-        return .failed("no new window within \(Int(Self.newWindowWait)) s")
+        return (.failed("no new window within \(Int(Self.newWindowWait)) s"), nil)
     }
 
     // MARK: - Settings
@@ -292,8 +331,8 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
         }
     }
 
-    private func waitUntilMain(_ number: Int, application: AXUIElement, isStale: () -> Bool) -> Bool {
-        let deadline = Date().addingTimeInterval(Self.mainWindowWait)
+    private func waitUntilMain(_ number: Int, application: AXUIElement, within wait: TimeInterval, isStale: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(wait)
         repeat {
             if let main = query.element(application, kAXMainWindowAttribute), reader.number(of: main) == number {
                 return true

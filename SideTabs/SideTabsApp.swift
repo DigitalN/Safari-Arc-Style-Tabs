@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let accessibilityWatcher = AccessibilityWatcher()
     private var dock: DockController?
     /// The profile buttons in the bottom bar, and switching between profiles (#33).
-    private lazy var safariProfiles = SafariProfiles(tracker: tracker, store: store)
+    private lazy var safariProfiles = SafariProfiles(tracker: tracker, store: store, settings: settings)
     private var welcomeWindow: NSWindow?
     private var settingsWindow: NSWindow?
     /// Set while Side Tabs activates itself to show one of its own windows.
