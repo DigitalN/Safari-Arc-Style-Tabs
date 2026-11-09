@@ -128,6 +128,13 @@ nonisolated final class WindowMinimizer: @unchecked Sendable {
         setList(MinimizedList())
     }
 
+    /// Whether Side Tabs brought this window back a moment ago (a switch's target, or a sweep's), so its coming
+    /// back isn't a change the user made (#44). Call on `reader.queue`.
+    func restoredJustNow(_ number: Int) -> Bool {
+        guard let flight = inFlight[number], !flight.minimized else { return false }
+        return Date().timeIntervalSince(flight.at) < MinimizeRules.animationAllowance
+    }
+
     /// A switch has just un-minimized its target: it comes off the list, and counts as open while its
     /// animation plays. Call on `reader.queue`.
     func broughtBack(_ number: Int) {

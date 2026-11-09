@@ -18,7 +18,7 @@ struct SidebarView: View {
                 TurnOnSideTabsRow()
                     .replaced(by: ClosedTabsList(isShown: $showsClosedTabs), when: showsClosedTabs && settings.closesUnviewedTabs)
                 BottomBar(showsClosedTabs: $showsClosedTabs)
-            } else if store.currentWindow != nil || store.unseenDockedWindow != nil {
+            } else if let content = store.shownContent {
                 // Centered on the same line as Safari's toolbar when docked.
                 AddressBar()
                     .padding(.horizontal, 8)
@@ -30,7 +30,16 @@ struct SidebarView: View {
                             WebsiteAccessBanner()
                                 .padding(.bottom, 8)
                         }
-                        SidebarSections(selection: store.currentWindow)
+                        // While a switch's window comes back from the Dock, the sections fade over to its
+                        // profile (#44): the old ones fade out as the new ones fade in. Only a switch's start
+                        // changes this identity, so nothing else fades, and Safari's report, right or not,
+                        // swaps the contents in place.
+                        ZStack(alignment: .topLeading) {
+                            SidebarSections(content: content)
+                                .id(store.sidebarFade)
+                                .transition(.opacity)
+                        }
+                        .animation(.easeInOut(duration: store.sidebarFadeDuration), value: store.sidebarFade)
                     }
                     .coordinateSpace(.named(SidebarDrag.coordinateSpace))
                     .overlay(alignment: .topLeading) {
@@ -63,34 +72,70 @@ struct SidebarView: View {
 /// private window belongs to no profile and shows Tabs only, and so does every window with Favorites and
 /// Pinned turned off in Settings.
 private struct SidebarSections: View {
-    /// The window shown, or nil while the docked window is one its profile's copy can't see (#41).
-    let selection: TabStore.WindowSelection?
+    /// What to show (TabStore.shownContent). Taken as a value, so sections fading out keep showing what they
+    /// showed (#44).
+    let content: TabStore.ShownContent
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        if let selection {
+        switch content {
+        case .window(let selection):
             // A private window belongs to no profile, so it shows Tabs only (#38).
-            if settings.showBookmarks, let profile = store.profile(of: selection.window, instance: selection.instance) {
-                FavoritesSection(list: .favorites(profile))
-                PinnedSection(list: .pinned(profile))
-                Divider()
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 7)
+            if let profile = store.profile(of: selection.window, instance: selection.instance) {
+                ProfileLists(profile: profile)
             }
             TabsSection(selection: selection)
-        } else if let unseen = store.unseenDockedWindow {
+        case .unseen(let profile):
             // Its own profile's lists as usual, and its tabs as the tab bar shows them: never another
             // profile's window's (#41).
-            if settings.showBookmarks, let profile = unseen.profile {
-                FavoritesSection(list: .favorites(profile))
-                PinnedSection(list: .pinned(profile))
-                Divider()
+            if let profile {
+                ProfileLists(profile: profile)
+            }
+            UnseenWindowTabsSection(isPrivate: profile == nil)
+        case .placeholder(let profile):
+            // A switch's profile whose window isn't known yet (#44): its lists, and no other window's tabs.
+            ProfileLists(profile: profile)
+            TabsPlaceholder()
+        }
+    }
+}
+
+/// A profile's Favorites and Pinned, unless they're turned off in Settings.
+private struct ProfileLists: View {
+    let profile: ProfileKey
+    @Environment(AppSettings.self) private var settings
+
+    var body: some View {
+        if settings.showBookmarks {
+            FavoritesSection(list: .favorites(profile))
+            PinnedSection(list: .pinned(profile))
+            Divider()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+        }
+    }
+}
+
+/// In place of Tabs while a switch's window is on its way and which window it is can't be told (#44): quiet,
+/// and never another window's tabs. Safari's report replaces it in a few tenths of a second.
+private struct TabsPlaceholder: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
+            SectionHeader(title: "Tabs") {
+                EmptyView()
+            }
+            ForEach(0..<3, id: \.self) { row in
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(.quaternary.opacity(0.5))
+                    .frame(height: 12)
+                    .frame(maxWidth: row == 2 ? 120 : .infinity, alignment: .leading)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 7)
             }
-            UnseenWindowTabsSection(isPrivate: unseen.profile == nil)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Tabs, loading")
     }
 }
 

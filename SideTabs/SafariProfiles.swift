@@ -103,6 +103,14 @@ final class SafariProfiles {
 
     /// The docked window's tabs from its tab bar, while its profile's copy can't see it (#41).
     @ObservationIgnored let unseenTabs: UnseenWindowTabs
+
+    // What the sidebar shows while a switch's window comes back from the Dock (#44, TabStore.switchPreview).
+    /// The newest switch's preview id: a target picked for an older one is ignored.
+    @ObservationIgnored private var latestPreview = 0
+    /// The docked window when the preview began: another one coming to the front ends it.
+    @ObservationIgnored private var previewDockedNumber: Int?
+    /// How long the sidebar's fade takes, from the Dock's minimize effect, read off the main thread.
+    @ObservationIgnored private var fadeDuration = SwitchPreviewRules.fadeDuration(minimizeEffect: nil)
     /// A one-off look when the docked window has been open long enough to call it unseen.
     @ObservationIgnored private var settleCheck: DispatchWorkItem?
 
@@ -154,6 +162,7 @@ final class SafariProfiles {
         })
 
         observeStore()
+        refreshFadeDuration()
         unseenTabs.start()
         readMenu(because: "launch", attempts: 3)
         dockedWindowChanged()
@@ -188,6 +197,7 @@ final class SafariProfiles {
         let reader = reader
         reader.queue.async { reader.forget() }
         minimizing.safariQuit()
+        store.endSwitchPreview(because: "Safari quit")
         windowFirstSeen = [:]
         newWindowShortcut = nil
         settingsFocused = false
@@ -401,7 +411,7 @@ final class SafariProfiles {
         toolbarRetries = 0
         // Until the new window's profile is read, the store mustn't prefer the previous one's copy.
         tellStoreDockedProfile()
-        unseenTabs.dockedWindowChanged()
+        unseenTabs.dockedWindowChanged(to: window)
         guard let window else {
             setDocked(nil)
             return
@@ -561,7 +571,20 @@ final class SafariProfiles {
         evaluateOff()
         // Not while a toolbar Safari hasn't answered for yet is being read again.
         let isFinal = dockedWindow == nil || dockedToolbar != .unknown || toolbarRetries >= 5
+        settlePreview(id, isFinal: isFinal)
         minimizing.frontResolved(id, number: dockedNumber, isFinal: isFinal)
+    }
+
+    /// What the docked window says about the sidebar's guess during a switch (#44): Safari shows the switch's
+    /// profile, so the sidebar's own choice takes over once it's that profile's; or another window came to the
+    /// front, and the sidebar follows Safari again.
+    private func settlePreview(_ id: UUID?, isFinal: Bool) {
+        guard let preview = store.switchPreview else { return }
+        if let id, let key = profiles.first(where: { $0.id == id })?.key, key == preview.profile {
+            store.confirmSwitchPreview(profile: key)
+        } else if isFinal, dockedNumber != previewDockedNumber {
+            store.endSwitchPreview(because: "another window came to the front")
+        }
     }
 
     /// What the docked window, now known to be in profile `id`, tells about that profile: its symbol,
@@ -716,6 +739,18 @@ final class SafariProfiles {
         let sweepStart = minimizing.switchStarting(to: profile.id, reason: reason)
         request.sweep = sweepStart.sweep
         request.sweepGeneration = sweepStart.generation
+        // What the sidebar shows while the window comes in (#44): only for the buttons, the dropdown and a closed
+        // tab reopening. The Dock icon's window replaces one the sidebar may already be showing.
+        latestPreview += 1
+        let previewID = latestPreview
+        if reason == .switched {
+            previewAtClick(id: previewID, profile: profile)
+            request.onTarget = { [weak self] choice in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.switchPicked(choice, preview: previewID, profile: profile) }
+                }
+            }
+        }
         log.notice("switching to profile \(position)\(reason == .switched ? "" : " (\(reason.rawValue))", privacy: .public)")
         let profileID = profile.id
         switcher.switchTo(request, clickAt: clickAt) { [weak self] outcome in
@@ -727,6 +762,11 @@ final class SafariProfiles {
                     switch outcome {
                     case .raised, .opened: succeeded = true
                     case .menuOutOfDate, .superseded, .failed: succeeded = false
+                    }
+                    if case .superseded = outcome {
+                        // A newer click has its own preview.
+                    } else if !succeeded, self.store.switchPreview?.id == previewID {
+                        self.store.endSwitchPreview(because: "the switch didn't work")
                     }
                     self.minimizing.switchFinished(token: sweepStart.token, profile: profileID, succeeded: succeeded)
                     then?(succeeded)
@@ -752,6 +792,93 @@ final class SafariProfiles {
             log.notice("the switch to profile \(position) failed: \(reason, privacy: .public)")
             if pendingSwitch == pending { pendingSwitch = nil }
         }
+    }
+
+    // MARK: - The sidebar while the window comes in (#44)
+
+    /// At the click: with "Minimize other profiles' windows" on, the target is nearly always in the Dock, so the
+    /// sidebar fades over to the profile now, with its guess from the store alone (the copy's last focused
+    /// window). Without the setting, it waits for the switch to say whether the target is minimized.
+    private func previewAtClick(id: Int, profile: SafariProfile) {
+        guard let key = profile.key,
+              SwitchPreviewRules.fades(targetIsMinimized: nil, minimizesOtherProfiles: settings.minimizesOtherProfiles) else { return }
+        let guess = SwitchPreviewRules.guess(SwitchTarget(profile: key), copies: Array(store.liveSnapshots.values))
+        beginPreview(id: id, profile: key, guess: guess)
+    }
+
+    /// The switch has picked its window, through Accessibility, before bringing it forward: a better guess from
+    /// its title, or, when the target is in the Dock and nothing is shown yet, the fade starts now. A target that's
+    /// already open stays as it was: Safari reports it in about 0.1 s.
+    private func switchPicked(_ choice: ProfileSwitcher.TargetChoice, preview id: Int, profile: SafariProfile) {
+        guard id == latestPreview, let key = profiles.first(where: { $0.id == profile.id })?.key ?? profile.key else { return }
+        let target = SwitchTarget(profile: key, title: choice.title, isNewWindow: choice.window == nil, profileWindowCount: choice.profileWindowCount)
+        let guess = SwitchPreviewRules.guess(target, copies: Array(store.liveSnapshots.values))
+        if store.switchPreview?.id == id {
+            store.refineSwitchPreview(id: id, guess: guess)
+        } else if choice.window != nil,
+                  SwitchPreviewRules.fades(targetIsMinimized: choice.isMinimized, minimizesOtherProfiles: settings.minimizesOtherProfiles) {
+            beginPreview(id: id, profile: key, guess: guess)
+        }
+        if guess == .unseen, let window = choice.window, store.switchPreview?.id == id {
+            unseenTabs.preview(window)
+        }
+    }
+
+    private func beginPreview(id: Int, profile key: ProfileKey, guess: SwitchGuess) {
+        previewDockedNumber = dockedNumber
+        store.beginSwitchPreview(id: id, profile: key, guess: guess, fadeDuration: fadeDuration)
+        refreshFadeDuration()
+    }
+
+    /// A minimized window is coming back some other way (a Dock tile, the Window menu, App Exposé): if it's
+    /// another profile's and isn't in front yet, the sidebar fades over to it now, rather than once Safari
+    /// reports it. Not for the windows Side Tabs brings back itself (a switch's, a sweep's), and not while the
+    /// Dock icon rule may turn the window away (#42).
+    private func windowComingBack(_ window: AXUIElement) {
+        guard tracker.isTrusted, !minimizing.watchesDockIcon else { return }
+        if let docked = dockedWindow, CFEqual(docked, window) { return }
+        let reader = reader
+        let minimizer = minimizer
+        reader.queue.async { [weak self] in
+            let (number, toolbar) = reader.toolbarProfile(of: window)
+            guard let number, !minimizer.restoredJustNow(number) else { return }
+            reader.query.clearTimedOut()
+            let title = reader.query.string(window, kAXTitleAttribute)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.otherWindowComingBack(window, number: number, toolbar: toolbar, title: title)
+                }
+            }
+        }
+    }
+
+    private func otherWindowComingBack(_ window: AXUIElement, number: Int, toolbar: ToolbarProfile, title: String?) {
+        // Already in front: the sidebar follows it as it is.
+        guard number != dockedNumber, !(dockedWindow.map { CFEqual($0, window) } ?? false) else { return }
+        let resolution = ProfileRules.resolve(toolbar, windowTitle: title, profiles: profiles, copyWindows: copyWindows)
+        guard let id = resolution.profileID, let position = profiles.firstIndex(where: { $0.id == id }),
+              let key = profiles[position].key, key != store.shownProfile else { return }
+        latestPreview += 1
+        let guess = SwitchPreviewRules.guess(SwitchTarget(profile: key, title: title), copies: Array(store.liveSnapshots.values))
+        log.notice("a minimized window of profile \(position) is coming back: the sidebar fades over to it")
+        beginPreview(id: latestPreview, profile: key, guess: guess)
+    }
+
+    /// The Dock's minimize effect sets how long a window takes to come back from the Dock, and so the fade's.
+    private func refreshFadeDuration() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let duration = SwitchPreviewRules.fadeDuration(minimizeEffect: Self.minimizeEffect())
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.fadeDuration = duration }
+            }
+        }
+    }
+
+    /// The Dock's `mineffect` ("genie", "scale"). Side Tabs only reads the Dock's settings.
+    nonisolated private static func minimizeEffect() -> String? {
+        let dock = "com.apple.dock" as CFString
+        _ = CFPreferencesAppSynchronize(dock)
+        return CFPreferencesCopyAppValue("mineffect" as CFString, dock) as? String
     }
 
     /// The +: Safari's Settings at Profiles, where the user adds a profile. Side Tabs doesn't press
@@ -802,6 +929,8 @@ final class SafariProfiles {
             checkSettingsClosed()
             // A window closed, or another came forward: the windows like the docked one may have changed.
             countLikeWindows()
+        case kAXWindowDeminiaturizedNotification:
+            windowComingBack(element)
         default:
             break
         }

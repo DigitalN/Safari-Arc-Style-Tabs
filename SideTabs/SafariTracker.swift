@@ -518,6 +518,17 @@ final class SafariTracker {
         }
     }
 
+    /// The same for any of Safari's windows, such as a switch's target before it's in front (#44).
+    func readTabs(of window: AXUIElement, then completion: @escaping ([TabBarItem]?) -> Void) {
+        guard isTrusted else {
+            completion(nil)
+            return
+        }
+        tabBar.readTabs(in: window) { tabs in
+            DispatchQueue.main.async { completion(tabs) }
+        }
+    }
+
     /// Closes a tab of the docked window with its tab button's close action (#41). `completion` runs on the
     /// main thread, with why not if it didn't.
     func closeTab(_ target: TabBarTarget, then completion: @escaping (String?) -> Void) {

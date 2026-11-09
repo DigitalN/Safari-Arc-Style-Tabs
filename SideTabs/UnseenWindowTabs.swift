@@ -13,7 +13,9 @@ import os.log
 ///
 /// Reads happen off the main thread, only for the docked window, and only while it's unseen: when it becomes
 /// unseen, when its title changes (a tab switch or a page loading), when another window is docked, and after
-/// a press or close here. No timer.
+/// a press or close here. No timer. The one exception is a switch's target that its copy can't see (#44): its
+/// tab bar is read as the switch picks it, so the sidebar can fade over to its tabs while it comes back from
+/// the Dock, and what was read stays when it's docked.
 @Observable
 final class UnseenWindowTabs {
     struct Tab: Identifiable, Equatable {
@@ -37,6 +39,8 @@ final class UnseenWindowTabs {
     @ObservationIgnored private var reading = false
     @ObservationIgnored private var readAgain = false
     @ObservationIgnored private var lastUnseen: TabStore.UnseenWindow?
+    /// A switch's target whose tabs were read before it was docked (#44).
+    @ObservationIgnored private var previewWindow: AXUIElement?
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "profiles")
 
     init(tracker: SafariTracker, store: TabStore) {
@@ -49,12 +53,30 @@ final class UnseenWindowTabs {
         changed()
     }
 
-    /// Another window is docked: what was read belongs to the last one.
-    func dockedWindowChanged() {
-        tabs = []
-        selected = nil
+    /// Another window is docked: what was read belongs to the last one, unless it was read for this one as a
+    /// switch's target.
+    func dockedWindowChanged(to window: AXUIElement?) {
+        let wasPreviewed = previewWindow.flatMap { previewed in window.map { CFEqual(previewed, $0) } } ?? false
+        previewWindow = nil
+        if !wasPreviewed {
+            tabs = []
+            selected = nil
+        }
         if store.unseenDockedWindow != nil {
             read()
+        }
+    }
+
+    /// A switch's target is a window its copy can't see (#44): reads its tab bar now, for the sidebar to show
+    /// while it comes back from the Dock.
+    func preview(_ window: AXUIElement) {
+        previewWindow = window
+        tabs = []
+        selected = nil
+        tracker.readTabs(of: window) { [weak self] items in
+            guard let self, let previewed = self.previewWindow, CFEqual(previewed, window), let items else { return }
+            self.tabs = items.enumerated().map { Tab(position: $0.offset, title: $0.element.title) }
+            self.selected = items.firstIndex { $0.isSelected == true }
         }
     }
 
@@ -62,6 +84,7 @@ final class UnseenWindowTabs {
         withObservationTracking {
             _ = store.unseenDockedWindow
             _ = store.dockedWindowTitle
+            _ = store.switchPreview
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -74,6 +97,12 @@ final class UnseenWindowTabs {
     }
 
     private func changed() {
+        // While the sidebar shows a switch's target its copy can't see, what was read for it stays.
+        let previewing = store.switchPreview?.guess == .unseen
+        if previewWindow != nil, !previewing {
+            // The switch it was read for is over, or went elsewhere.
+            previewWindow = nil
+        }
         let unseen = store.unseenDockedWindow
         if unseen != lastUnseen {
             switch (lastUnseen, unseen) {
@@ -89,7 +118,7 @@ final class UnseenWindowTabs {
         }
         if unseen != nil {
             read()
-        } else if !tabs.isEmpty || selected != nil {
+        } else if !previewing, !tabs.isEmpty || selected != nil {
             tabs = []
             selected = nil
         }
@@ -97,6 +126,8 @@ final class UnseenWindowTabs {
 
     /// Reads the docked window's tab bar. One read at a time; asked for meanwhile, it reads once more after.
     func read() {
+        // A switch's target isn't docked yet: the docked window's tabs aren't the ones shown.
+        guard previewWindow == nil else { return }
         guard !reading else {
             readAgain = true
             return
@@ -105,7 +136,7 @@ final class UnseenWindowTabs {
         tracker.readTabs { [weak self] items in
             guard let self else { return }
             self.reading = false
-            if let items, self.store.unseenDockedWindow != nil {
+            if let items, self.store.unseenDockedWindow != nil, self.previewWindow == nil {
                 let tabs = items.enumerated().map { Tab(position: $0.offset, title: $0.element.title) }
                 if tabs != self.tabs {
                     self.tabs = tabs

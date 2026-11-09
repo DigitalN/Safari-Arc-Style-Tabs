@@ -42,7 +42,8 @@ of Safari's bars (against trees in `Tests/SidebarOverlayChecks/trees`), and what
 brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
 and where they reopen; with *Minimize other profiles' windows* on, which windows a change of profile
 minimizes and brings back, which window a switch brings forward, the list of windows Side Tabs minimized
-and how it's matched after a restart, and when a click on Safari's Dock icon opens a window),
+and how it's matched after a restart, and when a click on Safari's Dock icon opens a window; what the
+sidebar shows while a switch's window comes back from the Dock, and when Safari's report ends it),
 a check that no log line carries a window or tab title or a page's URL, and a compile check of the app's sources. It doesn't touch the
 installed app, Safari, or your saved bookmarks and names. Anything that needs the real
 Safari (clicks, windows, timing) still has to be tried by hand.
@@ -199,6 +200,9 @@ separate window that the app keeps attached to Safari's window:
     rules. The windows Side Tabs minimized are listed in `minimized-windows.json`, beside
     `profiles.json`; a minimized window that isn't on it is the user's. Quitting Side Tabs brings
     nothing back: turning the setting off does.
+  - While a switch's window comes back from the Dock, the sidebar doesn't wait for Safari: it fades
+    over to the target profile at once (`TabStore.switchPreview`), showing the window `SwitchPreviewRules`
+    guesses from the store, or the profile's lists and a placeholder for Tabs, until Safari reports.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
   - `AppLocation` offers to move the app into Applications.
   - `Updater` checks GitHub for new releases, verifies the download's code signature

@@ -84,6 +84,9 @@ final class MinimizeOtherProfiles {
     }
     /// The rule applies: the current profile has no open window.
     private var dockIconArmed = false
+    /// While the Dock icon rule applies, another profile's window coming to the front may be the icon's doing,
+    /// and not a change of profile (#44 leaves the sidebar alone then).
+    var watchesDockIcon: Bool { isOn && dockIconArmed }
     private var dockIconClickAt: Date?
     private var dockIconCheck: DispatchWorkItem?
     /// A window of another profile came to the front while the rule applied, with no click yet: its change

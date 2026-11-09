@@ -50,6 +50,20 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
         /// window, and the generation it was asked for in. Nil with the setting off.
         var sweep: WindowMinimizer.Sweep? = nil
         var sweepGeneration = 0
+        /// Told which window the switch picked, before it's brought forward, so the sidebar can show that
+        /// window while it comes back from the Dock (#44). Runs on the reader's queue.
+        var onTarget: (@Sendable (TargetChoice) -> Void)? = nil
+    }
+
+    /// The window a switch picked, before it's brought forward (#44).
+    struct TargetChoice: @unchecked Sendable {
+        /// Nil when the profile has no window and one is opened from File → New Window.
+        let window: AXUIElement?
+        /// Safari's title for it. Never logged.
+        let title: String?
+        let isMinimized: Bool
+        /// How many of Safari's browser windows are the profile's.
+        let profileWindowCount: Int
     }
 
     private let reader: ProfileReader
@@ -92,9 +106,14 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
             let list = minimizer.list
             let target = ProfileRules.switchTarget(for: request.profile.id, among: facts,
                                                    usedLast: list.usedLast(in: request.profile.id), listed: list.numbers)
+            let chosen = target.flatMap { target in windows.first { $0.number == target.number } }
+            request.onTarget?(TargetChoice(
+                window: chosen?.element, title: chosen?.title, isMinimized: chosen?.isMinimized ?? false,
+                profileWindowCount: facts.filter { $0.profile == .profile(request.profile.id) }.count
+            ))
             let outcome: Outcome
             let front: Int?
-            if let target, let window = windows.first(where: { $0.number == target.number }) {
+            if let window = chosen {
                 outcome = bringForward(window, request: request, clickAt: clickAt, isStale: isStale)
                 front = window.number
             } else {

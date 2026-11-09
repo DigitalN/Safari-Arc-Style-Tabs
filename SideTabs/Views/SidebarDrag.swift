@@ -338,7 +338,7 @@ private struct SidebarRowGesture: ViewModifier {
 
     /// What the sections hold now.
     private var counts: SidebarDrag.Counts {
-        let selection = store.currentWindow
+        let selection = store.shownWindow
         return SidebarDrag.Counts(
             favorites: store.currentFavoritesList.map { store.bookmarks(in: $0).count },
             pinned: store.currentPinnedList.map { store.bookmarks(in: $0).count },
