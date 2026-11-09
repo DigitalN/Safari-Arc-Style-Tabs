@@ -45,6 +45,12 @@ swiftc -o "$WORK/finder-checks" \
     Tests/TabBarFinderChecks/main.swift SideTabs/TabBarFinder.swift SideTabs/TabBarMatcher.swift
 "$WORK/finder-checks"
 
+# Which of Safari's windows the sidebar docks to: browser windows only, never Settings and the like
+# (#32). Uses the recorded trees in Tests/TabBarFinderChecks/trees.
+echo "== browser windows"
+swiftc -o "$WORK/browser-window-checks" Tests/BrowserWindowChecks/main.swift SideTabs/BrowserWindowRule.swift
+"$WORK/browser-window-checks"
+
 echo "== row hit testing"
 swiftc -o "$WORK/row-hit-checks" Tests/RowHitChecks/main.swift SideTabs/RowHitTesting.swift SideTabs/Models.swift
 "$WORK/row-hit-checks"

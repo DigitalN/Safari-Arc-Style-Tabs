@@ -1,0 +1,620 @@
+{
+ "actions": [
+  "AXRaise"
+ ],
+ "children": [
+  {
+   "children": [
+    {
+     "enabled": false,
+     "frame": [
+      259,
+      91,
+      0,
+      1238
+     ],
+     "role": "AXSplitter",
+     "roleDescription": "splitter",
+     "selected": false,
+     "value": -1
+    },
+    {
+     "children": [
+      {
+       "enabled": true,
+       "frame": [
+        260,
+        39,
+        1796,
+        1290
+       ],
+       "identifier": "BrowserView?IsPageLoaded=true&WebViewProcessID=91014",
+       "role": "AXGroup",
+       "roleDescription": "group"
+      }
+     ],
+     "frame": [
+      260,
+      39,
+      1796,
+      1290
+     ],
+     "role": "AXTabGroup",
+     "roleDescription": "tab group"
+    }
+   ],
+   "frame": [
+    260,
+    39,
+    1796,
+    1290
+   ],
+   "role": "AXSplitGroup",
+   "roleDescription": "split group"
+  },
+  {
+   "actions": [
+    "AXShowMenu"
+   ],
+   "children": [
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Toggle sidebar",
+     "enabled": true,
+     "frame": [
+      352,
+      39,
+      44,
+      52
+     ],
+     "identifier": "SidebarButton",
+     "role": "AXButton",
+     "roleDescription": "button"
+    },
+    {
+     "actions": [
+      "AXShowMenu",
+      "AXPress",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "attributes": [
+      "AXIdentifier",
+      "AXCustomActions",
+      "AXEnabled",
+      "AXFrame",
+      "AXDescription",
+      "AXParent",
+      "AXSize",
+      "AXFocused",
+      "AXRole",
+      "AXTopLevelUIElement",
+      "AXHelp",
+      "AXPosition",
+      "AXWindow",
+      "AXRoleDescription"
+     ],
+     "enabled": true,
+     "frame": [
+      396,
+      39,
+      128,
+      52
+     ],
+     "identifier": "TabGroupPickerButton?Profile=Personal&Icon=person.fill",
+     "role": "AXMenuButton",
+     "roleDescription": "menu button"
+    },
+    {
+     "actions": [
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "<other extension>",
+     "enabled": true,
+     "frame": [
+      524,
+      39,
+      40,
+      52
+     ],
+     "help": "<other extension>",
+     "identifier": "WebExtension-<other extension>",
+     "role": "AXButton",
+     "roleDescription": "button"
+    },
+    {
+     "actions": [
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Show or Hide Side Tabs",
+     "enabled": true,
+     "frame": [
+      564,
+      39,
+      36,
+      52
+     ],
+     "help": "Show or Hide Side Tabs",
+     "identifier": "WebExtension-com.digitaln.sidetabs.extension (XT4LT7MS6Y)",
+     "role": "AXButton",
+     "roleDescription": "button"
+    },
+    {
+     "actions": [
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "<other extension>",
+     "enabled": true,
+     "frame": [
+      600,
+      39,
+      41,
+      52
+     ],
+     "help": "<other extension>",
+     "identifier": "WebExtension-<other extension>",
+     "role": "AXButton",
+     "roleDescription": "button"
+    },
+    {
+     "actions": [
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "children": [
+      {
+       "children": [
+        {
+         "actions": [
+          "AXShowMenu",
+          "AXPress",
+          "Name:close tab\nTarget:0x7bf0d7c700\nSelector:_closeButtonClicked:"
+         ],
+         "children": [
+          {
+           "attributes": [
+            "AXIdentifier",
+            "AXEnabled",
+            "AXFrame",
+            "AXDescription",
+            "AXParent",
+            "AXSize",
+            "AXFocused",
+            "AXEmbeddedImageDescription",
+            "AXRole",
+            "AXTopLevelUIElement",
+            "AXHelp",
+            "AXPosition",
+            "AXWindow",
+            "AXRoleDescription",
+            "AXImageData"
+           ],
+           "description": "<tab>",
+           "enabled": true,
+           "frame": [
+            760,
+            55,
+            20,
+            20
+           ],
+           "identifier": "FaviconImageView",
+           "role": "AXImage",
+           "roleDescription": "image"
+          },
+          {
+           "enabled": true,
+           "frame": [
+            782,
+            56,
+            65,
+            18
+           ],
+           "identifier": "UnifiedTabBarButton._titleTextField",
+           "role": "AXStaticText",
+           "roleDescription": "text"
+          }
+         ],
+         "description": "<tab>",
+         "frame": [
+          641,
+          47,
+          322,
+          36
+         ],
+         "identifier": "TabBarTab?isNarrow=false&isExpanded=false&tabCount=&isPinned=false&isCluster=false&clusterID=&isActive=false",
+         "role": "AXRadioButton",
+         "roleDescription": "tab",
+         "subrole": "AXTabButton",
+         "title": "<tab>",
+         "value": 0
+        },
+        {
+         "actions": [
+          "AXShowMenu",
+          "AXPress",
+          "Name:close tab\nTarget:0x7befd0f800\nSelector:_closeButtonClicked:"
+         ],
+         "children": [
+          {
+           "attributes": [
+            "AXIdentifier",
+            "AXEnabled",
+            "AXFrame",
+            "AXDescription",
+            "AXParent",
+            "AXSize",
+            "AXFocused",
+            "AXEmbeddedImageDescription",
+            "AXRole",
+            "AXTopLevelUIElement",
+            "AXHelp",
+            "AXPosition",
+            "AXWindow",
+            "AXRoleDescription",
+            "AXImageData"
+           ],
+           "description": "<tab>",
+           "enabled": true,
+           "frame": [
+            1092,
+            55,
+            20,
+            20
+           ],
+           "identifier": "FaviconImageView",
+           "role": "AXImage",
+           "roleDescription": "image"
+          },
+          {
+           "enabled": true,
+           "frame": [
+            1114,
+            56,
+            43,
+            18
+           ],
+           "identifier": "UnifiedTabBarButton._titleTextField",
+           "role": "AXStaticText",
+           "roleDescription": "text"
+          }
+         ],
+         "description": "<tab>",
+         "frame": [
+          964,
+          47,
+          322,
+          36
+         ],
+         "identifier": "TabBarTab?isNarrow=false&isExpanded=false&tabCount=&isPinned=false&isCluster=false&clusterID=&isActive=false",
+         "role": "AXRadioButton",
+         "roleDescription": "tab",
+         "subrole": "AXTabButton",
+         "title": "<tab>",
+         "value": 0
+        },
+        {
+         "actions": [
+          "AXShowMenu",
+          "AXPress",
+          "Name:close tab\nTarget:0x7befd26d80\nSelector:_closeButtonClicked:"
+         ],
+         "children": [
+          {
+           "attributes": [
+            "AXIdentifier",
+            "AXEnabled",
+            "AXFrame",
+            "AXDescription",
+            "AXParent",
+            "AXSize",
+            "AXFocused",
+            "AXEmbeddedImageDescription",
+            "AXRole",
+            "AXTopLevelUIElement",
+            "AXHelp",
+            "AXPosition",
+            "AXWindow",
+            "AXRoleDescription",
+            "AXImageData"
+           ],
+           "description": "<tab>",
+           "enabled": true,
+           "frame": [
+            1313,
+            55,
+            20,
+            20
+           ],
+           "identifier": "FaviconImageView",
+           "role": "AXImage",
+           "roleDescription": "image"
+          },
+          {
+           "enabled": true,
+           "frame": [
+            1335,
+            56,
+            269,
+            18
+           ],
+           "identifier": "UnifiedTabBarButton._titleTextField",
+           "role": "AXStaticText",
+           "roleDescription": "text"
+          }
+         ],
+         "description": "<tab>",
+         "frame": [
+          1287,
+          47,
+          322,
+          36
+         ],
+         "identifier": "TabBarTab?isNarrow=false&isExpanded=false&tabCount=&isPinned=false&isCluster=false&clusterID=&isActive=false",
+         "role": "AXRadioButton",
+         "roleDescription": "tab",
+         "subrole": "AXTabButton",
+         "title": "<tab>",
+         "value": 0
+        },
+        {
+         "actions": [
+          "AXShowMenu",
+          "AXPress",
+          "Name:close tab\nTarget:0x7befd1c700\nSelector:_closeButtonClicked:"
+         ],
+         "children": [
+          {
+           "actions": [
+            "AXShowMenu",
+            "AXConfirm",
+            "AXShowDefaultUI",
+            "AXShowAlternateUI"
+           ],
+           "description": "<tab>",
+           "enabled": true,
+           "frame": [
+            1636,
+            57,
+            265,
+            31
+           ],
+           "identifier": "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD",
+           "role": "AXTextField",
+           "roleDescription": "text field"
+          },
+          {
+           "attributes": [
+            "AXIdentifier",
+            "AXEnabled",
+            "AXFrame",
+            "AXDescription",
+            "AXParent",
+            "AXSize",
+            "AXFocused",
+            "AXEmbeddedImageDescription",
+            "AXRole",
+            "AXTopLevelUIElement",
+            "AXHelp",
+            "AXPosition",
+            "AXWindow",
+            "AXRoleDescription",
+            "AXImageData"
+           ],
+           "description": "<tab>",
+           "enabled": true,
+           "frame": [
+            1615,
+            55,
+            20,
+            20
+           ],
+           "identifier": "UnifiedFieldIcon?IsSymbolImage=false",
+           "role": "AXImage",
+           "roleDescription": "image"
+          },
+          {
+           "actions": [
+            "AXShowMenu",
+            "AXPress"
+           ],
+           "description": "<tab>",
+           "enabled": true,
+           "frame": [
+            1902,
+            48,
+            23,
+            34
+           ],
+           "identifier": "AssistantButton",
+           "role": "AXButton",
+           "roleDescription": "button",
+           "title": "<tab>"
+          }
+         ],
+         "description": "<tab>",
+         "frame": [
+          1610,
+          47,
+          322,
+          36
+         ],
+         "identifier": "TabBarTab?isNarrow=false&isExpanded=false&tabCount=&isPinned=false&isCluster=false&clusterID=&isActive=true",
+         "role": "AXRadioButton",
+         "roleDescription": "tab",
+         "subrole": "AXTabButton",
+         "title": "<tab>",
+         "value": 1
+        }
+       ],
+       "description": "Tab bar, 4 tabs",
+       "frame": [
+        641,
+        47,
+        1292,
+        36
+       ],
+       "identifier": "TabBar?isSeparate=false",
+       "role": "AXOpaqueProviderGroup",
+       "roleDescription": "tab group",
+       "subrole": "AXOpaqueProviderList"
+      }
+     ],
+     "frame": [
+      641,
+      39,
+      1292,
+      52
+     ],
+     "role": "AXGroup",
+     "roleDescription": "group"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Share",
+     "enabled": true,
+     "frame": [
+      1933,
+      39,
+      40,
+      52
+     ],
+     "identifier": "ShareButton",
+     "role": "AXButton",
+     "roleDescription": "button"
+    },
+    {
+     "actions": [
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "New Tab",
+     "enabled": true,
+     "frame": [
+      1973,
+      39,
+      36,
+      52
+     ],
+     "identifier": "NewTabButton",
+     "role": "AXButton",
+     "roleDescription": "button"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Tab Overview",
+     "enabled": true,
+     "frame": [
+      2009,
+      39,
+      43,
+      52
+     ],
+     "identifier": "TabOverviewButton",
+     "role": "AXButton",
+     "roleDescription": "button"
+    }
+   ],
+   "frame": [
+    260,
+    39,
+    1796,
+    52
+   ],
+   "role": "AXToolbar",
+   "roleDescription": "toolbar"
+  },
+  {
+   "actions": [
+    "AXPress"
+   ],
+   "enabled": true,
+   "frame": [
+    278,
+    57,
+    16,
+    16
+   ],
+   "role": "AXButton",
+   "roleDescription": "close button",
+   "subrole": "AXCloseButton"
+  },
+  {
+   "actions": [
+    "AXPress",
+    "AXZoomWindow",
+    "AXShowMenu"
+   ],
+   "children": [
+    {
+     "frame": [
+      325,
+      58,
+      14,
+      14
+     ],
+     "role": "AXGroup",
+     "roleDescription": "group"
+    }
+   ],
+   "enabled": true,
+   "frame": [
+    324,
+    57,
+    16,
+    16
+   ],
+   "help": "this button also has an action to zoom the window",
+   "role": "AXButton",
+   "roleDescription": "full screen button",
+   "subrole": "AXFullScreenButton"
+  },
+  {
+   "actions": [
+    "AXPress"
+   ],
+   "enabled": true,
+   "frame": [
+    301,
+    57,
+    16,
+    16
+   ],
+   "role": "AXButton",
+   "roleDescription": "minimize button",
+   "subrole": "AXMinimizeButton"
+  }
+ ],
+ "frame": [
+  260,
+  39,
+  1796,
+  1290
+ ],
+ "identifier": "SafariWindow?IsSecure=true&UUID=12A760F3-7749-4034-A4A5-81D08A27F7CC",
+ "role": "AXWindow",
+ "roleDescription": "dialogue",
+ "subrole": "AXDialog",
+ "title": "Personal — <page>"
+}
