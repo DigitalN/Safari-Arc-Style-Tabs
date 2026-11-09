@@ -89,6 +89,11 @@ echo "no profile names in the log"
 
 # A row has one mouse gesture, the one sidebarRowGesture attaches. A press gesture of its own,
 # inside the reorder gesture, wins every press and the reorder never starts (#20).
+# How the favorites' grid lays out tiles, at every width SwiftUI proposes (#34).
+echo "== tile grid"
+swiftc -o "$WORK/tile-grid-checks" Tests/TileGridChecks/main.swift SideTabs/TileGridMetrics.swift
+"$WORK/tile-grid-checks"
+
 echo "== row gestures"
 if grep -n "DragGesture" SideTabs/Views/TabRow.swift SideTabs/Views/BookmarkRow.swift SideTabs/Views/FavoritesSection.swift; then
     echo "FAIL: rows must not attach a DragGesture of their own; use sidebarRowGesture (SidebarDrag.swift)"
