@@ -156,6 +156,21 @@ final class TabStore {
 
     func handleMessage(type: String, payload: Data, object: [String: Any]) -> [String: Any] {
         lastMessageAt = Date()
+        let sender = hear(from: object)
+        if sender == .replaced {
+            return [:]
+        }
+        var reply = answer(type: type, payload: payload, object: object)
+        if sender == .backFromQuiet, let instance = object["instance"] as? String {
+            // Its snapshot is from before it went quiet. The extension acts on `needSnapshot` in any reply,
+            // but replies get lost (#37), so it's asked with a command too.
+            reply["needSnapshot"] = true
+            send(["action": "snapshot"], to: instance)
+        }
+        return reply
+    }
+
+    private func answer(type: String, payload: Data, object: [String: Any]) -> [String: Any] {
         switch type {
         case "snapshot":
             do {
@@ -178,7 +193,9 @@ final class TabStore {
         case "log":
             // Something the extension wants in the system log, which is where its console
             // output can be read without Safari's developer tools.
-            log.notice("extension: \(object["message"] as? String ?? "", privacy: .public)")
+            // Each copy of the extension sends its own, so the line says which (#37).
+            let copy = (object["instance"] as? String).map { " \($0.prefix(8))" } ?? ""
+            log.notice("extension\(copy, privacy: .public): \(object["message"] as? String ?? "", privacy: .public)")
             return [:]
 
         case "hello":
@@ -189,6 +206,11 @@ final class TabStore {
             let instance = object["instance"] as? String ?? ""
             let seq = object["seq"] as? Int ?? 0
             let applied = snapshots[instance]?.seq ?? -1
+            if !instance.isEmpty, applied < seq || snapshots[instance] == nil {
+                // A snapshot is missing. The reply asks for it, but replies can be lost for minutes after
+                // the extension reloads (#37), so a command asks too: it doesn't depend on the reply.
+                send(["action": "snapshot"], to: instance)
+            }
             return ["needSnapshot": applied < seq || seq == 0]
 
         case "toggleSidebar":
@@ -219,6 +241,7 @@ final class TabStore {
         snapshots[snapshot.instance] = snapshot
         let tabCounts = snapshot.windows.map { String($0.tabs.count) }.joined(separator: "+")
         log.info("snapshot \(snapshot.seq) from \(snapshot.instance.prefix(8), privacy: .public): \(snapshot.windows.count) windows, tabs \(tabCounts, privacy: .public), focused \(snapshot.focusedWindowId ?? -1)")
+        compareWithReplaced(snapshot)
         if isNewInstance {
             orphanNamesOfDeadInstances()
         }
@@ -494,6 +517,12 @@ final class TabStore {
         changeBookmarkTabs { $0.safariDidTerminate() }
         pendingBookmarkOpens.removeAll()
         renaming = nil
+        copies.removeAll()
+        replacedCopies.removeAll()
+        replacedIds.removeAll()
+        if !liveInstances.isEmpty {
+            liveInstances.removeAll()
+        }
     }
 
     func requestSnapshot() {
@@ -516,6 +545,196 @@ final class TabStore {
         }
     }
 
+    // MARK: - Copies of the extension
+    //
+    // Each Safari profile where Side Tabs is on runs its own copy of the extension's background page, with
+    // its own instance id (#28). A copy stops when Side Tabs is turned off in its profile, when the extension
+    // reloads or is reinstalled (a new copy, with a new id, takes over), or when Safari quits. None of these
+    // says goodbye, so a copy is judged by what it sends (#31):
+    //
+    // - Quiet: nothing of any kind from it for `quietAfter`. Its windows aren't shown. Its snapshot stays in
+    //   `snapshots`, and with it its bookmarks' tabs and cleanup's clocks, because under heavy load a copy
+    //   that is running has gone that long without a word. Anything it sends shows its windows again.
+    // - Gone: a newer copy of the same profile has reported (`replace`), or Safari quit
+    //   (`safariDidTerminate`). Only then does its snapshot go, through the paths for an instance that's
+    //   gone: its clocks are dropped and its bookmarks' tabs wait to be re-linked to the new copy's.
+
+    /// One copy of the extension's background page.
+    private struct Copy {
+        /// The copy's profile, as the extension's handler names it (`Snapshot.profile`): a UUID string,
+        /// or nil for the default profile.
+        var profile: String?
+        /// When anything last came from it.
+        var lastHeard: Date
+    }
+
+    /// What a message says about the copy that sent it (see `hear`).
+    private enum Sender {
+        /// A copy that's running, or a message that doesn't say which copy sent it.
+        case live
+        /// A copy that was quiet. Its windows show again, and it's asked for a new snapshot.
+        case backFromQuiet
+        /// A copy that a newer copy of its profile has replaced. The message was already on its way; it's ignored.
+        case replaced
+    }
+
+    /// How long a copy can go without sending anything before it counts as quiet and its windows are hidden.
+    /// It sends a heartbeat every 5 s, but under heavy load the extension has run up to 20 s late (#16–#22).
+    static let quietAfter: TimeInterval = 30
+    /// How often copies are checked for having gone quiet, while there are any.
+    static let quietCheckInterval: TimeInterval = 5
+
+    /// The copies of the extension that are running now: heard from within `quietAfter`, and not replaced by a
+    /// newer copy of their profile. By instance id, as in `snapshots` and `TabKey`. Read-only.
+    ///
+    /// For telling whether Side Tabs is on in a profile (#33), see `hasLiveCopy(profile:)`. A copy that isn't
+    /// live may still have a snapshot in `snapshots` (a quiet copy keeps it), but its windows aren't shown.
+    /// Quiet usually means stopped, but it can also be a copy held up by heavy load: it's live again as soon
+    /// as it sends anything.
+    private(set) var liveInstances: Set<String> = []
+
+    /// Whether a live copy (see `liveInstances`) reports for `profile`: a profile's UUID string as
+    /// `Snapshot.profile` has it, or nil for the default profile.
+    func hasLiveCopy(profile: String?) -> Bool {
+        liveInstances.contains { copies[$0]?.profile == profile }
+    }
+
+    /// The snapshots of the live copies: the windows the sidebar can show, the tabs cleanup can close and the
+    /// windows it reopens tabs in. A quiet copy's snapshot stays in `snapshots`, but isn't here.
+    var liveSnapshots: [String: Snapshot] {
+        snapshots.filter { liveInstances.contains($0.key) }
+    }
+
+    /// Reads the time for telling which copies are quiet. Only the checks in Tests/ pass anything else.
+    @ObservationIgnored var clock: () -> Date = { Date() }
+    /// The copies heard from since Safari started, apart from replaced ones, by instance id.
+    @ObservationIgnored private var copies: [String: Copy] = [:]
+    /// Copies a newer copy of their profile replaced, and when.
+    @ObservationIgnored private var replacedCopies: [String: Date] = [:]
+    /// For a copy that replaced another: the replaced copy's window and tab ids, and the most of them it has
+    /// reported so far (see `compareWithReplaced`).
+    @ObservationIgnored private var replacedIds: [String: (since: Date, windows: Set<Int>, tabs: Set<Int>, most: Int)] = [:]
+    @ObservationIgnored private var quietCheckScheduled = false
+
+    /// Notes a message from a copy of the extension.
+    ///
+    /// A copy not heard from before replaces any other copy of its profile: when the extension reloads or is
+    /// reinstalled, Safari stops the old copy and starts a new one. Messages from a replaced copy after that
+    /// were already on their way, and are ignored. If one keeps sending for `quietAfter`, though, it's running
+    /// after all (a second Safari, say); it's taken back, without replacing anything in turn.
+    private func hear(from object: [String: Any]) -> Sender {
+        guard let instance = object["instance"] as? String else { return .live }
+        let now = clock()
+        let profile = object["profile"] as? String
+        if let replacedAt = replacedCopies[instance] {
+            let since = now.timeIntervalSince(replacedAt)
+            guard since >= Self.quietAfter else {
+                log.notice("ignoring a message from extension copy \(instance.prefix(8), privacy: .public), replaced \(Int(since)) s ago")
+                return .replaced
+            }
+            replacedCopies[instance] = nil
+            copies[instance] = Copy(profile: profile, lastHeard: now)
+            liveInstances.insert(instance)
+            log.notice("extension copy \(instance.prefix(8), privacy: .public) was replaced \(Int(since)) s ago but is still sending; taking it back")
+            return .backFromQuiet
+        }
+        guard var copy = copies[instance] else {
+            log.notice("new extension copy \(instance.prefix(8), privacy: .public), \(Self.describe(profile), privacy: .public)")
+            for (other, known) in copies where known.profile == profile {
+                replace(other, by: instance, at: now)
+            }
+            copies[instance] = Copy(profile: profile, lastHeard: now)
+            liveInstances.insert(instance)
+            scheduleQuietCheck()
+            return .live
+        }
+        let silence = now.timeIntervalSince(copy.lastHeard)
+        copy.lastHeard = now
+        if let profile {
+            copy.profile = profile
+        }
+        copies[instance] = copy
+        guard !liveInstances.contains(instance) else { return .live }
+        liveInstances.insert(instance)
+        log.notice("extension copy \(instance.prefix(8), privacy: .public) is sending again after \(Int(silence)) s; showing its windows")
+        return .backFromQuiet
+    }
+
+    /// `old` has stopped for good, because `new`, a newer copy of the same profile, has reported. Its snapshot
+    /// goes, and with it cleanup's clocks for its tabs (TabCleanup.noteViewing). Its bookmarks' tabs and its
+    /// tabs' custom names go to `new`'s tabs on the same pages when `new` sends its first snapshot
+    /// (BookmarkTabs.update and orphanNamesOfDeadInstances, as after Safari restarts).
+    private func replace(_ old: String, by new: String, at now: Date) {
+        copies[old] = nil
+        replacedCopies[old] = now
+        if liveInstances.contains(old) {
+            liveInstances.remove(old)
+        }
+        lastActivation[old] = nil
+        anchors = anchors.filter { $0.key.instance != old }
+        switchAsks.removeAll { $0.key.instance == old }
+        if pendingActivation?.key.instance == old {
+            pendingActivation = nil
+        }
+        guard let snapshot = snapshots[old] else {
+            log.notice("extension copy \(old.prefix(8), privacy: .public) is replaced by \(new.prefix(8), privacy: .public), a newer copy of its profile; it had sent no snapshot")
+            return
+        }
+        snapshots[old] = nil
+        let tabs = Set(snapshot.windows.flatMap(\.tabs).map(\.id))
+        replacedIds[new] = (now, Set(snapshot.windows.map(\.id)), tabs, -1)
+        log.notice("extension copy \(old.prefix(8), privacy: .public) is replaced by \(new.prefix(8), privacy: .public), a newer copy of its profile; dropping its \(snapshot.windows.count) windows and \(tabs.count) tabs")
+    }
+
+    /// Logs how many of a replaced copy's window and tab ids the copy that replaced it reports: from its first
+    /// snapshot, and again whenever more of them turn up, for `quietAfter`. It says whether Safari keeps tab ids
+    /// when the extension reloads or is reinstalled. If it does, bookmarks' tabs could move to the new copy
+    /// instead of waiting for a tab on the saved page. Counts only.
+    private func compareWithReplaced(_ snapshot: Snapshot) {
+        guard let old = replacedIds[snapshot.instance] else { return }
+        guard clock().timeIntervalSince(old.since) < Self.quietAfter else {
+            replacedIds[snapshot.instance] = nil
+            return
+        }
+        let tabs = Set(snapshot.windows.flatMap(\.tabs).map(\.id))
+        let windows = Set(snapshot.windows.map(\.id))
+        let sameTabs = tabs.intersection(old.tabs).count
+        let sameWindows = windows.intersection(old.windows).count
+        guard sameTabs + sameWindows > old.most else { return }
+        replacedIds[snapshot.instance]?.most = sameTabs + sameWindows
+        log.notice("new extension copy \(snapshot.instance.prefix(8), privacy: .public) reports \(tabs.count) tabs in \(windows.count) windows: \(sameTabs) of the replaced copy's \(old.tabs.count) tab ids and \(sameWindows) of its \(old.windows.count) window ids are among them")
+    }
+
+    /// Hides the windows of copies that have sent nothing for `quietAfter`. Runs every few seconds while there
+    /// are copies.
+    func noteQuietCopies() {
+        let now = clock()
+        for (instance, copy) in copies where liveInstances.contains(instance) {
+            let silence = now.timeIntervalSince(copy.lastHeard)
+            guard silence >= Self.quietAfter else { continue }
+            liveInstances.remove(instance)
+            log.notice("extension copy \(instance.prefix(8), privacy: .public) has sent nothing for \(Int(silence)) s; hiding its \(self.snapshots[instance]?.windows.count ?? 0) windows until it does")
+        }
+    }
+
+    private func scheduleQuietCheck() {
+        guard !quietCheckScheduled else { return }
+        quietCheckScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.quietCheckInterval) { [weak self] in
+            guard let self else { return }
+            self.quietCheckScheduled = false
+            self.noteQuietCopies()
+            if !self.copies.isEmpty {
+                self.scheduleQuietCheck()
+            }
+        }
+    }
+
+    /// A profile for the log: its UUID's first characters, never its name.
+    private static func describe(_ profile: String?) -> String {
+        profile.map { "profile \($0.prefix(8))" } ?? "default profile"
+    }
+
     // MARK: - Window selection
 
     var hasData: Bool { !snapshots.isEmpty }
@@ -528,14 +747,14 @@ final class TabStore {
     /// True when Safari reports tabs but no URLs or titles, which means the extension
     /// hasn't been allowed on websites yet.
     var lacksWebsiteAccess: Bool {
-        let tabs = snapshots.values.flatMap { $0.windows.flatMap(\.tabs) }
+        let tabs = liveSnapshots.values.flatMap { $0.windows.flatMap(\.tabs) }
         return !tabs.isEmpty && tabs.allSatisfy { $0.url == nil && $0.title == nil }
     }
 
     /// The Safari window the sidebar shows: the one most recently focused, cross-checked
-    /// against the title of the window the panel is docked to.
+    /// against the title of the window the panel is docked to. Only live copies' windows count.
     var currentWindow: WindowSelection? {
-        let ordered = snapshots.values.sorted { $0.focusChangedAt > $1.focusChangedAt }
+        let ordered = liveSnapshots.values.sorted { $0.focusChangedAt > $1.focusChangedAt }
         var best: WindowSelection?
         for snapshot in ordered {
             let focused = (snapshot.focusedWindowId ?? -1) >= 0 ? snapshot.focusedWindowId : snapshot.lastFocusedWindowId
@@ -573,7 +792,7 @@ final class TabStore {
     /// the right window; the shorter one would need the profile to be called "Docs".
     private func dockedWindows(title: String) -> [WindowSelection] {
         var matches: [(selection: WindowSelection, length: Int)] = []
-        for snapshot in snapshots.values {
+        for snapshot in liveSnapshots.values {
             for window in snapshot.windows {
                 guard let active = activeTitle(of: window), !active.isEmpty else { continue }
                 if active == title || title.hasSuffix(" — " + active) || window.incognito && title.contains(active) {

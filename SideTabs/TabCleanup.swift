@@ -349,8 +349,10 @@ extension TabStore {
         // Not while a tab is being renamed: its row would go away under the text field. The next run
         // gets to it.
         guard renaming == nil else { return }
+        // Not in a quiet copy's windows either: what it last said may be old, and a tab looked at since could
+        // be closed. Its clocks are kept (refresh, above) for when it speaks again.
         let keys = TabCleanup.tabsToClose(
-            in: snapshots,
+            in: liveSnapshots,
             lastViewed: cleanup.lastViewed,
             now: cleanup.clock(),
             after: interval,
@@ -390,7 +392,8 @@ extension TabStore {
     func reopen(_ closed: ClosedTab) {
         cleanup.remove(closed.id)
         let current = currentWindow.map { TabCleanup.Window(instance: $0.instance, windowId: $0.window.id) }
-        guard let target = TabCleanup.reopenWindow(forProfile: closed.profile, in: snapshots, current: current) else {
+        // Only a live copy's windows: a quiet copy may not be there to open the tab.
+        guard let target = TabCleanup.reopenWindow(forProfile: closed.profile, in: liveSnapshots, current: current) else {
             // Safari has no windows: open the page in Safari.
             newTab(url: closed.url)
             return
