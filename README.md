@@ -2,7 +2,7 @@
 
 Arc-style vertical tabs for Safari on the Mac. A sidebar sits against the left edge of
 your Safari window and lists that window's tabs, each with its icon and title, with your
-favorite sites pinned at the top.
+favorite and pinned sites at the top and a space for each Safari profile.
 
 ![Side Tabs next to a Safari window](docs/screenshot.png)
 
@@ -25,15 +25,22 @@ Apple, so Apple hasn't checked it; all of its code is on this page.
 ## Features
 
 - **Tabs**: click to switch, ✕ or middle-click to close, right-click for more.
-- **Bookmarks**: favorite sites pinned at the top. A dot marks the ones already open.
-- **Drag to reorder** tabs and bookmarks. Drag a tab into Bookmarks to save it.
+- **Spaces**: a button for each Safari profile at the bottom of the sidebar. Click one to
+  switch to that profile's window in the same spot.
+- **Favorites and Pinned**: your sites as tiles at the top, and a Pinned list below, for
+  each profile. An opened one keeps its tab; − closes it, back to the saved page.
+- **Drag to reorder** tabs, favorites and pinned sites. Drag a tab up to keep it.
 - **Rename tabs**: double-click a tab to give it your own name.
 - **Address bar**: shows the current site. Click it to type a new address or search.
-- **Stays out of the way**: follows Safari's window and makes room for itself. In full
-  screen, move the pointer to the left edge to slide it out.
+- **Stays out of the way**: follows Safari's window and makes room for itself, or stays
+  hidden until you point at the window's left edge. In full screen, move the pointer to
+  the left edge to slide it out.
+- **Tidies up, if you like**: closes tabs you haven't looked at for a while, with a list
+  to reopen them, and minimizes the other profiles' windows so Mission Control shows only
+  the one you're using.
 
-Show or hide the sidebar with the Side Tabs button in Safari's toolbar. Settings are in the
-menu bar icon.
+Show or hide the sidebar with the Side Tabs button in Safari's toolbar. Settings are behind
+the gear at the bottom of the sidebar, and in the menu bar icon.
 
 ## Troubleshooting
 
