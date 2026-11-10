@@ -90,7 +90,8 @@ final class TabStore {
     /// Closes tabs nobody has looked at for a while, when that's turned on, and keeps the list for
     /// reopening them (TabCleanup.swift).
     let cleanup = TabCleanup()
-    private(set) var lastMessageAt: Date?
+    /// When the extension last sent anything, on the awake clock (`uptime`), so sleep isn't silence (#45).
+    private(set) var lastMessageAt: TimeInterval?
     /// Favorites, shared by every profile, and each profile's Pinned list (#34, BookmarkLists.swift).
     private(set) var bookmarkLists = BookmarkLists()
     private(set) var customNames: [TabKey: CustomName] = [:]
@@ -101,7 +102,14 @@ final class TabStore {
     var renaming: RenameTarget?
 
     /// Hints from SafariTracker, used to pick the window the sidebar is docked to.
-    var safariIsFrontmost = false
+    var safariIsFrontmost = false {
+        didSet {
+            // Safari can hold a copy back while it's in the background (#45).
+            if safariIsFrontmost, !oldValue {
+                safariCameToFront()
+            }
+        }
+    }
     var dockedWindowTitle: String? {
         didSet {
             if dockedWindowTitle != oldValue {
@@ -197,12 +205,15 @@ final class TabStore {
         self.stateURL = stateURL
         load()
         cleanup.onChange = { [weak self] in self?.scheduleSave() }
+        // Copies already running haven't spoken to this launch of Side Tabs yet (#45).
+        noteChance(at: uptime())
+        scheduleQuietCheck()
     }
 
     // MARK: - Messages from the extension
 
     func handleMessage(type: String, payload: Data, object: [String: Any]) -> [String: Any] {
-        lastMessageAt = Date()
+        lastMessageAt = uptime()
         let sender = hear(from: object)
         if sender == .replaced {
             return [:]
@@ -599,12 +610,16 @@ final class TabStore {
     // reloads or is reinstalled (a new copy, with a new id, takes over), or when Safari quits. None of these
     // says goodbye, so a copy is judged by what it sends (#31):
     //
-    // - Quiet: nothing of any kind from it for `quietAfter`. Its windows aren't shown. Its snapshot stays in
-    //   `snapshots`, and with it its bookmarks' tabs and cleanup's clocks, because under heavy load a copy
-    //   that is running has gone that long without a word. Anything it sends shows its windows again.
+    // - Quiet: nothing of any kind from it for `quietAfter`, while it could have spoken (#45, CopySilence):
+    //   the Mac asleep, the screen locked and the like don't count, and when they end every copy starts
+    //   over. Its windows aren't shown. Its snapshot stays in `snapshots`, and with it its bookmarks' tabs
+    //   and cleanup's clocks, because under heavy load a copy that is running has gone that long without a
+    //   word. Anything it sends shows its windows again.
     // - Gone: a newer copy of the same profile has reported (`replace`), or Safari quit
     //   (`safariDidTerminate`). Only then does its snapshot go, through the paths for an instance that's
     //   gone: its clocks are dropped and its bookmarks' tabs wait to be re-linked to the new copy's.
+    //
+    // Times here are on the Mac's awake clock (`uptime`), which stops while it sleeps.
 
     /// One copy of the extension's background page.
     private struct Copy {
@@ -612,7 +627,14 @@ final class TabStore {
         /// or nil for the default profile.
         var profile: String?
         /// When anything last came from it.
-        var lastHeard: Date
+        var lastHeard: TimeInterval
+        /// When Safari came to the front while it was silent, if it has since it last spoke: its silence
+        /// counts from then. Once per silence, so a copy that has stopped still goes quiet (`safariCameToFront`).
+        var extraChance: TimeInterval?
+        /// It went quiet with Safari in the background, where Safari can hold its timers back.
+        var quietInBackground = false
+        /// It's live again on that extra chance, without having spoken.
+        var onExtraChance = false
     }
 
     /// What a message says about the copy that sent it (see `hear`).
@@ -625,9 +647,10 @@ final class TabStore {
         case replaced
     }
 
-    /// How long a copy can go without sending anything before it counts as quiet and its windows are hidden.
-    /// It sends a heartbeat every 5 s, but under heavy load the extension has run up to 20 s late (#16–#22).
-    static let quietAfter: TimeInterval = 30
+    /// How long a copy can go without sending anything, while it could speak, before it counts as quiet and
+    /// its windows are hidden. It sends a heartbeat every 5 s, but under heavy load the extension has run up
+    /// to 20 s late (#16–#22).
+    static let quietAfter = CopySilence.allowance
     /// How often copies are checked for having gone quiet, while there are any.
     static let quietCheckInterval: TimeInterval = 5
 
@@ -652,16 +675,33 @@ final class TabStore {
         snapshots.filter { liveInstances.contains($0.key) }
     }
 
-    /// Reads the time for telling which copies are quiet. Only the checks in Tests/ pass anything else.
+    /// Whether every copy has had its chance to speak since listening started: Side Tabs starting or Safari
+    /// launching, and again after a hold that began before they had (CopySilence). Until then, a profile
+    /// with no live copy may only have a copy that hasn't spoken yet, so Side Tabs doesn't count as off in
+    /// it (#33, #45).
+    private(set) var copiesHaveHadTheirChance = false
+
+    /// Reads the wall-clock time, for the sidebar's fade (#44). Only the checks in Tests/ pass anything else.
     @ObservationIgnored var clock: () -> Date = { Date() }
+    /// Reads the Mac's awake time, which stops while it sleeps, for telling which copies are quiet (#45).
+    /// Only the checks in Tests/ pass anything else.
+    @ObservationIgnored var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// Reads what's holding Safari's copies back now (HoldWatcher): the Mac asleep, the screen locked and
+    /// the like. Read at every check, and whenever `holdsMayHaveChanged` says to. Only the checks in Tests/
+    /// pass anything else.
+    @ObservationIgnored var currentHolds: () -> Set<CopySilence.Hold> = { [] }
+    /// When copies could speak, and since when their silence counts.
+    @ObservationIgnored private var silence = CopySilence(listeningSince: ProcessInfo.processInfo.systemUptime)
     /// The copies heard from since Safari started, apart from replaced ones, by instance id.
     @ObservationIgnored private var copies: [String: Copy] = [:]
     /// Copies a newer copy of their profile replaced, and when.
-    @ObservationIgnored private var replacedCopies: [String: Date] = [:]
+    @ObservationIgnored private var replacedCopies: [String: TimeInterval] = [:]
     /// For a copy that replaced another: the replaced copy's window and tab ids, and the most of them it has
     /// reported so far (see `compareWithReplaced`).
-    @ObservationIgnored private var replacedIds: [String: (since: Date, windows: Set<Int>, tabs: Set<Int>, most: Int)] = [:]
+    @ObservationIgnored private var replacedIds: [String: (since: TimeInterval, windows: Set<Int>, tabs: Set<Int>, most: Int)] = [:]
     @ObservationIgnored private var quietCheckScheduled = false
+    /// A look at `copiesHaveHadTheirChance` for when they will have.
+    @ObservationIgnored private var chanceCheck: DispatchWorkItem?
 
     /// Notes a message from a copy of the extension.
     ///
@@ -671,10 +711,10 @@ final class TabStore {
     /// after all (a second Safari, say); it's taken back, without replacing anything in turn.
     private func hear(from object: [String: Any]) -> Sender {
         guard let instance = object["instance"] as? String else { return .live }
-        let now = clock()
+        let now = uptime()
         let profile = object["profile"] as? String
         if let replacedAt = replacedCopies[instance] {
-            let since = now.timeIntervalSince(replacedAt)
+            let since = now - replacedAt
             guard since >= Self.quietAfter else {
                 log.notice("ignoring a message from extension copy \(instance.prefix(8), privacy: .public), replaced \(Int(since)) s ago")
                 return .replaced
@@ -695,8 +735,14 @@ final class TabStore {
             scheduleQuietCheck()
             return .live
         }
-        let silence = now.timeIntervalSince(copy.lastHeard)
+        let silence = now - copy.lastHeard
+        if copy.onExtraChance {
+            log.notice("extension copy \(instance.prefix(8), privacy: .public) is sending again, \(Int(now - (copy.extraChance ?? now))) s after Safari came to the front")
+        }
         copy.lastHeard = now
+        copy.extraChance = nil
+        copy.quietInBackground = false
+        copy.onExtraChance = false
         if let profile {
             copy.profile = profile
         }
@@ -711,7 +757,7 @@ final class TabStore {
     /// goes, and with it cleanup's clocks for its tabs (TabCleanup.noteViewing). Its bookmarks' tabs and its
     /// tabs' custom names go to `new`'s tabs on the same pages when `new` sends its first snapshot
     /// (BookmarkTabs.update and orphanNamesOfDeadInstances, as after Safari restarts).
-    private func replace(_ old: String, by new: String, at now: Date) {
+    private func replace(_ old: String, by new: String, at now: TimeInterval) {
         copies[old] = nil
         replacedCopies[old] = now
         if liveInstances.contains(old) {
@@ -739,7 +785,7 @@ final class TabStore {
     /// instead of waiting for a tab on the saved page. Counts only.
     private func compareWithReplaced(_ snapshot: Snapshot) {
         guard let old = replacedIds[snapshot.instance] else { return }
-        guard clock().timeIntervalSince(old.since) < Self.quietAfter else {
+        guard uptime() - old.since < Self.quietAfter else {
             replacedIds[snapshot.instance] = nil
             return
         }
@@ -752,15 +798,102 @@ final class TabStore {
         log.notice("new extension copy \(snapshot.instance.prefix(8), privacy: .public) reports \(tabs.count) tabs in \(windows.count) windows: \(sameTabs) of the replaced copy's \(old.tabs.count) tab ids and \(sameWindows) of its \(old.windows.count) window ids are among them")
     }
 
-    /// Hides the windows of copies that have sent nothing for `quietAfter`. Runs every few seconds while there
-    /// are copies.
+    /// Hides the windows of copies that have sent nothing for `quietAfter` while they could have spoken.
+    /// Runs every few seconds while there are copies, while they may not all have spoken yet, and during a
+    /// hold.
     func noteQuietCopies() {
-        let now = clock()
+        noteHolds()
+        let now = uptime()
         for (instance, copy) in copies where liveInstances.contains(instance) {
-            let silence = now.timeIntervalSince(copy.lastHeard)
-            guard silence >= Self.quietAfter else { continue }
+            let counted = silence.silence(lastHeard: copy.lastHeard, extraChance: copy.extraChance, at: now)
+            guard counted >= Self.quietAfter else { continue }
             liveInstances.remove(instance)
-            log.notice("extension copy \(instance.prefix(8), privacy: .public) has sent nothing for \(Int(silence)) s; hiding its \(self.snapshots[instance]?.windows.count ?? 0) windows until it does")
+            copies[instance]?.quietInBackground = !safariIsFrontmost
+            copies[instance]?.onExtraChance = false
+            let heard = Int(now - copy.lastHeard)
+            let before = heard > Int(counted) + 1 ? " (\(heard) s since it last spoke)" : ""
+            log.notice("extension copy \(instance.prefix(8), privacy: .public) has sent nothing for \(Int(counted)) s\(before, privacy: .public)\(self.safariIsFrontmost ? "" : ", Safari in the background", privacy: .public); hiding its \(self.snapshots[instance]?.windows.count ?? 0) windows until it does")
+        }
+        noteChance(at: now)
+    }
+
+    /// Something that can hold Safari's copies back has changed (HoldWatcher): the Mac slept or woke, the
+    /// screen locked or unlocked, Safari was hidden or shown, and so on. Takes `currentHolds` at once, so a
+    /// wake starts every copy over before any check can find it silent.
+    func holdsMayHaveChanged() {
+        noteHolds()
+        noteChance(at: uptime())
+        scheduleQuietCheck()
+    }
+
+    /// Safari has launched: its copies are all new, and none has spoken yet. Until they've had the time to,
+    /// Side Tabs doesn't count as off in any profile (`copiesHaveHadTheirChance`).
+    func safariDidLaunch() {
+        let now = uptime()
+        silence.startListening(at: now)
+        log.notice("Safari launched; no profile counts as off for \(Int(Self.quietAfter)) s while its extension copies start")
+        noteChance(at: now)
+        scheduleQuietCheck()
+    }
+
+    /// Takes what's holding the copies back now. When the last hold ends, every copy starts over with a whole
+    /// `quietAfter` to speak, and is asked for a snapshot at once, so the sidebar is current within a moment
+    /// of waking.
+    private func noteHolds() {
+        let held = currentHolds()
+        let before = silence.holds
+        guard held != before else { return }
+        if silence.update(holds: held, at: uptime()) {
+            log.notice("the extension's copies are no longer held back by \(CopySilence.describe(before), privacy: .public): each has \(Int(Self.quietAfter)) s to speak before it counts as quiet; asking each for a snapshot")
+            requestSnapshot()
+        } else if before.isEmpty {
+            log.notice("the extension's copies are held back by \(CopySilence.describe(held), privacy: .public); their silence doesn't count until that ends")
+        } else {
+            log.notice("the extension's copies are held back by \(CopySilence.describe(held), privacy: .public)")
+        }
+    }
+
+    /// Updates `copiesHaveHadTheirChance`, and looks again when they will have.
+    private func noteChance(at now: TimeInterval) {
+        let had = silence.copiesHaveHadTheirChance(at: now)
+        if copiesHaveHadTheirChance != had {
+            copiesHaveHadTheirChance = had
+            if had {
+                log.notice("every extension copy has had \(Int(Self.quietAfter)) s to speak; Side Tabs can count as off in a profile again")
+            }
+        }
+        chanceCheck?.cancel()
+        chanceCheck = nil
+        // During a hold it can't be told; the hold's end looks again.
+        guard !had, let wait = silence.timeUntilCopiesHaveHadTheirChance(at: now) else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.chanceCheck = nil
+            self.noteHolds()
+            self.noteChance(at: self.uptime())
+        }
+        chanceCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait + 0.05, execute: work)
+    }
+
+    /// Safari came to the front. In the background, Safari can hold its extensions' timers back (its windows
+    /// covered, say), so each copy that's silent now gets one more chance per silence: its silence counts from
+    /// now. A copy that went quiet with Safari in the background shows its windows again meanwhile, and is
+    /// asked for a snapshot. One that went quiet with Safari in front had its chance, and stays quiet; so does
+    /// one that has had its extra chance and still not spoken, which is how a copy that has stopped goes quiet
+    /// however often Safari comes to the front.
+    private func safariCameToFront() {
+        let now = uptime()
+        for (instance, copy) in copies where copy.extraChance == nil {
+            if liveInstances.contains(instance) {
+                copies[instance]?.extraChance = now
+            } else if copy.quietInBackground {
+                copies[instance]?.extraChance = now
+                copies[instance]?.onExtraChance = true
+                liveInstances.insert(instance)
+                log.notice("extension copy \(instance.prefix(8), privacy: .public) went quiet with Safari in the background; Safari is in front now, so its \(self.snapshots[instance]?.windows.count ?? 0) windows show again while it has \(Int(Self.quietAfter)) s more to speak")
+                send(["action": "snapshot"], to: instance)
+            }
         }
     }
 
@@ -771,7 +904,7 @@ final class TabStore {
             guard let self else { return }
             self.quietCheckScheduled = false
             self.noteQuietCopies()
-            if !self.copies.isEmpty {
+            if !self.copies.isEmpty || !self.copiesHaveHadTheirChance || !self.silence.holds.isEmpty {
                 self.scheduleQuietCheck()
             }
         }
@@ -788,7 +921,7 @@ final class TabStore {
 
     var isConnected: Bool {
         guard let lastMessageAt else { return false }
-        return Date().timeIntervalSince(lastMessageAt) < 60
+        return uptime() - lastMessageAt < 60
     }
 
     /// True when Safari reports tabs but no URLs or titles, which means the extension

@@ -33,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let bridge = ExtensionBridge()
     private let tracker = SafariTracker()
     private let accessibilityWatcher = AccessibilityWatcher()
+    /// Sleep, the screen locked and the like, when the extension's silence doesn't count (#45).
+    private let holdWatcher = HoldWatcher()
     private var dock: DockController?
     /// The profile buttons in the bottom bar, and switching between profiles (#33).
     private lazy var safariProfiles = SafariProfiles(tracker: tracker, store: store, settings: settings)
@@ -73,6 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.sendCommand = { [weak self] command in
             self?.bridge.send(command)
         }
+        store.currentHolds = { [holdWatcher] in holdWatcher.holds }
+        holdWatcher.onChange = { [store] in store.holdsMayHaveChanged() }
+        holdWatcher.start()
+        store.holdsMayHaveChanged()
         favicons.requestIcons = { [weak self] urls in
             guard let self else { return }
             var command: [String: Any] = ["action": "fetchIcons", "urls": urls]

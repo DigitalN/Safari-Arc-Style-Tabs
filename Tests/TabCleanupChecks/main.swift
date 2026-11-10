@@ -531,7 +531,7 @@ do {
     now = start
     let (store, commands) = twoProfiles()
     var ahead: TimeInterval = 0
-    store.clock = { Date().addingTimeInterval(ahead) }
+    store.uptime = { ProcessInfo.processInfo.systemUptime + ahead }
     send(store, snapshotObject("B", seq: 2, profile: "work", focused: 5, focusChangedAt: 5, [
         windowObject(5, [tabObject(50, window: 5, active: true), tabObject(51, window: 5)]),
     ]))

@@ -89,6 +89,7 @@ final class DockController {
             update(makeRoom: false)
             scheduleMakeRoom()
         case .launched:
+            store.safariDidLaunch()
             update(makeRoom: true)
             store.requestSnapshot()
         case .focusChanged, .visibilityChanged, .windowChanged:

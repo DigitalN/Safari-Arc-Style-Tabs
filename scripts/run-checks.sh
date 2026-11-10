@@ -21,7 +21,7 @@ echo "== TabStore"
 swiftc -o "$WORK/store-checks" \
     Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift SideTabs/TabBarMatcher.swift \
     SideTabs/BookmarkTabs.swift Shared/Bridge.swift SideTabs/TabCleanup.swift \
-    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift
+    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift
 "$WORK/store-checks"
 
 # Which tabs cleanup closes, the clocks it keeps, its list of closed tabs and reopening them (#27).
@@ -30,7 +30,7 @@ echo "== tab cleanup"
 swiftc -o "$WORK/cleanup-checks" \
     Tests/TabCleanupChecks/main.swift SideTabs/TabCleanup.swift SideTabs/TabStore.swift SideTabs/Models.swift \
     SideTabs/TabBarMatcher.swift SideTabs/AppSettings.swift SideTabs/BookmarkTabs.swift Shared/Bridge.swift \
-    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift
+    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift
 "$WORK/cleanup-checks"
 
 echo "== click actions"
