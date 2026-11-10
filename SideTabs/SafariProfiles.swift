@@ -57,7 +57,9 @@ final class SafariProfiles {
     @ObservationIgnored private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "profiles")
 
     /// When Side Tabs started listening. Copies already running send a heartbeat within 5 s, so until
-    /// a little after that, silence from a profile's copy says nothing.
+    /// a little after that, or after Safari launches, a copy not listing the docked window says nothing
+    /// (#41's settling). Whether Side Tabs is off in a profile waits longer, for the store's
+    /// `copiesHaveHadTheirChance` (#45).
     @ObservationIgnored private var startedAt = Date()
     private static let listenGrace: TimeInterval = 6
 
@@ -223,6 +225,9 @@ final class SafariProfiles {
             _ = store.dockedWindowTitle
             // A copy going quiet changes no snapshot, but can turn its profile off.
             _ = store.liveInstances
+            // Nor does the time the copies have to speak running out, after Side Tabs starts or Safari
+            // launches (#45).
+            _ = store.copiesHaveHadTheirChance
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -513,7 +518,9 @@ final class SafariProfiles {
         } else {
             firstSeen = Date()
         }
-        dockedOpenSince = max(firstSeen, startedAt.addingTimeInterval(Self.listenGrace))
+        // Safari's copies start with it, and report its restored windows over a few seconds.
+        let listening = max(startedAt, safariLaunchedAt ?? .distantPast)
+        dockedOpenSince = max(firstSeen, listening.addingTimeInterval(Self.listenGrace))
         // Right after a window opens, Safari may not have added the profile button yet (up to 50 ms
         // in #28), or may not have answered: look again shortly.
         let retry = toolbar == .unknown ? 5 : toolbar == .noProfileButton ? 2 : 0
@@ -677,7 +684,9 @@ final class SafariProfiles {
                 )
             }
             let openFor = Date().timeIntervalSince(since)
-            if ProfileRules.isOff(profile, profiles: profiles, windowOpenFor: openFor, copies: copies) {
+            // The store says when the copies have had their chance; observeStore looks again then.
+            let hadChance = store.copiesHaveHadTheirChance
+            if ProfileRules.isOff(profile, profiles: profiles, windowOpenFor: openFor, copiesHadTheirChance: hadChance, copies: copies) {
                 off = profile
             } else if openFor < ProfileRules.offAfter {
                 // Look again when the window has been open long enough.

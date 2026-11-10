@@ -16,8 +16,7 @@ nonisolated struct CopyWindow: Equatable, Sendable {
 /// An extension copy, for the off rule.
 nonisolated struct CopyState: Equatable, Sendable {
     let key: ProfileKey
-    /// Sending heartbeats. Until #31 lets the store say which copies have gone quiet, every copy
-    /// with a snapshot counts as live.
+    /// Sending heartbeats: not quiet (TabStore.liveInstances, #31), and not replaced.
     let isLive: Bool
     /// It lists the window in question (not as a private window).
     let reportsWindow: Bool
@@ -154,8 +153,12 @@ nonisolated enum ProfileRules {
     ///
     /// Copies known to be other profiles' don't count either way. While the profile's own copy isn't
     /// known yet, any live copy no profile is known to have could be it, and keeps it on.
-    static func isOff(_ profile: SafariProfile, profiles: [SafariProfile], windowOpenFor: TimeInterval, copies: [CopyState]) -> Bool {
-        guard windowOpenFor >= offAfter else { return false }
+    ///
+    /// Never before the copies have had their chance to speak (`copiesHadTheirChance`, from
+    /// TabStore.copiesHaveHadTheirChance): after Side Tabs starts or Safari launches, a profile's copy
+    /// that hasn't spoken yet may only be late (#45).
+    static func isOff(_ profile: SafariProfile, profiles: [SafariProfile], windowOpenFor: TimeInterval, copiesHadTheirChance: Bool, copies: [CopyState]) -> Bool {
+        guard copiesHadTheirChance, windowOpenFor >= offAfter else { return false }
         let othersKeys = Set(profiles.filter { $0.id != profile.id }.compactMap(\.key))
         for copy in copies where copy.isLive && !othersKeys.contains(copy.key) {
             guard let key = profile.key else { return false }

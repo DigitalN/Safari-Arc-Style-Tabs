@@ -559,24 +559,29 @@ do {
     func copy(_ key: ProfileKey, live: Bool = true, lists: Bool = false) -> CopyState {
         CopyState(key: key, isLive: live, reportsWindow: lists)
     }
-    check(!ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 1, copies: []), "not before its window has been open 2 s")
-    check(ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 2.5, copies: []), "no copy at all: off")
-    check(!ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copies: [copy(keyW)]), "its copy is sending heartbeats: on, even if it missed the window")
-    check(ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copies: [copy(keyW, live: false, lists: true)]), "its copy went quiet (#31): off, whatever its last snapshot says")
-    check(ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copies: [copy(.defaultProfile), copy(keyB)]), "only other profiles' copies: off")
-    check(ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copies: [copy(keyB, lists: true)]), "a copy known to be another profile's on the same page doesn't count")
-    check(!ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copies: [copy(keyX, lists: true)]), "a copy no profile is known to have lists the window: on")
-    check(ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copies: [copy(keyX)]), "a copy no profile is known to have, not listing it, when the profile's own copy is known: off")
+    check(!ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 1, copiesHadTheirChance: true, copies: []), "not before its window has been open 2 s")
+    check(ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 2.5, copiesHadTheirChance: true, copies: []), "no copy at all: off")
+    // After Side Tabs starts or Safari launches, a copy that hasn't spoken yet may only be late (#45).
+    check(!ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copiesHadTheirChance: false, copies: []),
+          "before the copies have had their chance to speak, not off, though no copy is live")
+    check(!ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copiesHadTheirChance: false, copies: [copy(.defaultProfile), copy(keyB)]),
+          "nor with only other profiles' copies live")
+    check(!ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(keyW)]), "its copy is sending heartbeats: on, even if it missed the window")
+    check(ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(keyW, live: false, lists: true)]), "its copy went quiet (#31): off, whatever its last snapshot says")
+    check(ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(.defaultProfile), copy(keyB)]), "only other profiles' copies: off")
+    check(ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(keyB, lists: true)]), "a copy known to be another profile's on the same page doesn't count")
+    check(!ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(keyX, lists: true)]), "a copy no profile is known to have lists the window: on")
+    check(ProfileRules.isOff(work, profiles: profiles, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(keyX)]), "a copy no profile is known to have, not listing it, when the profile's own copy is known: off")
 
     var unknownKey = profiles
     unknownKey[2].key = nil
-    check(!ProfileRules.isOff(unknownKey[2], profiles: unknownKey, windowOpenFor: 60, copies: [copy(.defaultProfile), copy(keyX)]), "its copy isn't known: a live copy no profile has could be it")
-    check(ProfileRules.isOff(unknownKey[2], profiles: unknownKey, windowOpenFor: 60, copies: [copy(.defaultProfile), copy(keyB)]), "its copy isn't known, and every live copy is another profile's: off")
-    check(ProfileRules.isOff(unknownKey[2], profiles: unknownKey, windowOpenFor: 60, copies: [copy(keyX, live: false)]), "a quiet copy doesn't keep it on")
+    check(!ProfileRules.isOff(unknownKey[2], profiles: unknownKey, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(.defaultProfile), copy(keyX)]), "its copy isn't known: a live copy no profile has could be it")
+    check(ProfileRules.isOff(unknownKey[2], profiles: unknownKey, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(.defaultProfile), copy(keyB)]), "its copy isn't known, and every live copy is another profile's: off")
+    check(ProfileRules.isOff(unknownKey[2], profiles: unknownKey, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(keyX, live: false)]), "a quiet copy doesn't keep it on")
 
     let defaultProfile = profiles[0]
-    check(!ProfileRules.isOff(defaultProfile, profiles: profiles, windowOpenFor: 60, copies: [copy(.defaultProfile)]), "the default profile's copy is live: on")
-    check(ProfileRules.isOff(defaultProfile, profiles: profiles, windowOpenFor: 60, copies: [copy(keyB), copy(keyW)]), "the default profile without its copy: off")
+    check(!ProfileRules.isOff(defaultProfile, profiles: profiles, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(.defaultProfile)]), "the default profile's copy is live: on")
+    check(ProfileRules.isOff(defaultProfile, profiles: profiles, windowOpenFor: 60, copiesHadTheirChance: true, copies: [copy(keyB), copy(keyW)]), "the default profile without its copy: off")
 
     // What counts as listing the window: private windows don't, for the default profile.
     let listing = ProfileRules.copiesListing(windowTitle: "Personal — A", profileName: "Personal", in: [window(.defaultProfile, "A", incognito: true)])
