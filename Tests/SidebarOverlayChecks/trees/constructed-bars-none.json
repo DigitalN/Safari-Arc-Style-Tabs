@@ -1,0 +1,11 @@
+{"role":"AXWindow","subrole":"AXStandardWindow","frame":[100,39,1200,800],"children":[
+  {"role":"AXSplitGroup","frame":[100,39,1200,800],"children":[
+    {"role":"AXSplitter","frame":[100,39,0,800]},
+    {"role":"AXTabGroup","frame":[100,39,1200,800],"children":[
+      {"role":"AXGroup","identifier":"BrowserView?tab=1","frame":[100,39,1200,800]}
+    ]}
+  ]},
+  {"role":"AXButton","subrole":"AXCloseButton","frame":[112,57,14,16]},
+  {"role":"AXButton","subrole":"AXFullScreenButton","frame":[152,57,14,16]},
+  {"role":"AXButton","subrole":"AXMinimizeButton","frame":[132,57,14,16]}
+]}

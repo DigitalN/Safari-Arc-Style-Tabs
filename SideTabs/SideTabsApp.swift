@@ -28,11 +28,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let favicons = FaviconStore()
     let rows = SidebarRows()
     private(set) lazy var updater = Updater(settings: settings)
+    private lazy var tabCleanup = TabCleanupScheduler(store: store, settings: settings)
 
     private let bridge = ExtensionBridge()
     private let tracker = SafariTracker()
     private let accessibilityWatcher = AccessibilityWatcher()
+    /// Sleep, the screen locked and the like, when the extension's silence doesn't count (#45).
+    private let holdWatcher = HoldWatcher()
     private var dock: DockController?
+    /// The profile buttons in the bottom bar, and switching between profiles (#33).
+    private lazy var safariProfiles = SafariProfiles(tracker: tracker, store: store, settings: settings)
     private var welcomeWindow: NSWindow?
     private var settingsWindow: NSWindow?
     /// Set while Side Tabs activates itself to show one of its own windows.
@@ -51,7 +56,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .environment(store)
             .environment(settings)
             .environment(favicons)
-            .environment(rows))
+            .environment(rows)
+            .environment(safariProfiles)
+            // The gear in the sidebar's bottom bar (#43).
+            .environment(\.showSideTabsSettings, ShowSettingsAction { [weak self] in self?.showSettings() }))
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
         self.dock = dock
 
@@ -67,6 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.sendCommand = { [weak self] command in
             self?.bridge.send(command)
         }
+        store.currentHolds = { [holdWatcher] in holdWatcher.holds }
+        holdWatcher.onChange = { [store] in store.holdsMayHaveChanged() }
+        holdWatcher.start()
+        store.holdsMayHaveChanged()
         favicons.requestIcons = { [weak self] urls in
             guard let self else { return }
             var command: [String: Any] = ["action": "fetchIcons", "urls": urls]
@@ -80,12 +92,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
         store.onOpenAddressBar = { [weak self] in self?.dock?.openSafariAddressBar() }
         store.lastPointerDown = { [weak panel] in panel?.lastMouseDown ?? .distantPast }
-        // A middle click on a tab row closes the tab. It doesn't switch to it first: only a left
-        // press does that. (Safari has already been brought forward by then, like for any click.)
+        // A press on the Settings gear (#43) doesn't bring Safari forward, which is what normally puts the
+        // docked sidebar back behind Safari's window after a click. Lay it out again instead, so it goes
+        // back there even if the press opens nothing or macOS doesn't let Side Tabs come forward.
+        panel.onMouseDownKeepingSafariBehind = { [weak self] in
+            DispatchQueue.main.async { self?.dock?.update(makeRoom: false) }
+        }
+        // A middle click on a tab row closes the tab, and one on an open bookmark closes the
+        // bookmark's tab, like its "−" (a closed bookmark has nothing to close). Neither switches to
+        // the tab first: only a left press does that. (Safari has already been brought forward by
+        // then, like for any click.)
         panel.onMiddleClick = { [weak self] point in
-            guard let self, let key = rows.tab(at: point), let tab = store.tab(for: key) else { return false }
-            store.close([tab], instance: key.instance)
-            return true
+            guard let self else { return false }
+            if let key = rows.tab(at: point), let tab = store.tab(for: key) {
+                store.close([tab], instance: key.instance)
+                return true
+            }
+            if let id = rows.bookmark(at: point) {
+                return store.closeBookmarkTab(id)
+            }
+            return false
         }
         store.pressTab = { [weak self] target, completion in
             guard let self else {
@@ -103,7 +129,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         dock.start()
+        // Notices clicks on Safari's Dock icon while the minimize setting needs it (#42).
+        safariProfiles.dockIconWatcher = SafariDockIconWatcher()
+        safariProfiles.start()
         store.requestSnapshot()
+        tabCleanup.start()
 
         accessibilityWatcher.onGranted = { AccessibilityWatcher.relaunch() }
         accessibilityWatcher.start()
@@ -161,6 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             dock?.restoreSafariFrame(waiting: true)
         }
         store.save()
+        safariProfiles.saveIfNeeded()
     }
 
     /// Side Tabs only becomes the active app to show its own windows, or when the sidebar
@@ -182,10 +213,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return false
     }
 
-    /// The toolbar button, its keyboard shortcut, and the menu bar item. In full screen the
-    /// sidebar is a hover overlay, so this slides it out or away instead of turning it off.
+    /// The toolbar button, its keyboard shortcut, and the menu bar item. In full screen, and when
+    /// the sidebar hides automatically, it's a hover overlay, so this slides it out or away instead
+    /// of turning it off.
     func toggleSidebar() {
-        if settings.sidebarVisible, let dock, dock.isShowingFullScreenOverlay {
+        if settings.sidebarVisible, let dock, dock.togglesOverlay {
             dock.toggleOverlay()
         } else {
             settings.sidebarVisible.toggle()
@@ -258,3 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window?.orderFrontRegardless()
     }
 }
+
+/// The core of #42 talks to the Dock icon watcher through this protocol (SafariDockIconWatching.swift).
+/// Declared here, where both are compiled, since the checks compile each on its own.
+extension SafariDockIconWatcher: SafariDockIconWatching {}

@@ -5,13 +5,13 @@ import os.log
 /// Private but long-stable window server calls (also used by most window managers) that
 /// say which Spaces a window is on and which Space each display is showing.
 @_silgen_name("CGSMainConnectionID")
-private func CGSMainConnectionID() -> Int32
+nonisolated private func CGSMainConnectionID() -> Int32
 
 @_silgen_name("CGSCopySpacesForWindows")
-private func CGSCopySpacesForWindows(_ connection: Int32, _ mask: Int32, _ windowIDs: CFArray) -> Unmanaged<CFArray>?
+nonisolated private func CGSCopySpacesForWindows(_ connection: Int32, _ mask: Int32, _ windowIDs: CFArray) -> Unmanaged<CFArray>?
 
 @_silgen_name("CGSCopyManagedDisplaySpaces")
-private func CGSCopyManagedDisplaySpaces(_ connection: Int32) -> Unmanaged<CFArray>?
+nonisolated private func CGSCopyManagedDisplaySpaces(_ connection: Int32) -> Unmanaged<CFArray>?
 
 /// Watches Safari through the Accessibility API: which browser window is in front, where
 /// it is, and whether it's full screen, minimized or hidden.
@@ -38,12 +38,34 @@ final class SafariTracker {
     }
 
     var onEvent: ((Event) -> Void)?
+    /// Called when the docked window changes, to another window or to none (SafariProfiles reads the
+    /// new one's profile).
+    var onWindowChange: (() -> Void)?
+    /// Called with each Accessibility notification from Safari, after the tracker has handled it.
+    var onNotification: ((String, AXUIElement) -> Void)?
 
     private(set) var app: NSRunningApplication?
     /// The browser window the sidebar docks to.
-    private(set) var window: AXUIElement?
+    private(set) var window: AXUIElement? {
+        didSet {
+            switch (oldValue, window) {
+            case let (old?, new?) where CFEqual(old, new): break
+            case (nil, nil): break
+            default:
+                // `reading` is still the old window's here: it's replaced after `window`.
+                previousReading = reading
+                onWindowChange?()
+            }
+        }
+    }
     /// What was last read from `window`: its frame, title and so on.
     private(set) var reading = WindowReading()
+    /// What was last read from the window docked to before `window`, kept when the docked window changes:
+    /// where the current profile's last window was when it closed (#42).
+    private(set) var previousReading = WindowReading()
+    /// Also read where Safari's toolbar ends in normal windows, not only in full screen: the sidebar
+    /// that hides automatically comes out below it.
+    var readsToolbarInWindows = false
 
     private var appElement: AXUIElement?
     private var observer: AXObserver?
@@ -248,6 +270,7 @@ final class SafariTracker {
         default:
             refreshWindow { [weak self] _ in self?.onEvent?(.focusChanged) }
         }
+        onNotification?(name, element)
     }
 
     // MARK: - Choosing the window
@@ -290,8 +313,9 @@ final class SafariTracker {
         let current = window
         let previous = reading
         let reader = windowReader
+        let toolbarInWindows = readsToolbarInWindows
         reader.queue.async { [weak self] in
-            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full)
+            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full, toolbarInWindows: toolbarInWindows)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self?.finish(request, outcome: outcome, epoch: epoch)
@@ -342,7 +366,8 @@ final class SafariTracker {
         cachedReading(of: window)?.number
     }
 
-    /// Bottom edge of Safari's toolbar and tab bar in full screen, if Safari reported them.
+    /// Bottom edge of the lowest bar Safari shows above the page, if it reported any. Read in full
+    /// screen, and in normal windows while `readsToolbarInWindows`.
     func toolbarBottom(of window: AXUIElement) -> CGFloat? {
         cachedReading(of: window)?.toolbarBottom
     }
@@ -357,8 +382,9 @@ final class SafariTracker {
     func setFrame(_ frame: CGRect, of window: AXUIElement, then completion: ((CGRect?) -> Void)? = nil) {
         let previous = reading
         let reader = windowReader
+        let toolbarInWindows = readsToolbarInWindows
         reader.queue.async { [weak self] in
-            let reading = reader.setFrame(frame, of: window, previous: previous)
+            let reading = reader.setFrame(frame, of: window, previous: previous, toolbarInWindows: toolbarInWindows)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let self, let current = self.window, CFEqual(current, window) {
@@ -392,6 +418,11 @@ final class SafariTracker {
 
     /// The same check for any window, such as the sidebar's own.
     func isOnActiveSpace(windowNumber number: Int) -> Bool {
+        Self.isOnShownSpace(windowNumber: number)
+    }
+
+    /// The same, from any thread: it asks the window server, not Safari.
+    nonisolated static func isOnShownSpace(windowNumber number: Int) -> Bool {
         let connection = CGSMainConnectionID()
         let allSpaces: Int32 = 0x7 // current, other and user Spaces
         let windowSpaces = CGSCopySpacesForWindows(connection, allSpaces, [number] as CFArray)?
@@ -472,6 +503,41 @@ final class SafariTracker {
         }
         tabBar.selectedTab(windowTitles: windowTitles, in: window) { selection in
             DispatchQueue.main.async { completion(selection) }
+        }
+    }
+
+    /// Reads the docked window's tabs from its tab bar, for a window the extension can't see (#41).
+    /// `completion` runs on the main thread, with nil if there's no tab bar or Safari didn't answer.
+    func readTabs(then completion: @escaping ([TabBarItem]?) -> Void) {
+        guard isTrusted, let window else {
+            completion(nil)
+            return
+        }
+        tabBar.readTabs(in: window) { tabs in
+            DispatchQueue.main.async { completion(tabs) }
+        }
+    }
+
+    /// The same for any of Safari's windows, such as a switch's target before it's in front (#44).
+    func readTabs(of window: AXUIElement, then completion: @escaping ([TabBarItem]?) -> Void) {
+        guard isTrusted else {
+            completion(nil)
+            return
+        }
+        tabBar.readTabs(in: window) { tabs in
+            DispatchQueue.main.async { completion(tabs) }
+        }
+    }
+
+    /// Closes a tab of the docked window with its tab button's close action (#41). `completion` runs on the
+    /// main thread, with why not if it didn't.
+    func closeTab(_ target: TabBarTarget, then completion: @escaping (String?) -> Void) {
+        guard isTrusted, let window else {
+            completion("there is no docked Safari window")
+            return
+        }
+        tabBar.close(target, in: window) { problem in
+            DispatchQueue.main.async { completion(problem) }
         }
     }
 

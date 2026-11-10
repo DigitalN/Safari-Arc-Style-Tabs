@@ -22,11 +22,26 @@ function check(condition, message) {
     }
 }
 
+// What `reply` returns for a native message whose reply Safari loses: the call never settles.
+const HANG = Symbol("hang");
+
 // Loads a fresh copy of background.js. `queryDelay` is how long tabs.query takes, to make
-// a snapshot build overlap with other events.
-function load({ queryDelay = 20, tabCount = 5 } = {}) {
+// a snapshot build overlap with other events. `reply(message, count)` answers each native message
+// (`count` messages so far, this one included): a reply, a promise of one (to answer late), or HANG.
+// `timeScale` shortens every timer background.js sets, so a check of its 4 s time limit doesn't take
+// seconds. `hangLastFocused` makes windows.getLastFocused never answer. Heartbeats don't run by
+// themselves; `heartbeat()` sends one as the timer would. `ports` are the ports background.js connected
+// for the app's commands, oldest first: `deliver(command)` sends one through a port as Safari would, and
+// `drop()` has Safari report it disconnected. The first `connectFails` attempts to connect throw.
+// `quiet` keeps background.js's warnings out of the output, for a check that expects them.
+function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true }), timeScale = 1, hangLastFocused = false, connectFails = 0, quiet = false } = {}) {
     const sent = [];
     const updates = [];
+    const created = [];
+    const windowUpdates = [];
+    const windowsCreated = [];
+    const intervals = [];
+    const ports = [];
     const listeners = {};
     const event = (name) => ({ addListener: (fn) => (listeners[name] ||= []).push(fn) });
     const tabs = Array.from({ length: tabCount }, (_, i) => ({
@@ -36,32 +51,55 @@ function load({ queryDelay = 20, tabCount = 5 } = {}) {
         windows: {
             WINDOW_ID_NONE: -1,
             getAll: async () => [{ id: 1, focused: true }],
-            getLastFocused: async () => ({ id: 1, focused: true }),
+            getLastFocused: () => (hangLastFocused ? new Promise(() => {}) : Promise.resolve({ id: 1, focused: true })),
+            update: async (id, props) => { windowUpdates.push({ id, props }); return { id, ...props }; },
+            create: async (props) => { windowsCreated.push(props); return { id: 9, focused: !!props.focused, tabs: [{ id: 900, windowId: 9 }] }; },
             onCreated: event("windows.created"), onRemoved: event("windows.removed"), onFocusChanged: event("windows.focus"),
         },
         tabs: {
             query: async () => { await sleep(queryDelay); return tabs.map((tab) => ({ ...tab })); },
             executeScript: async () => {},
             update: async (id, props) => { updates.push({ id, props }); return { ...tabs[id - 1], ...props }; },
+            create: async (props) => { created.push(props); return { id: 100 + created.length, windowId: props.windowId ?? 1, index: 0, url: props.url }; },
             onCreated: event("created"), onActivated: event("activated"), onMoved: event("moved"),
             onAttached: event("attached"), onDetached: event("detached"), onUpdated: event("updated"),
             onRemoved: event("removed"), onReplaced: event("replaced"),
         },
         runtime: {
-            sendNativeMessage: async (id, message) => {
-                sent.push({ at: Date.now(), message: JSON.parse(JSON.stringify(message)) });
-                return { appRunning: true };
+            sendNativeMessage: (id, message) => {
+                const copy = JSON.parse(JSON.stringify(message));
+                sent.push({ at: Date.now(), message: copy });
+                const answer = reply(copy, sent.length);
+                return answer === HANG ? new Promise(() => {}) : Promise.resolve(answer);
             },
-            connectNative: () => ({ onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }),
+            connectNative: () => {
+                if (connectFails > 0) {
+                    connectFails--;
+                    throw new Error("no port");
+                }
+                const port = {
+                    messageListeners: [], disconnectListeners: [], disconnected: false,
+                    onMessage: { addListener: (fn) => port.messageListeners.push(fn) },
+                    onDisconnect: { addListener: (fn) => port.disconnectListeners.push(fn) },
+                    disconnect: () => { port.disconnected = true; },
+                    deliver: (command) => port.messageListeners.forEach((fn) => fn({ name: "command", userInfo: command })),
+                    drop: () => port.disconnectListeners.forEach((fn) => fn()),
+                };
+                ports.push(port);
+                return port;
+            },
             onMessage: event("runtime.message"),
         },
         browserAction: { onClicked: event("action") },
     };
     // background.js asks for extra snapshots 1, 3 and 6 s after it starts, to catch windows
-    // Safari restores late. They're left out so they can't land in the middle of a check.
-    const timer = (fn, ms, ...args) => ([1000, 3000, 6000].includes(ms) ? 0 : setTimeout(fn, ms, ...args));
+    // Safari restores late. They're left out so they can't land in the middle of a check. (An older
+    // background.js, run through BACKGROUND_JS, has no refreshAfterStart: there they're told by delay.)
+    const startupRefresh = (fn, ms) => (context.refreshAfterStart ? fn === context.refreshAfterStart : [1000, 3000, 6000].includes(ms));
+    const timer = (fn, ms, ...args) => (startupRefresh(fn, ms) ? 0 : setTimeout(fn, (ms ?? 0) * timeScale, ...args));
     const context = vm.createContext({
-        browser, console, setTimeout: timer, clearTimeout, setInterval: () => 0, crypto: { randomUUID: () => "test-instance" },
+        browser, console: quiet ? { ...console, warn: () => {} } : console, setTimeout: timer, clearTimeout,
+        setInterval: (fn, ms) => intervals.push({ fn, ms }), crypto: { randomUUID: () => "test-instance" },
         URL, fetch: async () => ({}), AbortController, FileReader: class {}, Date, Math,
     });
     vm.runInContext(source.replace('"use strict";', ""), context);
@@ -69,7 +107,10 @@ function load({ queryDelay = 20, tabCount = 5 } = {}) {
     const ofType = (type) => sent.filter((entry) => entry.message.type === type).map((entry) => entry.message);
     // Carries out a command from the app, as the port or a reply would deliver it.
     const run = (command) => context.runCommand({ instance: "test-instance", ...command });
-    return { sent, tabs, updates, fire, ofType, run };
+    const heartbeat = () => intervals.filter((entry) => entry.ms === 5000).forEach((entry) => entry.fn());
+    // Reads one of background.js's top-level variables.
+    const state = (name) => vm.runInContext(name, context);
+    return { sent, tabs, updates, created, windowUpdates, windowsCreated, intervals, ports, fire, ofType, run, heartbeat, state };
 }
 
 // Waits for the first startup snapshot and forgets what was sent so far.
@@ -264,6 +305,296 @@ async function settled(page) {
         await sleep(100);
         check(page.updates.length === 1 && page.updates[0].props.active === true, "the activate command switches the tab");
         check(page.ofType("snapshot").length === 0, "and sends no snapshot of its own: Safari reports the switch");
+    }
+
+    // --- #27: a tab reopened from cleanup's list in another profile's window brings that window forward ---
+    {
+        const page = load();
+        await settled(page);
+        await page.run({ action: "create", windowId: 5, url: "https://example.com/back", focus: true });
+        check(page.created.length === 1 && page.created[0].windowId === 5 && page.created[0].url === "https://example.com/back",
+            "the create command opens the page in the window it names");
+        check(page.windowUpdates.length === 1 && page.windowUpdates[0].id === 5 && page.windowUpdates[0].props.focused === true,
+            "and, asked to, brings that window forward");
+        await page.run({ action: "create", windowId: 1, url: "https://example.com/here" });
+        check(page.created.length === 2 && page.windowUpdates.length === 1, "otherwise no window is brought forward");
+    }
+
+    // --- #41: a pinned item clicked in a window Safari doesn't share with the copy opens in a new window ---
+    {
+        const page = load();
+        await settled(page);
+        await page.run({ action: "openWindow", url: "https://example.com/pinned" });
+        check(page.windowsCreated.length === 1 && page.windowsCreated[0].url === "https://example.com/pinned" && page.windowsCreated[0].focused === true,
+            "the openWindow command opens a new, focused window with the page");
+        check(page.created.length === 0, "and no tab in another window");
+    }
+
+    // --- #31: no lost reply can stop a copy ---
+    // These run background.js's timers 50 times faster: its 4 s time limit takes 80 ms here.
+    const FAST = 0.02;
+    const LIMIT = 4000 * FAST;
+
+    {
+        // A snapshot whose reply never comes doesn't hold up the ones after it.
+        let lost = 0;
+        const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => {
+            if (message.type === "snapshot" && lost === 0) {
+                lost++;
+                return HANG;
+            }
+            return { appRunning: true };
+        } });
+        await sleep(LIMIT * 3);
+        check(lost === 1, "the first snapshot's reply was lost");
+        check(page.ofType("snapshot").length >= 2, "a snapshot whose reply never comes is sent again");
+        check(page.state("sending") === false, "and the copy isn't left waiting for that reply");
+        const logs = page.ofType("log").map((message) => message.message);
+        check(logs.some((line) => line.startsWith(`no reply within 4000 ms to "snapshot"`)), "and the app's log hears of the lost reply");
+        page.sent.length = 0;
+        page.fire("windows.removed", 1);
+        await sleep(50);
+        check(page.ofType("snapshot").length === 1, "a later change is still sent");
+    }
+
+    {
+        // While every snapshot's reply is lost, changes keep going out, one snapshot per time limit rather than
+        // in a burst, and heartbeats go on.
+        const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => (message.type === "snapshot" ? HANG : { appRunning: true }) });
+        const started = Date.now();
+        while (Date.now() - started < LIMIT * 8) {
+            page.fire("updated", 1, { title: "x" }, { ...page.tabs[0], title: `x${Date.now()}` });
+            await sleep(10);
+        }
+        const times = page.sent.filter((entry) => entry.message.type === "snapshot").map((entry) => entry.at);
+        check(times.length >= 5, `snapshots keep going out while their replies are lost (${times.length} in ${LIMIT * 8} ms)`);
+        const gaps = times.slice(1).map((at, i) => at - times[i]);
+        check(gaps.every((gap) => gap >= LIMIT - 10), `one at a time, each after the last one's time limit (gaps ${gaps.join(", ")} ms)`);
+        page.heartbeat();
+        page.heartbeat();
+        check(page.ofType("heartbeat").length === 2, "and heartbeats still go out");
+    }
+
+    {
+        // A hello whose reply never comes: snapshots and heartbeats start anyway, without waiting for it.
+        const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => (message.type === "hello" ? HANG : { appRunning: true }) });
+        await sleep(LIMIT / 2);
+        check(page.ofType("hello").length === 1, "the hello was sent");
+        check(page.ofType("snapshot").length >= 1, "the first snapshot doesn't wait for the hello's reply");
+        check(page.intervals.some((entry) => entry.ms === 5000), "heartbeats are started without waiting for it either");
+        page.heartbeat();
+        check(page.ofType("heartbeat").length === 1, "and they go out");
+        await sleep(LIMIT * 4);
+        check(page.ofType("hello").length === 1, "since the snapshots had replies, the hello isn't sent again");
+    }
+
+    {
+        // Nothing has a reply: the hello is sent again, with back-off, a few times at most.
+        const page = load({ timeScale: FAST, queryDelay: 2, reply: () => HANG });
+        await sleep(1500);
+        const hellos = page.sent.filter((entry) => entry.message.type === "hello").map((entry) => entry.at);
+        check(hellos.length === 6, `with no reply to anything, the hello is sent again 5 times (sent ${hellos.length})`);
+        const gaps = hellos.slice(1).map((at, i) => at - hellos[i]);
+        check(gaps.every((gap, i) => i === 0 || gap > gaps[i - 1]), `further and further apart (gaps ${gaps.join(", ")} ms)`);
+        check(page.ofType("snapshot").length >= 3, "and snapshots keep being tried");
+        check(page.intervals.some((entry) => entry.ms === 5000), "and heartbeats run");
+    }
+
+    {
+        // Safari never answers which window was focused last: the copy starts anyway.
+        const stuck = load({ timeScale: FAST, queryDelay: 2, hangLastFocused: true });
+        await sleep(150);
+        check(stuck.ofType("hello").length === 1 && stuck.ofType("snapshot").length >= 1,
+            "a copy whose question about the focused window is never answered still says hello and sends snapshots");
+    }
+
+    {
+        // A reply that turns up after its time limit: its request for a snapshot is used, its commands aren't.
+        let answerLate;
+        const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => {
+            if (message.type === "snapshot" && !answerLate) return new Promise((resolve) => { answerLate = resolve; });
+            return { appRunning: true };
+        } });
+        await sleep(LIMIT * 3);
+        check(!!answerLate, "the first snapshot is waiting for its reply");
+        page.sent.length = 0;
+        page.updates.length = 0;
+        answerLate({ appRunning: true, needSnapshot: true, commands: [{ action: "activate", tabId: 3 }] });
+        await sleep(50);
+        check(page.updates.length === 0, "a command in a reply that came after the time limit isn't run");
+        check(page.ofType("snapshot").length === 1, "but its request for a snapshot is");
+        check(page.ofType("log").some((message) => message.message.startsWith(`the reply to "snapshot" came`)),
+            "and the app's log hears of the late reply");
+        check(page.state("sending") === false, "and nothing is left waiting");
+    }
+
+    {
+        // A reply on time still has its commands run.
+        let answered = false;
+        const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => {
+            if (message.type === "heartbeat" && !answered) {
+                answered = true;
+                return { appRunning: true, commands: [{ action: "activate", tabId: 2 }] };
+            }
+            return { appRunning: true };
+        } });
+        await settled(page);
+        page.heartbeat();
+        await sleep(20);
+        check(page.updates.length === 1 && page.updates[0].id === 2, "a command in a reply that came in time is run");
+    }
+
+    {
+        // A tab switch report whose reply is lost doesn't hold up the snapshot it asks for, and its late reply
+        // can't run a command.
+        let answerLate;
+        const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => {
+            if (message.type === "activated") return new Promise((resolve) => { answerLate = resolve; });
+            return { appRunning: true };
+        } });
+        await settled(page);
+        page.fire("activated", { tabId: 3, windowId: 1 });
+        await sleep(30);
+        check(page.ofType("snapshot").length === 1, "a switch report waiting for its reply doesn't hold up the snapshot after it");
+        await sleep(LIMIT * 2);
+        page.updates.length = 0;
+        answerLate({ appRunning: true, commands: [{ action: "activate", tabId: 4 }] });
+        await sleep(30);
+        check(page.updates.length === 0, "and a late reply to the report runs no command");
+        check(page.ofType("activated").length === 1, "the report isn't sent again: the snapshot covers it");
+    }
+
+    {
+        // The report of a tab opened for a bookmark is sent again until it's delivered: without it the tab
+        // stays under Tabs. The app ignores a repeat.
+        let tries = 0;
+        const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => {
+            if (message.type === "created") return ++tries === 1 ? HANG : { appRunning: true };
+            return { appRunning: true };
+        } });
+        await settled(page);
+        await page.run({ action: "create", windowId: 1, url: "https://example.com/new", requestId: "r1" });
+        await sleep(LIMIT * 4);
+        const reports = page.ofType("created");
+        check(reports.length === 2, `a "created" report that got no reply is sent again, and not after it's delivered (sent ${reports.length})`);
+        check(reports.every((report) => report.requestId === "r1" && report.tabId === 101), "the same report each time");
+
+        const away = load({ timeScale: FAST, queryDelay: 2, reply: (message) => ({ appRunning: message.type !== "created" }) });
+        await settled(away);
+        await away.run({ action: "create", windowId: 1, url: "https://example.com/new", requestId: "r2" });
+        await sleep(LIMIT * 4);
+        check(away.ofType("created").length === 3, `while the app doesn't take it, it's tried 3 times (sent ${away.ofType("created").length})`);
+    }
+
+    {
+        // The toolbar button's toggle isn't sent again: it may have arrived, and a second one would undo it.
+        const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => (message.type === "toggleSidebar" ? HANG : { appRunning: true }) });
+        await settled(page);
+        page.fire("action");
+        await sleep(LIMIT * 4);
+        check(page.ofType("toggleSidebar").length === 1, "a toggle whose reply is lost isn't sent again");
+    }
+
+    {
+        // Lost replies are logged by message type, often at first and then more and more rarely, so a copy
+        // that loses every heartbeat's reply for minutes stays visible in the log without filling it.
+        const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => (message.type === "heartbeat" ? HANG : { appRunning: true }) });
+        await settled(page);
+        for (let i = 0; i < 13; i++) page.heartbeat();
+        await sleep(LIMIT * 2);
+        const lines = page.ofType("log").map((message) => message.message).filter((line) => line.includes(`to "heartbeat"`));
+        check(lines.length === 6, `13 lost heartbeat replies are logged 6 times: the first five and the 10th (got ${lines.length})`);
+        check(lines.at(-1)?.includes("(10 so far)"), "each line says how many so far");
+        check(!page.ofType("log").some((message) => message.message.includes(`to "snapshot"`)), "and other types are counted apart");
+    }
+
+    // --- #37: a command runs once, however many times it arrives ---
+
+    const activations = (page) => page.updates.filter((update) => update.props.active === true).map((update) => update.id);
+    const logLines = (page) => page.ofType("log").map((message) => message.message);
+
+    {
+        // The same command delivered twice through one port runs once.
+        const page = load({ timeScale: FAST, queryDelay: 2 });
+        await settled(page);
+        check(page.ports.length === 1, "background.js connects one port for the app's commands");
+        page.ports[0].deliver({ action: "activate", tabId: 2, id: "L-1" });
+        page.ports[0].deliver({ action: "activate", tabId: 2, id: "L-1" });
+        await sleep(20);
+        check(JSON.stringify(activations(page)) === "[2]", `a command that arrives twice runs once (ran for tabs ${JSON.stringify(activations(page))})`);
+        check(logLines(page).some((line) => line.startsWith(`skipped a repeated command ("activate"), both times through port 1`)),
+            "and the log says it came twice through the same port");
+        page.ports[0].deliver({ action: "activate", tabId: 3, id: "L-2" });
+        await sleep(20);
+        check(JSON.stringify(activations(page)) === "[2,3]", "a command with another id runs");
+        page.ports[0].deliver({ action: "activate", tabId: 4 });
+        page.ports[0].deliver({ action: "activate", tabId: 4 });
+        await sleep(20);
+        check(JSON.stringify(activations(page)) === "[2,3,4,4]", "commands without an id, from an older app, run every time");
+    }
+
+    {
+        // A command that came through one port and comes again through the port that replaced it runs once,
+        // and the log tells the two ways apart.
+        const page = load({ timeScale: FAST, queryDelay: 2 });
+        await settled(page);
+        page.ports[0].deliver({ action: "activate", tabId: 2, id: "L-1" });
+        page.ports[0].drop();
+        check(page.ports.length === 1, "a port isn't replaced at once when Safari says it disconnected");
+        page.ports[0].deliver({ action: "activate", tabId: 3, id: "L-2" });
+        await sleep(20);
+        check(JSON.stringify(activations(page)) === "[2,3]", "a command still coming through it meanwhile isn't lost");
+        await sleep(3000 * FAST + 30);
+        check(page.ports.length === 2, "3 s later a new port is connected");
+        check(page.ports[0].disconnected, "and the old one is disconnected first");
+        check(logLines(page).some((line) => line.startsWith("port 1 disconnected")) && logLines(page).includes("connected port 2"),
+            "the log shows the port changing");
+        page.ports[1].deliver({ action: "activate", tabId: 2, id: "L-1" });
+        await sleep(20);
+        check(JSON.stringify(activations(page)) === "[2,3]", "a command that comes again through the new port isn't run again");
+        check(logLines(page).some((line) => line.includes("first through port 1, then through port 2")), "and the log names both ports");
+
+        // The old port goes on delivering: none of it is run.
+        page.ports[0].deliver({ action: "activate", tabId: 4, id: "L-3" });
+        page.ports[1].deliver({ action: "activate", tabId: 5, id: "L-4" });
+        await sleep(20);
+        check(JSON.stringify(activations(page)) === "[2,3,5]", "a message through a port that was replaced is ignored, one through the current port isn't");
+        check(logLines(page).some((line) => line.startsWith("ignored a message through port 1, which port 2 replaced")),
+            "and the log says a replaced port still delivered");
+
+        // The old port's disconnect, coming late, doesn't drop the current port.
+        page.ports[0].drop();
+        await sleep(3000 * FAST * 2);
+        check(page.ports.length === 2 && !page.ports[1].disconnected, "an old port's disconnect doesn't drop the current port");
+        page.ports[1].deliver({ action: "activate", tabId: 1, id: "L-5" });
+        await sleep(20);
+        check(activations(page).at(-1) === 1, "which still runs commands");
+
+        // Safari reporting the current port disconnected twice leads to one new port, not two.
+        page.ports[1].drop();
+        page.ports[1].drop();
+        await sleep(3000 * FAST * 3);
+        check(page.ports.length === 3, `two disconnects of one port connect one new port (${page.ports.length - 2} connected)`);
+    }
+
+    {
+        // A failed connect is tried again once, after 5 s.
+        const page = load({ timeScale: FAST, queryDelay: 2, connectFails: 1, quiet: true });
+        await sleep(5000 * FAST + 50);
+        check(page.ports.length === 1, `after a failed connect, one port is connected later (${page.ports.length})`);
+        page.ports[0]?.deliver({ action: "activate", tabId: 3, id: "L-1" });
+        await sleep(20);
+        check(JSON.stringify(activations(page)) === "[3]", "and it runs commands");
+    }
+
+    {
+        // A command for another copy is left alone, and doesn't use up its id here.
+        const page = load({ timeScale: FAST, queryDelay: 2 });
+        await settled(page);
+        page.ports[0].deliver({ action: "activate", tabId: 2, id: "L-1", instance: "another-copy" });
+        await sleep(20);
+        check(activations(page).length === 0 && !logLines(page).some((line) => line.startsWith("skipped")),
+            "a command for another copy isn't run, and isn't counted as a repeat");
     }
 
     if (failures === 0) {

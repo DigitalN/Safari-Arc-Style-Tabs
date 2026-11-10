@@ -1,0 +1,1503 @@
+{
+ "actions": [
+  "AXRaise"
+ ],
+ "children": [
+  {
+   "children": [
+    {
+     "attributes": [
+      "AXIdentifier",
+      "AXFrame",
+      "AXParent",
+      "AXChildren",
+      "AXFocused",
+      "AXSize",
+      "AXTitleUIElement",
+      "AXRole",
+      "AXTopLevelUIElement",
+      "AXHelp",
+      "AXChildrenInNavigationOrder",
+      "AXPosition",
+      "AXWindow",
+      "AXRoleDescription",
+      "AXContents"
+     ],
+     "children": [
+      {
+       "actions": [
+        "AXScrollLeftByPage",
+        "AXScrollRightByPage",
+        "AXScrollUpByPage",
+        "AXScrollDownByPage"
+       ],
+       "children": [
+        {
+         "children": [
+          {
+           "children": [
+            {
+             "children": [
+              {
+               "attributes": [
+                "AXEnabled",
+                "AXFrame",
+                "AXDescription",
+                "AXParent",
+                "AXSize",
+                "AXFocused",
+                "AXEmbeddedImageDescription",
+                "AXRole",
+                "AXTopLevelUIElement",
+                "AXHelp",
+                "AXPosition",
+                "AXWindow",
+                "AXRoleDescription",
+                "AXImageData",
+                "AXIdentifier"
+               ],
+               "description": "Person silhouette, filled",
+               "enabled": true,
+               "frame": [
+                633,
+                670,
+                18,
+                11
+               ],
+               "identifier": "_NS:34",
+               "role": "AXImage",
+               "roleDescription": "image"
+              },
+              {
+               "actions": [
+                "AXShowMenu",
+                "AXConfirm"
+               ],
+               "enabled": true,
+               "frame": [
+                657,
+                667,
+                169,
+                18
+               ],
+               "identifier": "_NS:7",
+               "role": "AXTextField",
+               "roleDescription": "text field"
+              }
+             ],
+             "enabled": true,
+             "frame": [
+              634,
+              660,
+              191,
+              32
+             ],
+             "role": "AXCell",
+             "roleDescription": "cell",
+             "selected": false
+            }
+           ],
+           "frame": [
+            628,
+            660,
+            203,
+            32
+           ],
+           "role": "AXRow",
+           "roleDescription": "table row",
+           "selected": false,
+           "subrole": "AXTableRow"
+          },
+          {
+           "children": [
+            {
+             "children": [
+              {
+               "attributes": [
+                "AXEnabled",
+                "AXFrame",
+                "AXDescription",
+                "AXParent",
+                "AXSize",
+                "AXFocused",
+                "AXEmbeddedImageDescription",
+                "AXRole",
+                "AXTopLevelUIElement",
+                "AXHelp",
+                "AXPosition",
+                "AXWindow",
+                "AXRoleDescription",
+                "AXImageData",
+                "AXIdentifier"
+               ],
+               "description": "Person with a lanyard card, filled",
+               "enabled": true,
+               "frame": [
+                633,
+                702,
+                18,
+                11
+               ],
+               "identifier": "_NS:34",
+               "role": "AXImage",
+               "roleDescription": "image"
+              },
+              {
+               "actions": [
+                "AXShowMenu",
+                "AXConfirm"
+               ],
+               "enabled": true,
+               "frame": [
+                657,
+                699,
+                169,
+                18
+               ],
+               "identifier": "_NS:7",
+               "role": "AXTextField",
+               "roleDescription": "text field"
+              }
+             ],
+             "enabled": true,
+             "frame": [
+              634,
+              692,
+              191,
+              32
+             ],
+             "role": "AXCell",
+             "roleDescription": "cell",
+             "selected": false
+            }
+           ],
+           "frame": [
+            628,
+            692,
+            203,
+            32
+           ],
+           "role": "AXRow",
+           "roleDescription": "table row",
+           "selected": false,
+           "subrole": "AXTableRow"
+          },
+          {
+           "children": [
+            {
+             "children": [
+              {
+               "attributes": [
+                "AXEnabled",
+                "AXFrame",
+                "AXDescription",
+                "AXParent",
+                "AXSize",
+                "AXFocused",
+                "AXEmbeddedImageDescription",
+                "AXRole",
+                "AXTopLevelUIElement",
+                "AXHelp",
+                "AXPosition",
+                "AXWindow",
+                "AXRoleDescription",
+                "AXImageData",
+                "AXIdentifier"
+               ],
+               "description": "itunes u",
+               "enabled": true,
+               "frame": [
+                633,
+                734,
+                18,
+                11
+               ],
+               "identifier": "_NS:34",
+               "role": "AXImage",
+               "roleDescription": "image"
+              },
+              {
+               "actions": [
+                "AXShowMenu",
+                "AXConfirm"
+               ],
+               "enabled": true,
+               "frame": [
+                657,
+                731,
+                169,
+                18
+               ],
+               "identifier": "_NS:7",
+               "role": "AXTextField",
+               "roleDescription": "text field"
+              }
+             ],
+             "enabled": true,
+             "frame": [
+              634,
+              724,
+              191,
+              32
+             ],
+             "role": "AXCell",
+             "roleDescription": "cell",
+             "selected": true
+            }
+           ],
+           "frame": [
+            628,
+            724,
+            203,
+            32
+           ],
+           "role": "AXRow",
+           "roleDescription": "table row",
+           "selected": true,
+           "subrole": "AXTableRow"
+          },
+          {
+           "frame": [
+            628,
+            660,
+            203,
+            268
+           ],
+           "identifier": "AutomaticTableColumnIdentifier.0",
+           "role": "AXColumn",
+           "roleDescription": "column",
+           "selected": false
+          }
+         ],
+         "enabled": true,
+         "frame": [
+          627,
+          659,
+          205,
+          270
+         ],
+         "identifier": "_NS:181",
+         "role": "AXTable",
+         "roleDescription": "table"
+        }
+       ],
+       "frame": [
+        627,
+        659,
+        205,
+        270
+       ],
+       "identifier": "_NS:177",
+       "role": "AXScrollArea",
+       "roleDescription": "scroll area"
+      },
+      {
+       "frame": [
+        627,
+        659,
+        205,
+        270
+       ],
+       "identifier": "_NS:159",
+       "role": "AXGroup",
+       "roleDescription": "group"
+      },
+      {
+       "attributes": [
+        "AXIdentifier",
+        "AXEnabled",
+        "AXFrame",
+        "AXParent",
+        "AXSize",
+        "AXChildren",
+        "AXFocused",
+        "AXRole",
+        "AXTopLevelUIElement",
+        "AXHelp",
+        "AXPosition",
+        "AXWindow",
+        "AXRoleDescription"
+       ],
+       "children": [
+        {
+         "actions": [
+          "AXPress"
+         ],
+         "description": "Add Profile",
+         "enabled": true,
+         "frame": [
+          628,
+          942,
+          30,
+          24
+         ],
+         "role": "AXButton",
+         "roleDescription": "button",
+         "subrole": "AXSegment"
+        },
+        {
+         "actions": [
+          "AXPress"
+         ],
+         "description": "Delete Profile",
+         "enabled": true,
+         "frame": [
+          658,
+          942,
+          30,
+          24
+         ],
+         "role": "AXButton",
+         "roleDescription": "button",
+         "subrole": "AXSegment"
+        }
+       ],
+       "enabled": true,
+       "frame": [
+        626,
+        942,
+        62,
+        22
+       ],
+       "identifier": "AddDeleteProfileSegmentedControl",
+       "role": "AXGroup",
+       "roleDescription": "group"
+      },
+      {
+       "children": [
+        {
+         "actions": [
+          "AXPress"
+         ],
+         "enabled": true,
+         "frame": [
+          1058,
+          658,
+          70,
+          24
+         ],
+         "role": "AXRadioButton",
+         "roleDescription": "tab",
+         "subrole": "AXTabButton",
+         "title": "General",
+         "value": 0
+        },
+        {
+         "actions": [
+          "AXPress"
+         ],
+         "enabled": true,
+         "frame": [
+          1128,
+          658,
+          88,
+          24
+         ],
+         "role": "AXRadioButton",
+         "roleDescription": "tab",
+         "subrole": "AXTabButton",
+         "title": "Extensions",
+         "value": 1
+        },
+        {
+         "children": [
+          {
+           "enabled": true,
+           "frame": [
+            874,
+            695,
+            378,
+            18
+           ],
+           "identifier": "_NS:8",
+           "role": "AXStaticText",
+           "roleDescription": "text",
+           "stringValue": "Select which extensions you would like to use with this profile."
+          },
+          {
+           "actions": [
+            "AXScrollLeftByPage",
+            "AXScrollRightByPage",
+            "AXScrollUpByPage",
+            "AXScrollDownByPage"
+           ],
+           "children": [
+            {
+             "children": [
+              {
+               "children": [
+                {
+                 "children": [
+                  {
+                   "actions": [
+                    "AXPress"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    886,
+                    739,
+                    18,
+                    18
+                   ],
+                   "identifier": "_NS:11",
+                   "role": "AXCheckBox",
+                   "roleDescription": "checkbox",
+                   "value": 1
+                  },
+                  {
+                   "attributes": [
+                    "AXEnabled",
+                    "AXFrame",
+                    "AXDescription",
+                    "AXParent",
+                    "AXSize",
+                    "AXFocused",
+                    "AXEmbeddedImageDescription",
+                    "AXRole",
+                    "AXTopLevelUIElement",
+                    "AXHelp",
+                    "AXPosition",
+                    "AXWindow",
+                    "AXRoleDescription",
+                    "AXImageData",
+                    "AXIdentifier"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    908,
+                    733,
+                    30,
+                    30
+                   ],
+                   "identifier": "_NS:20",
+                   "role": "AXImage",
+                   "roleDescription": "image"
+                  },
+                  {
+                   "enabled": true,
+                   "frame": [
+                    942,
+                    739,
+                    446,
+                    18
+                   ],
+                   "identifier": "_NS:42",
+                   "role": "AXStaticText",
+                   "roleDescription": "text",
+                   "stringValue": "<other extension>"
+                  }
+                 ],
+                 "enabled": true,
+                 "frame": [
+                  882,
+                  728,
+                  510,
+                  40
+                 ],
+                 "role": "AXCell",
+                 "roleDescription": "cell",
+                 "selected": true
+                }
+               ],
+               "frame": [
+                876,
+                728,
+                522,
+                40
+               ],
+               "role": "AXRow",
+               "roleDescription": "table row",
+               "selected": true,
+               "subrole": "AXTableRow"
+              },
+              {
+               "children": [
+                {
+                 "children": [
+                  {
+                   "actions": [
+                    "AXPress"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    886,
+                    779,
+                    18,
+                    18
+                   ],
+                   "identifier": "_NS:11",
+                   "role": "AXCheckBox",
+                   "roleDescription": "checkbox",
+                   "value": 0
+                  },
+                  {
+                   "attributes": [
+                    "AXEnabled",
+                    "AXFrame",
+                    "AXDescription",
+                    "AXParent",
+                    "AXSize",
+                    "AXFocused",
+                    "AXEmbeddedImageDescription",
+                    "AXRole",
+                    "AXTopLevelUIElement",
+                    "AXHelp",
+                    "AXPosition",
+                    "AXWindow",
+                    "AXRoleDescription",
+                    "AXImageData",
+                    "AXIdentifier"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    908,
+                    773,
+                    30,
+                    30
+                   ],
+                   "identifier": "_NS:20",
+                   "role": "AXImage",
+                   "roleDescription": "image"
+                  },
+                  {
+                   "enabled": true,
+                   "frame": [
+                    942,
+                    779,
+                    446,
+                    18
+                   ],
+                   "identifier": "_NS:42",
+                   "role": "AXStaticText",
+                   "roleDescription": "text",
+                   "stringValue": "<other extension>"
+                  }
+                 ],
+                 "enabled": true,
+                 "frame": [
+                  882,
+                  768,
+                  510,
+                  40
+                 ],
+                 "role": "AXCell",
+                 "roleDescription": "cell",
+                 "selected": false
+                }
+               ],
+               "frame": [
+                876,
+                768,
+                522,
+                40
+               ],
+               "role": "AXRow",
+               "roleDescription": "table row",
+               "selected": false,
+               "subrole": "AXTableRow"
+              },
+              {
+               "children": [
+                {
+                 "children": [
+                  {
+                   "actions": [
+                    "AXPress"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    886,
+                    819,
+                    18,
+                    18
+                   ],
+                   "identifier": "_NS:11",
+                   "role": "AXCheckBox",
+                   "roleDescription": "checkbox",
+                   "value": 1
+                  },
+                  {
+                   "attributes": [
+                    "AXEnabled",
+                    "AXFrame",
+                    "AXDescription",
+                    "AXParent",
+                    "AXSize",
+                    "AXFocused",
+                    "AXEmbeddedImageDescription",
+                    "AXRole",
+                    "AXTopLevelUIElement",
+                    "AXHelp",
+                    "AXPosition",
+                    "AXWindow",
+                    "AXRoleDescription",
+                    "AXImageData",
+                    "AXIdentifier"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    908,
+                    813,
+                    30,
+                    30
+                   ],
+                   "identifier": "_NS:20",
+                   "role": "AXImage",
+                   "roleDescription": "image"
+                  },
+                  {
+                   "enabled": true,
+                   "frame": [
+                    942,
+                    819,
+                    446,
+                    18
+                   ],
+                   "identifier": "_NS:42",
+                   "role": "AXStaticText",
+                   "roleDescription": "text",
+                   "stringValue": "Side Tabs"
+                  }
+                 ],
+                 "enabled": true,
+                 "frame": [
+                  882,
+                  808,
+                  510,
+                  40
+                 ],
+                 "role": "AXCell",
+                 "roleDescription": "cell",
+                 "selected": false
+                }
+               ],
+               "frame": [
+                876,
+                808,
+                522,
+                40
+               ],
+               "role": "AXRow",
+               "roleDescription": "table row",
+               "selected": false,
+               "subrole": "AXTableRow"
+              },
+              {
+               "children": [
+                {
+                 "children": [
+                  {
+                   "actions": [
+                    "AXPress"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    886,
+                    859,
+                    18,
+                    18
+                   ],
+                   "identifier": "_NS:11",
+                   "role": "AXCheckBox",
+                   "roleDescription": "checkbox",
+                   "value": 1
+                  },
+                  {
+                   "attributes": [
+                    "AXEnabled",
+                    "AXFrame",
+                    "AXDescription",
+                    "AXParent",
+                    "AXSize",
+                    "AXFocused",
+                    "AXEmbeddedImageDescription",
+                    "AXRole",
+                    "AXTopLevelUIElement",
+                    "AXHelp",
+                    "AXPosition",
+                    "AXWindow",
+                    "AXRoleDescription",
+                    "AXImageData",
+                    "AXIdentifier"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    908,
+                    853,
+                    30,
+                    30
+                   ],
+                   "identifier": "_NS:20",
+                   "role": "AXImage",
+                   "roleDescription": "image"
+                  },
+                  {
+                   "enabled": true,
+                   "frame": [
+                    942,
+                    859,
+                    446,
+                    18
+                   ],
+                   "identifier": "_NS:42",
+                   "role": "AXStaticText",
+                   "roleDescription": "text",
+                   "stringValue": "<other extension>"
+                  }
+                 ],
+                 "enabled": true,
+                 "frame": [
+                  882,
+                  848,
+                  510,
+                  40
+                 ],
+                 "role": "AXCell",
+                 "roleDescription": "cell",
+                 "selected": false
+                }
+               ],
+               "frame": [
+                876,
+                848,
+                522,
+                40
+               ],
+               "role": "AXRow",
+               "roleDescription": "table row",
+               "selected": false,
+               "subrole": "AXTableRow"
+              },
+              {
+               "children": [
+                {
+                 "children": [
+                  {
+                   "actions": [
+                    "AXPress"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    886,
+                    899,
+                    18,
+                    18
+                   ],
+                   "identifier": "_NS:11",
+                   "role": "AXCheckBox",
+                   "roleDescription": "checkbox",
+                   "value": 1
+                  },
+                  {
+                   "attributes": [
+                    "AXEnabled",
+                    "AXFrame",
+                    "AXDescription",
+                    "AXParent",
+                    "AXSize",
+                    "AXFocused",
+                    "AXEmbeddedImageDescription",
+                    "AXRole",
+                    "AXTopLevelUIElement",
+                    "AXHelp",
+                    "AXPosition",
+                    "AXWindow",
+                    "AXRoleDescription",
+                    "AXImageData",
+                    "AXIdentifier"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    908,
+                    893,
+                    30,
+                    30
+                   ],
+                   "identifier": "_NS:20",
+                   "role": "AXImage",
+                   "roleDescription": "image"
+                  },
+                  {
+                   "enabled": true,
+                   "frame": [
+                    942,
+                    899,
+                    446,
+                    18
+                   ],
+                   "identifier": "_NS:42",
+                   "role": "AXStaticText",
+                   "roleDescription": "text",
+                   "stringValue": "<other extension>"
+                  }
+                 ],
+                 "enabled": true,
+                 "frame": [
+                  882,
+                  888,
+                  510,
+                  40
+                 ],
+                 "role": "AXCell",
+                 "roleDescription": "cell",
+                 "selected": false
+                }
+               ],
+               "frame": [
+                876,
+                888,
+                522,
+                40
+               ],
+               "role": "AXRow",
+               "roleDescription": "table row",
+               "selected": false,
+               "subrole": "AXTableRow"
+              },
+              {
+               "children": [
+                {
+                 "children": [
+                  {
+                   "actions": [
+                    "AXPress"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    886,
+                    939,
+                    18,
+                    18
+                   ],
+                   "identifier": "_NS:11",
+                   "role": "AXCheckBox",
+                   "roleDescription": "checkbox",
+                   "value": 1
+                  },
+                  {
+                   "attributes": [
+                    "AXEnabled",
+                    "AXFrame",
+                    "AXDescription",
+                    "AXParent",
+                    "AXSize",
+                    "AXFocused",
+                    "AXEmbeddedImageDescription",
+                    "AXRole",
+                    "AXTopLevelUIElement",
+                    "AXHelp",
+                    "AXPosition",
+                    "AXWindow",
+                    "AXRoleDescription",
+                    "AXImageData",
+                    "AXIdentifier"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    908,
+                    933,
+                    30,
+                    30
+                   ],
+                   "identifier": "_NS:20",
+                   "role": "AXImage",
+                   "roleDescription": "image"
+                  },
+                  {
+                   "enabled": true,
+                   "frame": [
+                    942,
+                    939,
+                    446,
+                    18
+                   ],
+                   "identifier": "_NS:42",
+                   "role": "AXStaticText",
+                   "roleDescription": "text",
+                   "stringValue": "<other extension>"
+                  }
+                 ],
+                 "enabled": true,
+                 "frame": [
+                  882,
+                  928,
+                  510,
+                  40
+                 ],
+                 "role": "AXCell",
+                 "roleDescription": "cell",
+                 "selected": false
+                }
+               ],
+               "frame": [
+                876,
+                928,
+                522,
+                40
+               ],
+               "role": "AXRow",
+               "roleDescription": "table row",
+               "selected": false,
+               "subrole": "AXTableRow"
+              },
+              {
+               "children": [
+                {
+                 "children": [
+                  {
+                   "actions": [
+                    "AXPress"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    886,
+                    979,
+                    18,
+                    18
+                   ],
+                   "identifier": "_NS:11",
+                   "role": "AXCheckBox",
+                   "roleDescription": "checkbox",
+                   "value": 1
+                  },
+                  {
+                   "attributes": [
+                    "AXEnabled",
+                    "AXFrame",
+                    "AXDescription",
+                    "AXParent",
+                    "AXSize",
+                    "AXFocused",
+                    "AXEmbeddedImageDescription",
+                    "AXRole",
+                    "AXTopLevelUIElement",
+                    "AXHelp",
+                    "AXPosition",
+                    "AXWindow",
+                    "AXRoleDescription",
+                    "AXImageData",
+                    "AXIdentifier"
+                   ],
+                   "enabled": true,
+                   "frame": [
+                    908,
+                    973,
+                    30,
+                    30
+                   ],
+                   "identifier": "_NS:20",
+                   "role": "AXImage",
+                   "roleDescription": "image"
+                  },
+                  {
+                   "enabled": true,
+                   "frame": [
+                    942,
+                    979,
+                    446,
+                    18
+                   ],
+                   "identifier": "_NS:42",
+                   "role": "AXStaticText",
+                   "roleDescription": "text",
+                   "stringValue": "<other extension>"
+                  }
+                 ],
+                 "enabled": true,
+                 "frame": [
+                  882,
+                  968,
+                  510,
+                  40
+                 ],
+                 "role": "AXCell",
+                 "roleDescription": "cell",
+                 "selected": false
+                }
+               ],
+               "frame": [
+                876,
+                968,
+                522,
+                40
+               ],
+               "role": "AXRow",
+               "roleDescription": "table row",
+               "selected": false,
+               "subrole": "AXTableRow"
+              },
+              {
+               "frame": [
+                876,
+                728,
+                522,
+                280
+               ],
+               "identifier": "AutomaticTableColumnIdentifier.0",
+               "role": "AXColumn",
+               "roleDescription": "column",
+               "selected": false
+              }
+             ],
+             "enabled": true,
+             "frame": [
+              875,
+              727,
+              524,
+              282
+             ],
+             "identifier": "_NS:29",
+             "role": "AXTable",
+             "roleDescription": "table"
+            },
+            {
+             "children": [
+              {
+               "frame": [
+                1389,
+                731,
+                6,
+                108
+               ],
+               "role": "AXValueIndicator",
+               "roleDescription": "value indicator",
+               "value": 0
+              },
+              {
+               "actions": [
+                "AXPress"
+               ],
+               "frame": [
+                1381,
+                728,
+                0,
+                0
+               ],
+               "role": "AXButton",
+               "roleDescription": "increment arrow button",
+               "subrole": "AXIncrementArrow"
+              },
+              {
+               "actions": [
+                "AXPress"
+               ],
+               "frame": [
+                1381,
+                728,
+                0,
+                0
+               ],
+               "role": "AXButton",
+               "roleDescription": "decrement arrow button",
+               "subrole": "AXDecrementArrow"
+              },
+              {
+               "actions": [
+                "AXPress"
+               ],
+               "frame": [
+                1389,
+                839,
+                6,
+                62
+               ],
+               "role": "AXButton",
+               "roleDescription": "increment page button",
+               "subrole": "AXIncrementPage"
+              },
+              {
+               "actions": [
+                "AXPress"
+               ],
+               "frame": [
+                1389,
+                731,
+                6,
+                0
+               ],
+               "role": "AXButton",
+               "roleDescription": "decrement page button",
+               "subrole": "AXDecrementPage"
+              }
+             ],
+             "enabled": true,
+             "frame": [
+              1380,
+              727,
+              19,
+              179
+             ],
+             "identifier": "_NS:82",
+             "role": "AXScrollBar",
+             "roleDescription": "scroll bar",
+             "value": 0
+            }
+           ],
+           "frame": [
+            875,
+            727,
+            524,
+            179
+           ],
+           "identifier": "_NS:74",
+           "role": "AXScrollArea",
+           "roleDescription": "scroll area"
+          }
+         ],
+         "frame": [
+          855,
+          686,
+          564,
+          240
+         ],
+         "identifier": "_NS:70",
+         "role": "AXGroup",
+         "roleDescription": "group"
+        }
+       ],
+       "frame": [
+        845,
+        653,
+        584,
+        286
+       ],
+       "role": "AXTabGroup",
+       "roleDescription": "tab group"
+      },
+      {
+       "enabled": true,
+       "frame": [
+        626,
+        606,
+        798,
+        34
+       ],
+       "identifier": "_NS:99",
+       "role": "AXStaticText",
+       "roleDescription": "text",
+       "stringValue": "Profiles allow you to keep your browsing separated. You may want to set up a pro…"
+      },
+      {
+       "actions": [
+        "AXPress"
+       ],
+       "description": "Help",
+       "enabled": true,
+       "frame": [
+        1397,
+        940,
+        26,
+        26
+       ],
+       "identifier": "_NS:96",
+       "role": "AXButton",
+       "roleDescription": "button"
+      }
+     ],
+     "frame": [
+      607,
+      587,
+      836,
+      390
+     ],
+     "identifier": "SafariProfilesPreferencesView",
+     "role": "AXGroup",
+     "roleDescription": "group"
+    }
+   ],
+   "frame": [
+    607,
+    587,
+    836,
+    390
+   ],
+   "identifier": "_NS:46",
+   "role": "AXGroup",
+   "roleDescription": "group"
+  },
+  {
+   "actions": [
+    "AXShowMenu"
+   ],
+   "children": [
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "General",
+     "enabled": true,
+     "frame": [
+      731,
+      531,
+      55,
+      56
+     ],
+     "role": "AXButton",
+     "roleDescription": "button",
+     "title": "General"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Tabs",
+     "enabled": true,
+     "frame": [
+      787,
+      531,
+      55,
+      56
+     ],
+     "role": "AXButton",
+     "roleDescription": "button",
+     "title": "Tabs"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "AutoFill",
+     "enabled": true,
+     "frame": [
+      843,
+      531,
+      55,
+      56
+     ],
+     "role": "AXButton",
+     "roleDescription": "button",
+     "title": "AutoFill"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Search",
+     "enabled": true,
+     "frame": [
+      899,
+      531,
+      55,
+      56
+     ],
+     "role": "AXButton",
+     "roleDescription": "button",
+     "title": "Search"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Security",
+     "enabled": true,
+     "frame": [
+      955,
+      531,
+      55,
+      56
+     ],
+     "role": "AXButton",
+     "roleDescription": "button",
+     "title": "Security"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Privacy",
+     "enabled": true,
+     "frame": [
+      1011,
+      531,
+      55,
+      56
+     ],
+     "role": "AXButton",
+     "roleDescription": "button",
+     "title": "Privacy"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Websites",
+     "enabled": true,
+     "frame": [
+      1067,
+      531,
+      60,
+      56
+     ],
+     "role": "AXButton",
+     "roleDescription": "button",
+     "title": "Websites"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Profiles",
+     "enabled": true,
+     "frame": [
+      1129,
+      531,
+      55,
+      56
+     ],
+     "role": "AXButton",
+     "roleDescription": "button",
+     "title": "Profiles"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Move next\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Extensions",
+     "enabled": true,
+     "frame": [
+      1185,
+      531,
+      69,
+      56
+     ],
+     "role": "AXButton",
+     "roleDescription": "button",
+     "title": "Extensions"
+    },
+    {
+     "actions": [
+      "AXPress",
+      "Name:Move previous\nTarget:0x0\nSelector:(null)",
+      "Name:Remove from toolbar\nTarget:0x0\nSelector:(null)"
+     ],
+     "description": "Advanced",
+     "enabled": true,
+     "frame": [
+      1255,
+      531,
+      64,
+      56
+     ],
+     "role": "AXButton",
+     "roleDescription": "button",
+     "title": "Advanced"
+    }
+   ],
+   "frame": [
+    607,
+    531,
+    836,
+    56
+   ],
+   "role": "AXToolbar",
+   "roleDescription": "toolbar"
+  },
+  {
+   "actions": [
+    "AXPress"
+   ],
+   "enabled": true,
+   "frame": [
+    615,
+    507,
+    16,
+    16
+   ],
+   "role": "AXButton",
+   "roleDescription": "close button",
+   "subrole": "AXCloseButton"
+  },
+  {
+   "actions": [
+    "AXPress",
+    "AXShowMenu"
+   ],
+   "children": [
+    {
+     "frame": [
+      662,
+      508,
+      14,
+      14
+     ],
+     "role": "AXGroup",
+     "roleDescription": "group"
+    }
+   ],
+   "enabled": false,
+   "frame": [
+    661,
+    507,
+    16,
+    16
+   ],
+   "role": "AXButton",
+   "roleDescription": "zoom button",
+   "subrole": "AXZoomButton"
+  },
+  {
+   "actions": [
+    "AXPress"
+   ],
+   "enabled": false,
+   "frame": [
+    638,
+    507,
+    16,
+    16
+   ],
+   "role": "AXButton",
+   "roleDescription": "minimize button",
+   "subrole": "AXMinimizeButton"
+  },
+  {
+   "enabled": true,
+   "frame": [
+    998,
+    506,
+    54,
+    16
+   ],
+   "role": "AXStaticText",
+   "roleDescription": "text",
+   "stringValue": "Profiles"
+  }
+ ],
+ "frame": [
+  607,
+  499,
+  836,
+  478
+ ],
+ "identifier": "_NS:111",
+ "role": "AXWindow",
+ "roleDescription": "standard window",
+ "subrole": "AXStandardWindow",
+ "title": "Profiles"
+}

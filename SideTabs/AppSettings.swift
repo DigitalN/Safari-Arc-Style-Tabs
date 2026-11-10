@@ -15,6 +15,12 @@ final class AppSettings {
         didSet { defaults.set(sidebarVisible, forKey: "sidebarVisible") }
     }
 
+    /// Keep the sidebar out of the way in normal windows too, as in full screen: Safari keeps its
+    /// whole window, and the sidebar slides out over the page from the window's left edge.
+    var hidesAutomatically: Bool {
+        didSet { defaults.set(hidesAutomatically, forKey: "hidesSidebarAutomatically") }
+    }
+
     var width: Double {
         didSet { defaults.set(width, forKey: "sidebarWidth") }
     }
@@ -23,8 +29,24 @@ final class AppSettings {
         didSet { defaults.set(closeButtonMode.rawValue, forKey: "closeButtonMode") }
     }
 
+    /// Show Favorites and Pinned (#34). The key is still the one from when they were Bookmarks.
     var showBookmarks: Bool {
         didSet { defaults.set(showBookmarks, forKey: "showBookmarks") }
+    }
+
+    /// Close tabs nobody has looked at for `unviewedTabInterval` (TabCleanup.swift).
+    var closesUnviewedTabs: Bool {
+        didSet { defaults.set(closesUnviewedTabs, forKey: "closeUnviewedTabs") }
+    }
+
+    var unviewedTabInterval: CleanupInterval {
+        didSet { defaults.set(unviewedTabInterval.rawValue, forKey: "closeUnviewedTabsAfter") }
+    }
+
+    /// Minimize the windows of the profiles not in use, so Mission Control shows only the current
+    /// profile's windows (#42).
+    var minimizesOtherProfiles: Bool {
+        didSet { defaults.set(minimizesOtherProfiles, forKey: "minimizesOtherProfiles") }
     }
 
     /// Check GitHub for new versions and install them in the background.
@@ -71,16 +93,24 @@ final class AppSettings {
     init() {
         defaults.register(defaults: [
             "sidebarVisible": true,
+            "hidesSidebarAutomatically": false,
             "sidebarWidth": 260.0,
             "closeButtonMode": CloseButtonMode.hover.rawValue,
             "showBookmarks": true,
+            "closeUnviewedTabs": false,
+            "closeUnviewedTabsAfter": CleanupInterval.oneDay.rawValue,
+            "minimizesOtherProfiles": false,
             "hasCompletedSetup": false,
             "updatesAutomatically": true,
         ])
         sidebarVisible = defaults.bool(forKey: "sidebarVisible")
+        hidesAutomatically = defaults.bool(forKey: "hidesSidebarAutomatically")
         width = defaults.double(forKey: "sidebarWidth").clamped(to: Self.widthRange)
         closeButtonMode = CloseButtonMode(rawValue: defaults.string(forKey: "closeButtonMode") ?? "") ?? .hover
         showBookmarks = defaults.bool(forKey: "showBookmarks")
+        closesUnviewedTabs = defaults.bool(forKey: "closeUnviewedTabs")
+        unviewedTabInterval = CleanupInterval(rawValue: defaults.string(forKey: "closeUnviewedTabsAfter") ?? "") ?? .oneDay
+        minimizesOtherProfiles = defaults.bool(forKey: "minimizesOtherProfiles")
         hasCompletedSetup = defaults.bool(forKey: "hasCompletedSetup")
         updatesAutomatically = defaults.bool(forKey: "updatesAutomatically")
     }

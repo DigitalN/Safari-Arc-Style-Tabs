@@ -196,7 +196,7 @@ struct WelcomeView: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 SetupTip(systemImage: "sidebar.left", text: "Side Tabs lives in your menu bar. Use it to show or hide the sidebar and to open Settings.")
-                SetupTip(systemImage: "star", text: "Drag a tab up into Bookmarks to keep a site at the top.")
+                SetupTip(systemImage: "pin", text: "Drag a tab up into Pinned or Favorites to keep a site at the top.")
                 SetupTip(systemImage: "pencil", text: "Double-click a tab to rename it.")
             }
         }
@@ -287,12 +287,20 @@ private struct SetupTip: View {
 
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
+    /// The Mac's "Minimize windows into application icon" option. Read when Settings opens and each
+    /// time it comes back to the front, so the recommendation goes away once the option is turned on
+    /// in System Settings.
+    @State private var minimizesIntoApplicationIcon = DockMinimizeOption.readMinimizesIntoApplicationIcon()
 
     var body: some View {
         @Bindable var settings = settings
         Form {
             Section("Sidebar") {
                 Toggle("Show sidebar", isOn: $settings.sidebarVisible)
+                Toggle(isOn: $settings.hidesAutomatically) {
+                    Text("Hide sidebar automatically")
+                    Text("Safari keeps its whole window. The sidebar slides out when you point at the window's left edge or click the Side Tabs button.")
+                }
                 LabeledContent("Width") {
                     HStack {
                         Slider(value: $settings.width, in: AppSettings.widthRange, step: 10)
@@ -306,7 +314,45 @@ struct SettingsView: View {
                     Text("Current tab and on hover").tag(AppSettings.CloseButtonMode.hover)
                     Text("Every tab").tag(AppSettings.CloseButtonMode.always)
                 }
-                Toggle("Show bookmarks", isOn: $settings.showBookmarks)
+                Toggle("Show Favorites and Pinned", isOn: $settings.showBookmarks)
+            }
+
+            Section("Tabs") {
+                Toggle(isOn: $settings.closesUnviewedTabs) {
+                    Text("Close tabs I haven't looked at")
+                    Text("Closed tabs are listed at the bottom left of the sidebar, where you can reopen them. Tabs of favorites and pinned items, tabs pinned in Safari, tabs playing sound and private windows stay open.")
+                }
+                Picker("Close after", selection: $settings.unviewedTabInterval) {
+                    ForEach(CleanupInterval.allCases) { interval in
+                        Text(interval.label).tag(interval)
+                    }
+                }
+                .disabled(!settings.closesUnviewedTabs)
+            }
+
+            // Shown even with one profile, where it does nothing, so Settings doesn't change with
+            // what Safari reports.
+            Section("Profiles") {
+                Toggle(isOn: $settings.minimizesOtherProfiles) {
+                    Text("Minimize other profiles' windows")
+                    Text("When you switch profiles, the other profiles' windows are minimized, so Mission Control shows only the profile you're using. Private and full-screen windows stay open.")
+                }
+                if DockMinimizeOption.recommends(
+                    minimizesOtherProfiles: settings.minimizesOtherProfiles,
+                    minimizesIntoApplicationIcon: minimizesIntoApplicationIcon
+                ) {
+                    LabeledContent {
+                        Button("Open Desktop & Dock") {
+                            if let url = DockMinimizeOption.settingsURL {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    } label: {
+                        Text("Turn on “Minimize windows into application icon” so these windows don't fill the Dock. The Scale effect makes switching quicker.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Section("General") {
@@ -329,6 +375,47 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 480)
         .fixedSize(horizontal: false, vertical: true)
+        .background(WindowBecameKey {
+            minimizesIntoApplicationIcon = DockMinimizeOption.readMinimizesIntoApplicationIcon()
+        })
+    }
+}
+
+/// Calls `action` each time the window showing this view becomes key: when it opens, and each time it
+/// comes back to the front, say from System Settings. The window is kept when it closes, so SwiftUI's
+/// `onAppear` alone wouldn't see it open again.
+private struct WindowBecameKey: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> Watcher { Watcher(action: action) }
+
+    func updateNSView(_ watcher: Watcher, context: Context) { watcher.action = action }
+
+    final class Watcher: NSView {
+        var action: () -> Void
+        private var token: NSObjectProtocol?
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let token {
+                NotificationCenter.default.removeObserver(token)
+            }
+            token = nil
+            guard let window else { return }
+            token = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.action() }
+            }
+        }
+
+        /// Clicks go to the settings in front of it.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
 

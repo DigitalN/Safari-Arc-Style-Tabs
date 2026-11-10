@@ -1,0 +1,22 @@
+{"role":"AXMenuBar","children":[
+  {"role":"AXMenuBarItem","title":"Apple"},
+  {"role":"AXMenuBarItem","title":"Safari","children":[
+    {"role":"AXMenu","identifier":"ApplicationMenu","children":[
+      {"role":"AXMenuItem","identifier":"ManageProfilesMenuItem","title":"Manage Profiles…","cmdModifiers":0}
+    ]}
+  ]},
+  {"role":"AXMenuBarItem","title":"File","children":[
+    {"role":"AXMenu","identifier":"SafariFileMenu","children":[
+      {"role":"AXMenuItem","identifier":"NewPersonalWindow?isDefaultProfile=true","title":"New Personal Window","cmdChar":"0","cmdModifiers":3},
+      {"role":"AXMenuItem","identifier":"NewWorkWindow?isDefaultProfile=false","title":"New Work Window","cmdChar":"N","cmdModifiers":0},
+      {"role":"AXMenuItem","identifier":"NewPrivateWindow","title":"New Private Window","cmdChar":"N","cmdModifiers":1},
+      {"role":"AXMenuItem","identifier":"NewTab","title":"New Tab","cmdChar":"T","cmdModifiers":0},
+      {"role":"AXMenuItem","identifier":"NewEmptyTabGroupMenuItem","title":"New Empty Tab Group","cmdChar":"N","cmdModifiers":4},
+      {"role":"AXMenuItem","identifier":"OpenFile","title":"Open File…","cmdChar":"O","cmdModifiers":0},
+      {"role":"AXMenuItem","identifier":"OpenLocation","title":"Open Location…","cmdChar":"L","cmdModifiers":0},
+      {"role":"AXMenuItem","identifier":"_NS:578","cmdModifiers":0},
+      {"role":"AXMenuItem","identifier":"CloseWindow","title":"Close Window","cmdChar":"W","cmdModifiers":0}
+    ]}
+  ]},
+  {"role":"AXMenuBarItem","title":"Edit"}
+]}

@@ -1,0 +1,18 @@
+{"role":"AXWindow","subrole":"AXStandardWindow","frame":[100,39,1200,800],"children":[
+  {"role":"AXSplitGroup","frame":[100,91,1200,748],"children":[
+    {"role":"AXSplitter","frame":[100,91,0,748]},
+    {"role":"AXGroup","frame":[100,91,1200,36],"children":[
+      {"role":"AXOpaqueProviderGroup","subrole":"AXOpaqueProviderList","identifier":"TabBar?isSeparate=true","frame":[100,91,1200,36]}
+    ]},
+    {"role":"AXTabGroup","frame":[100,127,1200,712],"children":[
+      {"role":"AXGroup","identifier":"BrowserView?tab=1","frame":[100,127,1200,712]}
+    ]}
+  ]},
+  {"role":"AXToolbar","frame":[100,39,1200,52],"children":[
+    {"role":"AXButton","identifier":"SidebarButton","frame":[180,52,28,26]},
+    {"role":"AXTextField","description":"smart search field","frame":[400,50,500,30]}
+  ]},
+  {"role":"AXButton","subrole":"AXCloseButton","frame":[112,57,14,16]},
+  {"role":"AXButton","subrole":"AXFullScreenButton","frame":[152,57,14,16]},
+  {"role":"AXButton","subrole":"AXMinimizeButton","frame":[132,57,14,16]}
+]}

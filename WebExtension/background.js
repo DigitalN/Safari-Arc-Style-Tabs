@@ -13,6 +13,12 @@ const NATIVE_APP_ID = "com.digitaln.sidetabs";
 const WINDOW_ID_NONE = browser.windows.WINDOW_ID_NONE ?? -1;
 const HEARTBEAT_MS = 5000;
 
+// How long a native message waits for its reply. The extension's handler always answers within about
+// 3 s (its message to the app gives up after 1 s + 2 s), but Safari can lose the reply, and then the
+// call never settles (#31). That was seen most right after a reinstall, but also in copies started by
+// Safari's Settings or by runtime.reload. Past this limit a message counts as not delivered.
+const REPLY_TIME_LIMIT_MS = 4000;
+
 // Each background page instance (one per Safari profile) gets its own id so the
 // app can keep profiles apart and notice when Safari restarts.
 const instance = (crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -156,7 +162,8 @@ async function flushSnapshot() {
     } catch (error) {
         console.warn("Side Tabs: snapshot failed", error);
     } finally {
-        // The app may be starting up, or Safari may still be restoring windows: try again.
+        // The app may be starting up, Safari may still be restoring windows, or the reply was lost
+        // (postToApp gives up waiting for it): try again.
         if (!delivered) {
             setTimeout(() => scheduleSnapshot(0), retryDelay);
             retryDelay = Math.min(retryDelay * 2, 15000);
@@ -171,29 +178,149 @@ async function flushSnapshot() {
     }
 }
 
-async function postToApp(message) {
-    try {
-        const reply = await browser.runtime.sendNativeMessage(NATIVE_APP_ID, message);
-        handleReply(reply);
-        return reply;
-    } catch (error) {
-        console.warn("Side Tabs: could not reach the app", error);
-        return null;
-    }
+// Whether any message from this copy has had a reply yet, on time or late. Until one has, the hello is
+// sent again (see sayHello).
+let heardFromApp = false;
+
+// Sends a message to the app. Resolves with the reply, or with null if the message couldn't be
+// delivered: an error, or no reply within REPLY_TIME_LIMIT_MS. It never waits longer than that, so a
+// lost reply can't hold up whatever comes next. A reply that turns up later goes to handleLateReply.
+function postToApp(message) {
+    const sentAt = Date.now();
+    return new Promise((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            noteNoReply(message);
+            resolve(null);
+        }, REPLY_TIME_LIMIT_MS);
+        let call;
+        try {
+            call = Promise.resolve(browser.runtime.sendNativeMessage(NATIVE_APP_ID, message));
+        } catch (error) {
+            call = Promise.reject(error);
+        }
+        call.then((reply) => {
+            heardFromApp = true;
+            if (settled) {
+                handleLateReply(reply, message, Date.now() - sentAt);
+                return;
+            }
+            settled = true;
+            clearTimeout(timer);
+            try {
+                handleReply(reply);
+            } catch (error) {
+                console.warn("Side Tabs: could not handle the app's reply", error);
+            }
+            resolve(reply);
+        }, (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            console.warn("Side Tabs: could not reach the app", error);
+            resolve(null);
+        });
+    });
 }
 
 function handleReply(reply) {
     if (!reply || typeof reply !== "object") return;
     if (reply.needSnapshot) scheduleSnapshot(0);
-    if (Array.isArray(reply.commands)) reply.commands.forEach(runCommand);
+    if (Array.isArray(reply.commands)) reply.commands.forEach((command) => runCommand(command, "reply"));
+}
+
+// A reply that came after its message's time limit. By then the message counted as not delivered,
+// was sent again if it matters, and the app may have moved on. So any commands in it are dropped: a
+// late `activate`, for one, would put Safari back on a tab the user has since left (#20). A request
+// for a snapshot is safe at any time.
+function handleLateReply(reply, message, milliseconds) {
+    noteLateReply(message, milliseconds);
+    if (reply && typeof reply === "object" && reply.needSnapshot) scheduleSnapshot(0);
+}
+
+// Sends a message that the app can safely receive twice, and sends it again, with back-off, until it's
+// delivered or `tries` have failed. Used for `created`: without it, a lost one leaves a bookmark's new
+// tab under Tabs.
+async function postUntilDelivered(message, tries = 3) {
+    for (let attempt = 0; attempt < tries; attempt++) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** (attempt - 1)));
+        const reply = await postToApp(message);
+        if (reply && reply.appRunning) return reply;
+    }
+    return null;
+}
+
+// Puts a line in the app's log (see DEVELOPMENT.md), which names the copy it came from. Only message
+// types, numbers and counts go in it: nothing about the tabs.
+function logToApp(message) {
+    postToApp({ type: "log", instance, message });
+}
+
+// Counts things worth logging, each under its own name, and says whether this one should be logged: the
+// first five, then the 10th, 20th, 50th, 100th, 200th and so on, so something that keeps happening
+// stays in the log without filling it.
+const notedCounts = new Map();
+
+function noteCount(name) {
+    const count = (notedCounts.get(name) ?? 0) + 1;
+    notedCounts.set(name, count);
+    return { count, log: count <= 5 || /^[125]0+$/.test(String(count)) };
+}
+
+// Messages that got no reply in time, and replies that came late, by message type, so the live test can
+// see which copies lose replies, and to what.
+function noteNoReply(message) {
+    if (message.type === "log") return;
+    const { count, log } = noteCount(`no reply:${message.type}`);
+    if (log) logToApp(`no reply within ${REPLY_TIME_LIMIT_MS} ms to "${message.type}" (${count} so far); counted as not delivered`);
+}
+
+function noteLateReply(message, milliseconds) {
+    if (message.type === "log") return;
+    const { count, log } = noteCount(`late reply:${message.type}`);
+    if (log) logToApp(`the reply to "${message.type}" came ${milliseconds} ms after it was sent, past the time limit (${count} so far)`);
 }
 
 // ---------------------------------------------------------------------------
 // Commands from the app
 
-async function runCommand(command) {
+// The ids of the commands run lately, each with how it came (a port's number, or "reply"). The app gives
+// every command an id (ExtensionBridge.send). Safari has delivered a command twice to a copy after the
+// extension reloaded (#37): run twice, a reopened tab opened twice. Ids are unique across launches of the
+// app, so a few hundred is plenty.
+const recentCommands = new Map();
+const RECENT_COMMAND_LIMIT = 300;
+
+// Whether a command with this id has already been run, in which case it's skipped. Commands without an id
+// (from an app older than ids) always run.
+function isRepeat(command, via) {
+    if (command.id == null) return false;
+    const first = recentCommands.get(command.id);
+    if (first !== undefined) {
+        const same = first === via;
+        const { count, log } = noteCount(same ? "repeat:same" : "repeat:other");
+        if (log) {
+            const how = same ? `both times through ${describeVia(via)}` : `first through ${describeVia(first)}, then through ${describeVia(via)}`;
+            logToApp(`skipped a repeated command ("${command.action}"), ${how} (${count} so far ${same ? "the same way" : "two ways"})`);
+        }
+        return true;
+    }
+    recentCommands.set(command.id, via);
+    if (recentCommands.size > RECENT_COMMAND_LIMIT) recentCommands.delete(recentCommands.keys().next().value);
+    return false;
+}
+
+function describeVia(via) {
+    return typeof via === "number" ? `port ${via}` : via;
+}
+
+// Runs a command from the app once. `via` says how it came, for the log: a port's number, or "reply".
+async function runCommand(command, via = "unknown") {
     if (!command || typeof command !== "object") return;
     if (command.instance && command.instance !== instance) return;
+    if (isRepeat(command, via)) return;
 
     try {
         switch (command.action) {
@@ -216,10 +343,20 @@ async function runCommand(command) {
             if (command.index != null) properties.index = command.index;
             const tab = await browser.tabs.create(properties);
             if (command.requestId) {
-                postToApp({ type: "created", instance, requestId: command.requestId, tabId: tab.id });
+                // The app ignores a repeat, so this can be sent again if the first one isn't delivered.
+                postUntilDelivered({ type: "created", instance, requestId: command.requestId, tabId: tab.id });
             }
+            // A closed tab reopened from cleanup's list in another window than the current one (its
+            // own profile's) brings that window forward, so it doesn't open out of sight.
+            if (command.focus) await browser.windows.update(tab.windowId, { focused: true });
             break;
         }
+
+        case "openWindow":
+            // A favorite or pinned item clicked in a window Safari doesn't share with this copy (#41): a new
+            // window of this profile, which it does share, with the page.
+            await browser.windows.create({ url: command.url, focused: true });
+            break;
 
         case "move":
             await browser.tabs.move(command.tabId, { index: command.index });
@@ -269,24 +406,64 @@ async function duplicateTab(tabId) {
     if (tab.url) await browser.tabs.create({ windowId: tab.windowId, index: tab.index + 1, url: tab.url });
 }
 
+// The port the app's commands come through (SFSafariApplication.dispatchMessage). There is only ever one:
+// a second port would get every command too (#37). The current port is the one connected last. It stays
+// current after Safari says it disconnected, until the next one replaces it, so a command that still comes
+// through it meanwhile isn't lost. An older port is disconnected when it's replaced, and anything Safari
+// still delivers through it, a message or a disconnect, is ignored.
 let port = null;
+let portNumber = 0;
+let reconnectTimer = null;
 
 function connectPort() {
+    reconnectTimer = null;
+    const old = port;
+    port = null;
+    if (old) {
+        try {
+            old.disconnect();
+        } catch {
+            // Already gone.
+        }
+    }
+    let current;
     try {
-        port = browser.runtime.connectNative(NATIVE_APP_ID);
-        port.onMessage.addListener((message) => {
-            const payload = message && message.userInfo ? message.userInfo : message;
-            if (payload && Array.isArray(payload.commands)) payload.commands.forEach(runCommand);
-            else runCommand(payload);
-        });
-        port.onDisconnect.addListener(() => {
-            port = null;
-            setTimeout(connectPort, 3000);
-        });
+        current = browser.runtime.connectNative(NATIVE_APP_ID);
     } catch (error) {
         console.warn("Side Tabs: connectNative failed", error);
-        setTimeout(connectPort, 5000);
+        reconnectSoon(5000);
+        return;
     }
+    const number = ++portNumber;
+    port = current;
+    if (number > 1) logToApp(`connected port ${number}`);
+    current.onMessage.addListener((message) => {
+        if (current !== port) {
+            const { count, log } = noteCount("old port message");
+            if (log) logToApp(`ignored a message through port ${number}, which port ${portNumber} replaced (${count} so far)`);
+            return;
+        }
+        const payload = message && message.userInfo ? message.userInfo : message;
+        if (payload && Array.isArray(payload.commands)) payload.commands.forEach((command) => runCommand(command, number));
+        else runCommand(payload, number);
+    });
+    current.onDisconnect.addListener(() => {
+        if (current !== port) {
+            const { count, log } = noteCount("old port disconnect");
+            if (log) logToApp(`ignored a disconnect of port ${number}, which port ${portNumber} replaced (${count} so far)`);
+            return;
+        }
+        const { count, log } = noteCount("disconnect");
+        if (log) logToApp(`port ${number} disconnected (${count} so far); connecting again in 3 s`);
+        reconnectSoon(3000);
+    });
+}
+
+// Connects a new port after `delay`, unless that's already on its way: a second disconnect or a failed
+// connect must not end up with two ports.
+function reconnectSoon(delay) {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(connectPort, delay);
 }
 
 // ---------------------------------------------------------------------------
@@ -444,9 +621,32 @@ async function collectExistingFavicons() {
     }
 }
 
+// The first message: it tells the app this copy has started, and has the extension's handler open the
+// app if it isn't running. Safari can lose the reply (see REPLY_TIME_LIMIT_MS), so it's sent again,
+// with back-off, until any message from this copy has had a reply, a few times at most. Nothing waits
+// for it: snapshots and heartbeats start at once.
+const HELLO_RETRIES = 5;
+
+async function sayHello(attempt = 0) {
+    const reply = await postToApp({ type: "hello", instance, launchApp: true });
+    if (reply || heardFromApp || attempt >= HELLO_RETRIES) return;
+    setTimeout(() => sayHello(attempt + 1), Math.min(1000 * 2 ** attempt, 15000));
+}
+
+// Safari restores windows and tabs for a while after launch, not always with events.
+const STARTUP_REFRESH_MS = [1000, 3000, 6000];
+
+function refreshAfterStart() {
+    scheduleSnapshot(0);
+}
+
 (async function start() {
     try {
-        const window = await browser.windows.getLastFocused();
+        // Not worth waiting long for: focus changes fill this in too.
+        const window = await Promise.race([
+            browser.windows.getLastFocused(),
+            new Promise((resolve) => setTimeout(() => resolve(null), 2000)),
+        ]);
         if (window) {
             lastFocusedWindowId = window.id;
             if (window.focused) focusedWindowId = window.id;
@@ -456,10 +656,9 @@ async function collectExistingFavicons() {
     }
 
     connectPort();
-    await postToApp({ type: "hello", instance, launchApp: true });
+    sayHello();
     scheduleSnapshot(0);
-    // Safari restores windows and tabs for a while after launch, not always with events.
-    for (const delay of [1000, 3000, 6000]) setTimeout(() => scheduleSnapshot(0), delay);
+    for (const delay of STARTUP_REFRESH_MS) setTimeout(refreshAfterStart, delay);
     collectExistingFavicons().catch(() => {});
 
     setInterval(() => postToApp({ type: "heartbeat", instance, seq: sentSeq }), HEARTBEAT_MS);

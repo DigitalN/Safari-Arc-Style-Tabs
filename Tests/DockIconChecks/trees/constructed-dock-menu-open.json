@@ -1,0 +1,17 @@
+{"role":"AXApplication","title":"Dock","children":[
+  {"role":"AXList","frame":[436,916,228,66],"children":[
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Finder","url":"file:///System/Library/CoreServices/Finder.app/","frame":[440,916,56,66]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Safari","url":"file:///System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/","frame":[496,916,56,66],"children":[
+      {"role":"AXMenu","frame":[496,756,220,152],"children":[
+        {"role":"AXMenuItem","title":"New Window","frame":[496,760,220,24]},
+        {"role":"AXMenuItem","title":"New Private Window","frame":[496,784,220,24]},
+        {"role":"AXMenuItem","title":"Options","frame":[496,808,220,24]},
+        {"role":"AXMenuItem","title":"Show All Windows","frame":[496,832,220,24]},
+        {"role":"AXMenuItem","title":"Hide","frame":[496,856,220,24]},
+        {"role":"AXMenuItem","title":"Quit","frame":[496,880,220,24]}
+      ]}
+    ]},
+    {"role":"AXDockItem","subrole":"AXApplicationDockItem","title":"Mail","url":"file:///System/Applications/Mail.app/","frame":[552,916,56,66]},
+    {"role":"AXDockItem","subrole":"AXTrashDockItem","title":"Trash","url":"file:///Users/tester/.Trash/","frame":[608,916,56,66]}
+  ]}
+]}

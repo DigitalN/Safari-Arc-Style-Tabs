@@ -1,0 +1,20 @@
+{"role":"AXWindow","subrole":"AXStandardWindow","frame":[100,39,1200,800],"children":[
+  {"role":"AXSplitGroup","frame":[100,119,1200,720],"children":[
+    {"role":"AXSplitter","frame":[100,119,0,720]},
+    {"role":"AXTabGroup","frame":[100,119,1200,720],"children":[
+      {"role":"AXGroup","identifier":"BrowserView?tab=1","frame":[100,119,1200,720]}
+    ]}
+  ]},
+  {"role":"AXToolbar","frame":[100,39,1200,52],"children":[
+    {"role":"AXButton","identifier":"SidebarButton","frame":[180,52,28,26]},
+    {"role":"AXGroup","frame":[300,45,800,40],"children":[
+      {"role":"AXOpaqueProviderGroup","subrole":"AXOpaqueProviderList","identifier":"TabBar?isSeparate=false","frame":[300,45,800,40]}
+    ]}
+  ]},
+  {"role":"AXGroup","identifier":"FavoritesBarView","description":"Favourites Bar","frame":[100,91,1200,28],"children":[
+    {"role":"AXButton","description":"Test bookmark","frame":[110,95,90,20]}
+  ]},
+  {"role":"AXButton","subrole":"AXCloseButton","frame":[112,57,14,16]},
+  {"role":"AXButton","subrole":"AXFullScreenButton","frame":[152,57,14,16]},
+  {"role":"AXButton","subrole":"AXMinimizeButton","frame":[132,57,14,16]}
+]}

@@ -3,7 +3,7 @@ import os.log
 import Observation
 
 /// Everything the sidebar shows: Safari's windows and tabs (from the extension), the
-/// user's bookmarks, and the custom names given to tabs.
+/// user's favorites and pinned items, and the custom names given to tabs.
 @Observable
 final class TabStore {
     struct WindowSelection: Equatable {
@@ -79,24 +79,82 @@ final class TabStore {
         var atMilliseconds: Double { (at.timeIntervalSince1970 * 1000).rounded(.down) }
     }
 
-    private(set) var snapshots: [String: Snapshot] = [:]
-    private(set) var lastMessageAt: Date?
-    private(set) var bookmarks: [Bookmark] = []
+    private(set) var snapshots: [String: Snapshot] = [:] {
+        // Any change to which tab is active (a snapshot, a report of a switch, a click) starts or
+        // stops a tab's cleanup clock.
+        didSet {
+            cleanup.snapshotsChanged(from: oldValue, to: snapshots)
+            settleSwitchPreview()
+        }
+    }
+    /// Closes tabs nobody has looked at for a while, when that's turned on, and keeps the list for
+    /// reopening them (TabCleanup.swift).
+    let cleanup = TabCleanup()
+    /// When the extension last sent anything, on the awake clock (`uptime`), so sleep isn't silence (#45).
+    private(set) var lastMessageAt: TimeInterval?
+    /// Favorites, shared by every profile, and each profile's Pinned list (#34, BookmarkLists.swift).
+    private(set) var bookmarkLists = BookmarkLists()
     private(set) var customNames: [TabKey: CustomName] = [:]
-    private(set) var bookmarkLinks: [UUID: TabKey] = [:]
+    /// The tabs that belong to favorites and pinned items, listed under them instead of under Tabs
+    /// (see BookmarkTabs).
+    private(set) var bookmarkTabs = BookmarkTabs()
 
     var renaming: RenameTarget?
 
     /// Hints from SafariTracker, used to pick the window the sidebar is docked to.
-    var safariIsFrontmost = false
+    var safariIsFrontmost = false {
+        didSet {
+            // Safari can hold a copy back while it's in the background (#45).
+            if safariIsFrontmost, !oldValue {
+                safariCameToFront()
+            }
+        }
+    }
     var dockedWindowTitle: String? {
         didSet {
             if dockedWindowTitle != oldValue {
                 requestSnapshotIfUnknown(title: dockedWindowTitle)
+                logShownSpace()
             }
         }
     }
     @ObservationIgnored private var lastSnapshotRequest = Date.distantPast
+    /// The docked window's profile, read from its toolbar by SafariProfiles (#33), as `ProfileKey.rawValue`:
+    /// "default", or the profile's UUID as its copy's snapshots carry it. Nil while it isn't known, in a private
+    /// window, and where Safari has no profiles. `currentWindow` takes the docked window from that profile's copy.
+    var dockedWindowProfile: String?
+    /// The docked window is a private window: in a Safari with profiles, the one kind of window without a
+    /// profile button (SafariProfiles). Its copy is the default profile's.
+    var dockedWindowIsPrivate = false
+    /// How many of Safari's windows are like the docked one, from their toolbars (SafariProfiles): of its
+    /// profile, or private. A copy that lists that many can see them all, and is only behind on a title.
+    var dockedLikeWindowCount: Int? {
+        didSet { settleSwitchPreview() }
+    }
+    /// The docked window has been open long enough for its copy to have reported it: about 2 s, and longer
+    /// right after Side Tabs starts (SafariProfiles). Before that, a copy that doesn't list it yet says nothing.
+    var dockedWindowSettled = false {
+        didSet { settleSwitchPreview() }
+    }
+
+    /// What the sidebar shows while a profile switch's window comes back from the Dock (#44): its guess at
+    /// the switch's profile and window, in place of `currentWindow`, until Safari reports.
+    struct SwitchPreview: Equatable {
+        /// The switch's: a newer click supersedes it.
+        let id: Int
+        let profile: ProfileKey
+        var guess: SwitchGuess
+        /// Safari has shown the switch's profile in front: the preview ends as soon as the sidebar's own choice
+        /// is a window of that profile.
+        var reported = false
+    }
+    /// Nil when the sidebar follows Safari, as it does but for a switch's window coming back from the Dock.
+    private(set) var switchPreview: SwitchPreview?
+    /// The sidebar's fade over to a switch's profile (SidebarFade): one set of sections, faded out over what was
+    /// shown, swapped while nothing shows, and faded back in. Only a preview's start sets it going.
+    private(set) var sidebarFade = SidebarFade()
+    /// What the sidebar showed when the fade began, kept on screen while it fades out.
+    private(set) var fadingOutContent: ShownContent?
 
     @ObservationIgnored var sendCommand: (([String: Any]) -> Void)?
     @ObservationIgnored var onToggleSidebar: (() -> Void)?
@@ -104,6 +162,11 @@ final class TabStore {
     @ObservationIgnored var onOpenAddressBar: (() -> Void)?
     /// When the pointer last went down on the sidebar, so a switch is timed from the click.
     @ObservationIgnored var lastPointerDown: (() -> Date)?
+    /// With "Minimize other profiles' windows" on (#42), switches to the profile with this key (a snapshot's
+    /// `profile`) the way its button does, when it isn't the current profile, so a closed tab of it can reopen
+    /// in its window, which may be minimized. Says whether a switch started; the closure it's given runs on the
+    /// main thread once it's done, with whether the profile's window came to the front.
+    @ObservationIgnored var switchProfileFirst: ((_ profile: String?, _ then: @escaping (Bool) -> Void) -> Bool)?
     /// Switches a tab by pressing its button in Safari's tab bar (see TabBarPresser). The
     /// completion runs on the main thread and says whether it worked or the extension has to do it.
     @ObservationIgnored var pressTab: ((TabBarTarget, @escaping (TabBarPressOutcome) -> Void) -> Void)?
@@ -114,7 +177,9 @@ final class TabStore {
     /// Names whose tab ids are gone (Safari restarted), keyed by URL so they can be
     /// given back to the restored tabs.
     @ObservationIgnored private var orphanNames: [String: String] = [:]
-    @ObservationIgnored private var pendingBookmarkOpens: [String: (bookmark: UUID, at: Date)] = [:]
+    /// Tabs being opened for bookmarks, by request id. `tab` is set once the extension says which
+    /// tab it opened, which can be before a snapshot has it.
+    @ObservationIgnored private var pendingBookmarkOpens: [String: (bookmark: UUID, windowId: Int, at: Date, tab: TabKey?)] = [:]
     @ObservationIgnored private var saveWork: DispatchWorkItem?
     /// The last tab switch the sidebar asked for, until Safari confirms it or it goes stale.
     @ObservationIgnored private var pendingActivation: PendingActivation?
@@ -139,12 +204,31 @@ final class TabStore {
     init(stateURL: URL = TabStore.defaultStateURL) {
         self.stateURL = stateURL
         load()
+        cleanup.onChange = { [weak self] in self?.scheduleSave() }
+        // Copies already running haven't spoken to this launch of Side Tabs yet (#45).
+        noteChance(at: uptime())
+        scheduleQuietCheck()
     }
 
     // MARK: - Messages from the extension
 
     func handleMessage(type: String, payload: Data, object: [String: Any]) -> [String: Any] {
-        lastMessageAt = Date()
+        lastMessageAt = uptime()
+        let sender = hear(from: object)
+        if sender == .replaced {
+            return [:]
+        }
+        var reply = answer(type: type, payload: payload, object: object)
+        if sender == .backFromQuiet, let instance = object["instance"] as? String {
+            // Its snapshot is from before it went quiet. The extension acts on `needSnapshot` in any reply,
+            // but replies get lost (#37), so it's asked with a command too.
+            reply["needSnapshot"] = true
+            send(["action": "snapshot"], to: instance)
+        }
+        return reply
+    }
+
+    private func answer(type: String, payload: Data, object: [String: Any]) -> [String: Any] {
         switch type {
         case "snapshot":
             do {
@@ -167,7 +251,9 @@ final class TabStore {
         case "log":
             // Something the extension wants in the system log, which is where its console
             // output can be read without Safari's developer tools.
-            log.notice("extension: \(object["message"] as? String ?? "", privacy: .public)")
+            // Each copy of the extension sends its own, so the line says which (#37).
+            let copy = (object["instance"] as? String).map { " \($0.prefix(8))" } ?? ""
+            log.notice("extension\(copy, privacy: .public): \(object["message"] as? String ?? "", privacy: .public)")
             return [:]
 
         case "hello":
@@ -178,6 +264,11 @@ final class TabStore {
             let instance = object["instance"] as? String ?? ""
             let seq = object["seq"] as? Int ?? 0
             let applied = snapshots[instance]?.seq ?? -1
+            if !instance.isEmpty, applied < seq || snapshots[instance] == nil {
+                // A snapshot is missing. The reply asks for it, but replies can be lost for minutes after
+                // the extension reloads (#37), so a command asks too: it doesn't depend on the reply.
+                send(["action": "snapshot"], to: instance)
+            }
             return ["needSnapshot": applied < seq || seq == 0]
 
         case "toggleSidebar":
@@ -188,8 +279,10 @@ final class TabStore {
             if let requestId = object["requestId"] as? String,
                let instance = object["instance"] as? String,
                let tabId = object["tabId"] as? Int,
-               let pending = pendingBookmarkOpens.removeValue(forKey: requestId) {
-                bookmarkLinks[pending.bookmark] = TabKey(instance: instance, tabId: tabId)
+               let pending = pendingBookmarkOpens[requestId], pending.tab == nil {
+                let key = TabKey(instance: instance, tabId: tabId)
+                pendingBookmarkOpens[requestId]?.tab = key
+                linkOpenedTab(key, to: pending.bookmark, windowId: pending.windowId)
             }
             return [:]
 
@@ -206,11 +299,12 @@ final class TabStore {
         snapshots[snapshot.instance] = snapshot
         let tabCounts = snapshot.windows.map { String($0.tabs.count) }.joined(separator: "+")
         log.info("snapshot \(snapshot.seq) from \(snapshot.instance.prefix(8), privacy: .public): \(snapshot.windows.count) windows, tabs \(tabCounts, privacy: .public), focused \(snapshot.focusedWindowId ?? -1)")
+        compareWithReplaced(snapshot)
         if isNewInstance {
             orphanNamesOfDeadInstances()
         }
         reconcileNames(with: snapshot)
-        pruneBookmarkLinks()
+        updateBookmarkTabs(with: snapshot)
 
         // A report sent after this snapshot was started can have arrived first. The snapshot
         // may not know about it yet, so it must not move the highlight back. (Not one that was
@@ -478,9 +572,15 @@ final class TabStore {
         anchors.removeAll()
         pendingActivation = nil
         orphanNamesOfDeadInstances()
-        bookmarkLinks.removeAll()
+        changeBookmarkTabs { $0.safariDidTerminate() }
         pendingBookmarkOpens.removeAll()
         renaming = nil
+        copies.removeAll()
+        replacedCopies.removeAll()
+        replacedIds.removeAll()
+        if !liveInstances.isEmpty {
+            liveInstances.removeAll()
+        }
     }
 
     func requestSnapshot() {
@@ -503,45 +603,438 @@ final class TabStore {
         }
     }
 
+    // MARK: - Copies of the extension
+    //
+    // Each Safari profile where Side Tabs is on runs its own copy of the extension's background page, with
+    // its own instance id (#28). A copy stops when Side Tabs is turned off in its profile, when the extension
+    // reloads or is reinstalled (a new copy, with a new id, takes over), or when Safari quits. None of these
+    // says goodbye, so a copy is judged by what it sends (#31):
+    //
+    // - Quiet: nothing of any kind from it for `quietAfter`, while it could have spoken (#45, CopySilence):
+    //   the Mac asleep, the screen locked and the like don't count, and when they end every copy starts
+    //   over. Its windows aren't shown. Its snapshot stays in `snapshots`, and with it its bookmarks' tabs
+    //   and cleanup's clocks, because under heavy load a copy that is running has gone that long without a
+    //   word. Anything it sends shows its windows again.
+    // - Gone: a newer copy of the same profile has reported (`replace`), or Safari quit
+    //   (`safariDidTerminate`). Only then does its snapshot go, through the paths for an instance that's
+    //   gone: its clocks are dropped and its bookmarks' tabs wait to be re-linked to the new copy's.
+    //
+    // Times here are on the Mac's awake clock (`uptime`), which stops while it sleeps.
+
+    /// One copy of the extension's background page.
+    private struct Copy {
+        /// The copy's profile, as the extension's handler names it (`Snapshot.profile`): a UUID string,
+        /// or nil for the default profile.
+        var profile: String?
+        /// When anything last came from it.
+        var lastHeard: TimeInterval
+        /// When Safari came to the front while it was silent, if it has since it last spoke: its silence
+        /// counts from then. Once per silence, so a copy that has stopped still goes quiet (`safariCameToFront`).
+        var extraChance: TimeInterval?
+        /// It went quiet with Safari in the background, where Safari can hold its timers back.
+        var quietInBackground = false
+        /// It's live again on that extra chance, without having spoken.
+        var onExtraChance = false
+    }
+
+    /// What a message says about the copy that sent it (see `hear`).
+    private enum Sender {
+        /// A copy that's running, or a message that doesn't say which copy sent it.
+        case live
+        /// A copy that was quiet. Its windows show again, and it's asked for a new snapshot.
+        case backFromQuiet
+        /// A copy that a newer copy of its profile has replaced. The message was already on its way; it's ignored.
+        case replaced
+    }
+
+    /// How long a copy can go without sending anything, while it could speak, before it counts as quiet and
+    /// its windows are hidden. It sends a heartbeat every 5 s, but under heavy load the extension has run up
+    /// to 20 s late (#16–#22).
+    static let quietAfter = CopySilence.allowance
+    /// How often copies are checked for having gone quiet, while there are any.
+    static let quietCheckInterval: TimeInterval = 5
+
+    /// The copies of the extension that are running now: heard from within `quietAfter`, and not replaced by a
+    /// newer copy of their profile. By instance id, as in `snapshots` and `TabKey`. Read-only.
+    ///
+    /// For telling whether Side Tabs is on in a profile (#33), see `hasLiveCopy(profile:)`. A copy that isn't
+    /// live may still have a snapshot in `snapshots` (a quiet copy keeps it), but its windows aren't shown.
+    /// Quiet usually means stopped, but it can also be a copy held up by heavy load: it's live again as soon
+    /// as it sends anything.
+    private(set) var liveInstances: Set<String> = []
+
+    /// Whether a live copy (see `liveInstances`) reports for `profile`: a profile's UUID string as
+    /// `Snapshot.profile` has it, or nil for the default profile.
+    func hasLiveCopy(profile: String?) -> Bool {
+        liveInstances.contains { copies[$0]?.profile == profile }
+    }
+
+    /// The snapshots of the live copies: the windows the sidebar can show, the tabs cleanup can close and the
+    /// windows it reopens tabs in. A quiet copy's snapshot stays in `snapshots`, but isn't here.
+    var liveSnapshots: [String: Snapshot] {
+        snapshots.filter { liveInstances.contains($0.key) }
+    }
+
+    /// Whether every copy has had its chance to speak since listening started: Side Tabs starting or Safari
+    /// launching, and again after a hold that began before they had (CopySilence). Until then, a profile
+    /// with no live copy may only have a copy that hasn't spoken yet, so Side Tabs doesn't count as off in
+    /// it (#33, #45).
+    private(set) var copiesHaveHadTheirChance = false
+
+    /// Reads the wall-clock time, for the sidebar's fade (#44). Only the checks in Tests/ pass anything else.
+    @ObservationIgnored var clock: () -> Date = { Date() }
+    /// Reads the Mac's awake time, which stops while it sleeps, for telling which copies are quiet (#45).
+    /// Only the checks in Tests/ pass anything else.
+    @ObservationIgnored var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// Reads what's holding Safari's copies back now (HoldWatcher): the Mac asleep, the screen locked and
+    /// the like. Read at every check, and whenever `holdsMayHaveChanged` says to. Only the checks in Tests/
+    /// pass anything else.
+    @ObservationIgnored var currentHolds: () -> Set<CopySilence.Hold> = { [] }
+    /// When copies could speak, and since when their silence counts.
+    @ObservationIgnored private var silence = CopySilence(listeningSince: ProcessInfo.processInfo.systemUptime)
+    /// The copies heard from since Safari started, apart from replaced ones, by instance id.
+    @ObservationIgnored private var copies: [String: Copy] = [:]
+    /// Copies a newer copy of their profile replaced, and when.
+    @ObservationIgnored private var replacedCopies: [String: TimeInterval] = [:]
+    /// For a copy that replaced another: the replaced copy's window and tab ids, and the most of them it has
+    /// reported so far (see `compareWithReplaced`).
+    @ObservationIgnored private var replacedIds: [String: (since: TimeInterval, windows: Set<Int>, tabs: Set<Int>, most: Int)] = [:]
+    @ObservationIgnored private var quietCheckScheduled = false
+    /// A look at `copiesHaveHadTheirChance` for when they will have.
+    @ObservationIgnored private var chanceCheck: DispatchWorkItem?
+
+    /// Notes a message from a copy of the extension.
+    ///
+    /// A copy not heard from before replaces any other copy of its profile: when the extension reloads or is
+    /// reinstalled, Safari stops the old copy and starts a new one. Messages from a replaced copy after that
+    /// were already on their way, and are ignored. If one keeps sending for `quietAfter`, though, it's running
+    /// after all (a second Safari, say); it's taken back, without replacing anything in turn.
+    private func hear(from object: [String: Any]) -> Sender {
+        guard let instance = object["instance"] as? String else { return .live }
+        let now = uptime()
+        let profile = object["profile"] as? String
+        if let replacedAt = replacedCopies[instance] {
+            let since = now - replacedAt
+            guard since >= Self.quietAfter else {
+                log.notice("ignoring a message from extension copy \(instance.prefix(8), privacy: .public), replaced \(Int(since)) s ago")
+                return .replaced
+            }
+            replacedCopies[instance] = nil
+            copies[instance] = Copy(profile: profile, lastHeard: now)
+            liveInstances.insert(instance)
+            log.notice("extension copy \(instance.prefix(8), privacy: .public) was replaced \(Int(since)) s ago but is still sending; taking it back")
+            return .backFromQuiet
+        }
+        guard var copy = copies[instance] else {
+            log.notice("new extension copy \(instance.prefix(8), privacy: .public), \(Self.describe(profile), privacy: .public)")
+            for (other, known) in copies where known.profile == profile {
+                replace(other, by: instance, at: now)
+            }
+            copies[instance] = Copy(profile: profile, lastHeard: now)
+            liveInstances.insert(instance)
+            scheduleQuietCheck()
+            return .live
+        }
+        let silence = now - copy.lastHeard
+        if copy.onExtraChance {
+            log.notice("extension copy \(instance.prefix(8), privacy: .public) is sending again, \(Int(now - (copy.extraChance ?? now))) s after Safari came to the front")
+        }
+        copy.lastHeard = now
+        copy.extraChance = nil
+        copy.quietInBackground = false
+        copy.onExtraChance = false
+        if let profile {
+            copy.profile = profile
+        }
+        copies[instance] = copy
+        guard !liveInstances.contains(instance) else { return .live }
+        liveInstances.insert(instance)
+        log.notice("extension copy \(instance.prefix(8), privacy: .public) is sending again after \(Int(silence)) s; showing its windows")
+        return .backFromQuiet
+    }
+
+    /// `old` has stopped for good, because `new`, a newer copy of the same profile, has reported. Its snapshot
+    /// goes, and with it cleanup's clocks for its tabs (TabCleanup.noteViewing). Its bookmarks' tabs and its
+    /// tabs' custom names go to `new`'s tabs on the same pages when `new` sends its first snapshot
+    /// (BookmarkTabs.update and orphanNamesOfDeadInstances, as after Safari restarts).
+    private func replace(_ old: String, by new: String, at now: TimeInterval) {
+        copies[old] = nil
+        replacedCopies[old] = now
+        if liveInstances.contains(old) {
+            liveInstances.remove(old)
+        }
+        lastActivation[old] = nil
+        anchors = anchors.filter { $0.key.instance != old }
+        switchAsks.removeAll { $0.key.instance == old }
+        if pendingActivation?.key.instance == old {
+            pendingActivation = nil
+        }
+        guard let snapshot = snapshots[old] else {
+            log.notice("extension copy \(old.prefix(8), privacy: .public) is replaced by \(new.prefix(8), privacy: .public), a newer copy of its profile; it had sent no snapshot")
+            return
+        }
+        snapshots[old] = nil
+        let tabs = Set(snapshot.windows.flatMap(\.tabs).map(\.id))
+        replacedIds[new] = (now, Set(snapshot.windows.map(\.id)), tabs, -1)
+        log.notice("extension copy \(old.prefix(8), privacy: .public) is replaced by \(new.prefix(8), privacy: .public), a newer copy of its profile; dropping its \(snapshot.windows.count) windows and \(tabs.count) tabs")
+    }
+
+    /// Logs how many of a replaced copy's window and tab ids the copy that replaced it reports: from its first
+    /// snapshot, and again whenever more of them turn up, for `quietAfter`. It says whether Safari keeps tab ids
+    /// when the extension reloads or is reinstalled. If it does, bookmarks' tabs could move to the new copy
+    /// instead of waiting for a tab on the saved page. Counts only.
+    private func compareWithReplaced(_ snapshot: Snapshot) {
+        guard let old = replacedIds[snapshot.instance] else { return }
+        guard uptime() - old.since < Self.quietAfter else {
+            replacedIds[snapshot.instance] = nil
+            return
+        }
+        let tabs = Set(snapshot.windows.flatMap(\.tabs).map(\.id))
+        let windows = Set(snapshot.windows.map(\.id))
+        let sameTabs = tabs.intersection(old.tabs).count
+        let sameWindows = windows.intersection(old.windows).count
+        guard sameTabs + sameWindows > old.most else { return }
+        replacedIds[snapshot.instance]?.most = sameTabs + sameWindows
+        log.notice("new extension copy \(snapshot.instance.prefix(8), privacy: .public) reports \(tabs.count) tabs in \(windows.count) windows: \(sameTabs) of the replaced copy's \(old.tabs.count) tab ids and \(sameWindows) of its \(old.windows.count) window ids are among them")
+    }
+
+    /// Hides the windows of copies that have sent nothing for `quietAfter` while they could have spoken.
+    /// Runs every few seconds while there are copies, while they may not all have spoken yet, and during a
+    /// hold.
+    func noteQuietCopies() {
+        noteHolds()
+        let now = uptime()
+        for (instance, copy) in copies where liveInstances.contains(instance) {
+            let counted = silence.silence(lastHeard: copy.lastHeard, extraChance: copy.extraChance, at: now)
+            guard counted >= Self.quietAfter else { continue }
+            liveInstances.remove(instance)
+            copies[instance]?.quietInBackground = !safariIsFrontmost
+            copies[instance]?.onExtraChance = false
+            let heard = Int(now - copy.lastHeard)
+            let before = heard > Int(counted) + 1 ? " (\(heard) s since it last spoke)" : ""
+            log.notice("extension copy \(instance.prefix(8), privacy: .public) has sent nothing for \(Int(counted)) s\(before, privacy: .public)\(self.safariIsFrontmost ? "" : ", Safari in the background", privacy: .public); hiding its \(self.snapshots[instance]?.windows.count ?? 0) windows until it does")
+        }
+        noteChance(at: now)
+    }
+
+    /// Something that can hold Safari's copies back has changed (HoldWatcher): the Mac slept or woke, the
+    /// screen locked or unlocked, Safari was hidden or shown, and so on. Takes `currentHolds` at once, so a
+    /// wake starts every copy over before any check can find it silent.
+    func holdsMayHaveChanged() {
+        noteHolds()
+        noteChance(at: uptime())
+        scheduleQuietCheck()
+    }
+
+    /// Safari has launched: its copies are all new, and none has spoken yet. Until they've had the time to,
+    /// Side Tabs doesn't count as off in any profile (`copiesHaveHadTheirChance`).
+    func safariDidLaunch() {
+        let now = uptime()
+        silence.startListening(at: now)
+        log.notice("Safari launched; no profile counts as off for \(Int(Self.quietAfter)) s while its extension copies start")
+        noteChance(at: now)
+        scheduleQuietCheck()
+    }
+
+    /// Takes what's holding the copies back now. When the last hold ends, every copy starts over with a whole
+    /// `quietAfter` to speak, and is asked for a snapshot at once, so the sidebar is current within a moment
+    /// of waking.
+    private func noteHolds() {
+        let held = currentHolds()
+        let before = silence.holds
+        guard held != before else { return }
+        if silence.update(holds: held, at: uptime()) {
+            log.notice("the extension's copies are no longer held back by \(CopySilence.describe(before), privacy: .public): each has \(Int(Self.quietAfter)) s to speak before it counts as quiet; asking each for a snapshot")
+            requestSnapshot()
+        } else if before.isEmpty {
+            log.notice("the extension's copies are held back by \(CopySilence.describe(held), privacy: .public); their silence doesn't count until that ends")
+        } else {
+            log.notice("the extension's copies are held back by \(CopySilence.describe(held), privacy: .public)")
+        }
+    }
+
+    /// Updates `copiesHaveHadTheirChance`, and looks again when they will have.
+    private func noteChance(at now: TimeInterval) {
+        let had = silence.copiesHaveHadTheirChance(at: now)
+        if copiesHaveHadTheirChance != had {
+            copiesHaveHadTheirChance = had
+            if had {
+                log.notice("every extension copy has had \(Int(Self.quietAfter)) s to speak; Side Tabs can count as off in a profile again")
+            }
+        }
+        chanceCheck?.cancel()
+        chanceCheck = nil
+        // During a hold it can't be told; the hold's end looks again.
+        guard !had, let wait = silence.timeUntilCopiesHaveHadTheirChance(at: now) else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.chanceCheck = nil
+            self.noteHolds()
+            self.noteChance(at: self.uptime())
+        }
+        chanceCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait + 0.05, execute: work)
+    }
+
+    /// Safari came to the front. In the background, Safari can hold its extensions' timers back (its windows
+    /// covered, say), so each copy that's silent now gets one more chance per silence: its silence counts from
+    /// now. A copy that went quiet with Safari in the background shows its windows again meanwhile, and is
+    /// asked for a snapshot. One that went quiet with Safari in front had its chance, and stays quiet; so does
+    /// one that has had its extra chance and still not spoken, which is how a copy that has stopped goes quiet
+    /// however often Safari comes to the front.
+    private func safariCameToFront() {
+        let now = uptime()
+        for (instance, copy) in copies where copy.extraChance == nil {
+            if liveInstances.contains(instance) {
+                copies[instance]?.extraChance = now
+            } else if copy.quietInBackground {
+                copies[instance]?.extraChance = now
+                copies[instance]?.onExtraChance = true
+                liveInstances.insert(instance)
+                log.notice("extension copy \(instance.prefix(8), privacy: .public) went quiet with Safari in the background; Safari is in front now, so its \(self.snapshots[instance]?.windows.count ?? 0) windows show again while it has \(Int(Self.quietAfter)) s more to speak")
+                send(["action": "snapshot"], to: instance)
+            }
+        }
+    }
+
+    private func scheduleQuietCheck() {
+        guard !quietCheckScheduled else { return }
+        quietCheckScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.quietCheckInterval) { [weak self] in
+            guard let self else { return }
+            self.quietCheckScheduled = false
+            self.noteQuietCopies()
+            if !self.copies.isEmpty || !self.copiesHaveHadTheirChance || !self.silence.holds.isEmpty {
+                self.scheduleQuietCheck()
+            }
+        }
+    }
+
+    /// A profile for the log: its UUID's first characters, never its name.
+    private static func describe(_ profile: String?) -> String {
+        profile.map { "profile \($0.prefix(8))" } ?? "default profile"
+    }
+
     // MARK: - Window selection
 
     var hasData: Bool { !snapshots.isEmpty }
 
     var isConnected: Bool {
         guard let lastMessageAt else { return false }
-        return Date().timeIntervalSince(lastMessageAt) < 60
+        return uptime() - lastMessageAt < 60
     }
 
     /// True when Safari reports tabs but no URLs or titles, which means the extension
     /// hasn't been allowed on websites yet.
     var lacksWebsiteAccess: Bool {
-        let tabs = snapshots.values.flatMap { $0.windows.flatMap(\.tabs) }
+        let tabs = liveSnapshots.values.flatMap { $0.windows.flatMap(\.tabs) }
         return !tabs.isEmpty && tabs.allSatisfy { $0.url == nil && $0.title == nil }
     }
 
     /// The Safari window the sidebar shows: the one most recently focused, cross-checked
-    /// against the title of the window the panel is docked to.
+    /// against the title of the window the panel is docked to. Only live copies' windows count.
     var currentWindow: WindowSelection? {
-        let ordered = snapshots.values.sorted { $0.focusChangedAt > $1.focusChangedAt }
+        // Another profile's window is never shown for one its own copy can't see (#41).
+        if unseenDockedWindow != nil { return nil }
+        let ordered = liveSnapshots.values.sorted { $0.focusChangedAt > $1.focusChangedAt }
         var best: WindowSelection?
-        for snapshot in ordered {
+        // Not simply the newest focus change: a copy that lost focus reports that too (#36).
+        let ranked = Self.ranked(ordered, dockedProfile: dockedWindowProfile)
+        for snapshot in ranked {
             let focused = (snapshot.focusedWindowId ?? -1) >= 0 ? snapshot.focusedWindowId : snapshot.lastFocusedWindowId
             if let focused, let window = snapshot.windows.first(where: { $0.id == focused }) {
                 best = WindowSelection(instance: snapshot.instance, window: window)
                 break
             }
         }
-        if best == nil, let snapshot = ordered.first(where: { !$0.windows.isEmpty }) {
+        if best == nil, let snapshot = ranked.first(where: { !$0.windows.isEmpty }) {
             best = WindowSelection(instance: snapshot.instance, window: snapshot.windows[0])
         }
 
         if let title = dockedWindowTitle, !title.isEmpty, let current = best {
-            let matches = dockedWindows(title: title)
+            // Another profile's window on the same page isn't the docked one, once its profile is known.
+            let dockedCopies = Set(ranked.filter { Self.isCopy($0, of: dockedWindowProfile) }.map(\.instance))
+            let matches = dockedWindows(title: title).filter { dockedCopies.isEmpty || dockedCopies.contains($0.instance) }
             if matches.count == 1, matches[0] != current {
                 return matches[0]
             }
         }
         return best
+    }
+
+    /// The docked window, when the extension copy it belongs to can't see it (#41).
+    struct UnseenWindow: Equatable {
+        /// Its profile; nil for a private window.
+        let profile: ProfileKey?
+        /// The copy that should list it, but doesn't.
+        let instance: String
+    }
+
+    /// The docked window, while its profile's live copy lists no window that matches it. After the extension
+    /// reloads (every update), Safari keeps a non-default profile's windows that were already open from that
+    /// profile's copy (#41, and #28 before it). The sidebar then lists the window's tabs from its tab bar
+    /// rather than another window's (UnseenWindowTabs). Nil while its profile isn't known, while it has no
+    /// live copy (Side Tabs is off there, which SafariProfiles handles), and when the copy can see it.
+    var unseenDockedWindow: UnseenWindow? {
+        guard dockedWindowSettled, let copy = Self.copyMissingDockedWindow(
+            profile: dockedWindowProfile, isPrivate: dockedWindowIsPrivate, title: dockedWindowTitle,
+            likeWindows: dockedLikeWindowCount, among: Array(liveSnapshots.values)
+        ) else { return nil }
+        return UnseenWindow(profile: dockedWindowIsPrivate ? nil : dockedWindowProfile.map(ProfileKey.init(rawValue:)), instance: copy.instance)
+    }
+
+    /// The live copy that should list the docked window but doesn't, if there is one: the copy of `profile`
+    /// (the default profile's for a private window) lists none of its windows (private ones for a private
+    /// window), or none whose tabs fit `title`, the docked window's, while Safari has more windows like it
+    /// (`likeWindows`) than the copy lists. One that lists as many can see them all and is only behind on a
+    /// title (a page that has just loaded). Any tab counts, not only the active one, for the same reason.
+    static func copyMissingDockedWindow(profile: String?, isPrivate: Bool, title: String?, likeWindows: Int?, among copies: [Snapshot]) -> Snapshot? {
+        guard let profile = isPrivate ? "default" : profile else { return nil }
+        let own = copies.filter { isCopy($0, of: profile) }.sorted { $0.focusChangedAt > $1.focusChangedAt }
+        guard let newest = own.first else { return nil }
+        let windows = own.flatMap(\.windows).filter { $0.incognito == isPrivate }
+        if windows.isEmpty {
+            return newest
+        }
+        guard let title, !title.isEmpty else { return nil }
+        let fits = windows.contains { window in
+            window.tabs.contains { tab in
+                guard let page = tab.title, !page.isEmpty else { return false }
+                return isPrivate ? title.contains(page) : page == title || title.hasSuffix(" — " + page)
+            }
+        }
+        if fits {
+            return nil
+        }
+        if let likeWindows, windows.count >= likeWindows {
+            return nil
+        }
+        return newest
+    }
+
+    /// The order `currentWindow` tries the extension copies in (#36), from `ordered`, newest focus change first:
+    ///
+    /// 1. The copy of the docked window's profile, which is known from the window's toolbar
+    ///    (`dockedWindowProfile`), whatever the copies' focus reports say.
+    /// 2. Copies that have a focused window. A copy that loses focus to another profile's window can't see that
+    ///    window, so it reports none, often with a newer time than the copy that gained it. It mustn't come first.
+    /// 3. The rest, whose last focused window decides only when no copy has a focused one (Safari in the
+    ///    background, or the gaining copy's report still on its way).
+    static func ranked(_ ordered: [Snapshot], dockedProfile: String?) -> [Snapshot] {
+        func rank(_ snapshot: Snapshot) -> Int {
+            if isCopy(snapshot, of: dockedProfile) { return 0 }
+            return (snapshot.focusedWindowId ?? -1) >= 0 ? 1 : 2
+        }
+        return ordered.enumerated()
+            .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
+            .map(\.element)
+    }
+
+    /// Whether `snapshot` is from the copy of `profile` (a `ProfileKey.rawValue`; the default profile's copy sends
+    /// no profile).
+    private static func isCopy(_ snapshot: Snapshot, of profile: String?) -> Bool {
+        guard let profile else { return false }
+        return (snapshot.profile ?? "default") == profile
     }
 
     private func activeTitle(of window: BrowserWindow) -> String? {
@@ -560,7 +1053,7 @@ final class TabStore {
     /// the right window; the shorter one would need the profile to be called "Docs".
     private func dockedWindows(title: String) -> [WindowSelection] {
         var matches: [(selection: WindowSelection, length: Int)] = []
-        for snapshot in snapshots.values {
+        for snapshot in liveSnapshots.values {
             for window in snapshot.windows {
                 guard let active = activeTitle(of: window), !active.isEmpty else { continue }
                 if active == title || title.hasSuffix(" — " + active) || window.incognito && title.contains(active) {
@@ -620,8 +1113,8 @@ final class TabStore {
                 customNames[key] = CustomName(name: name, url: tab?.url)
             }
         case .bookmark(let id):
-            if !name.isEmpty, let index = bookmarks.firstIndex(where: { $0.id == id }) {
-                bookmarks[index].title = name
+            if !name.isEmpty {
+                bookmarkLists.update(id) { $0.title = name }
             }
         }
         renaming = nil
@@ -681,8 +1174,10 @@ final class TabStore {
 
     // MARK: - Address bar
 
+    /// The active tab of the window whose tabs the sidebar shows (`displayedContent`): during a switch, the
+    /// guessed window's once the old contents have faded out.
     var activeTab: (tab: BrowserTab, instance: String)? {
-        guard let selection = currentWindow, let tab = selection.window.tabs.first(where: \.active) else { return nil }
+        guard case .window(let selection)? = displayedContent, let tab = selection.window.tabs.first(where: \.active) else { return nil }
         return (tab, selection.instance)
     }
 
@@ -848,18 +1343,24 @@ final class TabStore {
             }
             window.tabs.removeAll { ids.contains($0.id) }
         }
+        // A bookmark whose tab this was is closed again at once, so a click on it opens its saved page.
+        changeBookmarkTabs { $0.unlink(ids.map { TabKey(instance: instance, tabId: $0) }) }
         send(["action": "close", "tabIds": Array(ids)], to: instance)
     }
 
-    func closeOtherTabs(than tab: BrowserTab, instance: String) {
+    /// Closes the other tabs listed under Tabs. Bookmarks' tabs aren't listed there, so they stay open.
+    func closeOtherTabs(than tab: BrowserTab, instance: String, bookmarksShown: Bool = true) {
         guard let window = window(instance: instance, id: tab.windowId) else { return }
-        close(window.tabs.filter { $0.id != tab.id && !$0.pinned }, instance: instance)
+        let listed = tabsListed(in: window, instance: instance, bookmarksShown: bookmarksShown)
+        close(listed.filter { $0.id != tab.id && !$0.pinned }, instance: instance)
     }
 
-    func closeTabsBelow(_ tab: BrowserTab, instance: String) {
-        guard let window = window(instance: instance, id: tab.windowId),
-              let index = window.tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-        close(Array(window.tabs[(index + 1)...]), instance: instance)
+    /// Closes the tabs listed below this one under Tabs (bookmarks' tabs aren't listed there).
+    func closeTabsBelow(_ tab: BrowserTab, instance: String, bookmarksShown: Bool = true) {
+        guard let window = window(instance: instance, id: tab.windowId) else { return }
+        let listed = tabsListed(in: window, instance: instance, bookmarksShown: bookmarksShown)
+        guard let index = listed.firstIndex(where: { $0.id == tab.id }) else { return }
+        close(Array(listed[(index + 1)...]), instance: instance)
     }
 
     func newTab(url: String? = nil) {
@@ -938,36 +1439,267 @@ final class TabStore {
         NSWorkspace.shared.open(urls, withApplicationAt: safari, configuration: NSWorkspace.OpenConfiguration())
     }
 
-    // MARK: - Bookmarks
+    // MARK: - Profiles (#34)
 
-    /// The open tab in the current window that belongs to this bookmark, if any.
-    func openTab(for bookmark: Bookmark) -> BrowserTab? {
-        guard let selection = currentWindow else { return nil }
-        if let key = bookmarkLinks[bookmark.id], key.instance == selection.instance,
-           let tab = selection.window.tabs.first(where: { $0.id == key.tabId }) {
-            return tab
-        }
-        let target = bookmark.url.comparableURL
-        return selection.window.tabs.first { $0.url?.comparableURL == target }
+    /// The profile a window belongs to, from the snapshot that lists it (`Snapshot.profile`, which the
+    /// default profile's copy of the extension doesn't send). Nil for a private window: it belongs to
+    /// no profile, though the default profile's copy is the one that reports it.
+    func profile(of window: BrowserWindow, instance: String) -> ProfileKey? {
+        guard !window.incognito else { return nil }
+        return ProfileKey(snapshotProfile: snapshots[instance]?.profile)
     }
 
+    /// The profile of the window the sidebar shows (`currentWindow`), whose Favorites and Pinned list it
+    /// shows. Nil while that's a private window, and while no window is shown.
+    var currentWindowProfile: ProfileKey? {
+        // A window its copy can't see shows its own profile's lists too (#41).
+        currentWindow.flatMap { profile(of: $0.window, instance: $0.instance) } ?? unseenDockedWindow?.profile
+    }
+
+    /// The Favorites the sidebar shows: those of the current window's profile (#38), or of the profile a
+    /// switch is bringing forward (#44). Nil in a private window, which shows Tabs only.
+    var currentFavoritesList: BookmarkList? {
+        shownProfile.map(BookmarkList.favorites)
+    }
+
+    /// The Pinned list the sidebar shows: that of the current window's profile, or of the profile a switch
+    /// is bringing forward. Nil in a private window, which shows Tabs only.
+    var currentPinnedList: BookmarkList? {
+        shownProfile.map(BookmarkList.pinned)
+    }
+
+    // MARK: - A switch's window on its way in (#44)
+
+    /// What the sidebar's sections show.
+    enum ShownContent: Equatable {
+        case window(WindowSelection)
+        /// A window its profile's copy can't see (#41): its profile's lists (none for a private window), and its
+        /// tabs from the tab bar.
+        case unseen(profile: ProfileKey?)
+        /// A switch's profile whose window isn't known yet: its lists, and a placeholder for Tabs.
+        case placeholder(ProfileKey)
+    }
+
+    /// The window whose tabs the sidebar shows: a switch's guessed window while there is one, otherwise
+    /// `currentWindow`. Commands that act on the window Safari has in front go by `currentWindow`.
+    var shownWindow: WindowSelection? {
+        guard let preview = switchPreview else { return currentWindow }
+        guard case .window(let instance, let windowId) = preview.guess,
+              let window = liveSnapshots[instance]?.windows.first(where: { $0.id == windowId }) else { return nil }
+        return WindowSelection(instance: instance, window: window)
+    }
+
+    /// What the sidebar's sections show, or nil for none.
+    var shownContent: ShownContent? {
+        if let preview = switchPreview {
+            switch preview.guess {
+            case .window: return shownWindow.map(ShownContent.window) ?? .placeholder(preview.profile)
+            case .unseen: return .unseen(profile: preview.profile)
+            case .placeholder: return .placeholder(preview.profile)
+            }
+        }
+        if let window = currentWindow {
+            return .window(window)
+        }
+        return unseenDockedWindow.map { .unseen(profile: $0.profile) }
+    }
+
+    /// What the sections have on screen: while the old contents fade out, those; then `shownContent`.
+    var displayedContent: ShownContent? {
+        sidebarFade.showsOldContents ? fadingOutContent : shownContent
+    }
+
+    /// The profile whose Favorites and Pinned the sidebar shows.
+    var shownProfile: ProfileKey? {
+        switchPreview?.profile ?? currentWindowProfile
+    }
+
+    /// What the sidebar would show without a preview, in a guess's terms.
+    private var reportedContent: SwitchGuess? {
+        if let window = currentWindow {
+            return .window(instance: window.instance, windowId: window.window.id)
+        }
+        return unseenDockedWindow != nil ? .unseen : nil
+    }
+
+    /// A switch's window is coming back from the Dock, and should land at `arrivesAt`: the sidebar fades over to
+    /// `guess` for `profile`, the old contents fully out and then the new in, ending as the window lands.
+    /// Replaces an older switch's preview: while the old contents are still fading out, the newest guess comes
+    /// in once they're out.
+    func beginSwitchPreview(id: Int, profile: ProfileKey, guess: SwitchGuess, arrivesAt: Date) {
+        let onScreen = displayedContent
+        switchPreview = SwitchPreview(id: id, profile: profile, guess: guess)
+        var fade = sidebarFade
+        let begun = fade.begin(arrivesAt: arrivesAt, now: clock())
+        if begun.keepsOnScreen {
+            fadingOutContent = onScreen
+        }
+        sidebarFade = fade
+        scheduleFade(begun.timers)
+        let landsIn = Int(arrivesAt.timeIntervalSince(clock()) * 1000)
+        log.notice("the sidebar shows \(Self.describe(profile.isDefault ? nil : profile.rawValue), privacy: .public) at the switch: \(Self.describe(guess), privacy: .public); fading out, then in, for the window to land in \(landsIn) ms")
+        DispatchQueue.main.asyncAfter(deadline: .now() + SwitchPreviewRules.lifetime) { [weak self] in
+            guard let self, self.switchPreview?.id == id else { return }
+            self.endSwitchPreview(because: "Safari didn't report the switch's window in time")
+        }
+    }
+
+    /// Sets the fade's timers; each takes its step when it fires, and sets the next ones.
+    private func scheduleFade(_ timers: [SidebarFade.Timer]) {
+        for timer in timers {
+            DispatchQueue.main.asyncAfter(deadline: .now() + timer.after) { [weak self] in
+                guard let self else { return }
+                var fade = self.sidebarFade
+                let next = fade.fire(timer, now: self.clock())
+                if fade != self.sidebarFade {
+                    if timer.kind == .watchdog {
+                        self.log.notice("the sidebar's fade was still going \(Int(SidebarFade.grace * 1000)) ms after its window should have landed; ended it")
+                    }
+                    self.sidebarFade = fade
+                }
+                if !fade.showsOldContents, self.fadingOutContent != nil {
+                    self.fadingOutContent = nil
+                }
+                self.scheduleFade(next)
+            }
+        }
+    }
+
+    /// The switch has picked its window: a better guess replaces the first, with no second fade.
+    func refineSwitchPreview(id: Int, guess: SwitchGuess) {
+        guard var preview = switchPreview, preview.id == id, preview.guess != guess else { return }
+        preview.guess = guess
+        switchPreview = preview
+        log.notice("the switch picked its window: the sidebar now shows \(Self.describe(guess), privacy: .public)")
+    }
+
+    /// Safari shows a window of `profile` in front. The preview ends once the sidebar's own choice is that
+    /// profile's window: right away, or when the copy reports it.
+    func confirmSwitchPreview(profile: ProfileKey) {
+        guard var preview = switchPreview, preview.profile == profile, !preview.reported else { return }
+        preview.reported = true
+        switchPreview = preview
+        settleSwitchPreview()
+    }
+
+    /// The sidebar goes back to following Safari, with no fade: the switch failed, or another window came to
+    /// the front.
+    func endSwitchPreview(because reason: String) {
+        guard switchPreview != nil else { return }
+        switchPreview = nil
+        log.notice("the sidebar follows Safari again: \(reason, privacy: .public)")
+    }
+
+    /// Ends a reported preview once the sidebar's own choice is a window of its profile: it keeps what it showed
+    /// if the guess was right, and otherwise changes to that window without a fade.
+    private func settleSwitchPreview() {
+        guard let preview = switchPreview, preview.reported, currentWindowProfile == preview.profile,
+              let shown = reportedContent else { return }
+        switchPreview = nil
+        switch SwitchPreviewRules.report(preview.guess, shown: shown) {
+        case .kept:
+            log.notice("Safari reported the switch's window: the sidebar's guess was right")
+        case .corrected:
+            log.notice("Safari reported the switch's window: the sidebar changes from \(Self.describe(preview.guess), privacy: .public) to \(Self.describe(shown), privacy: .public)")
+        }
+    }
+
+    /// A guess for the log: never a title.
+    private static func describe(_ guess: SwitchGuess) -> String {
+        switch guess {
+        case .window(let instance, let windowId): "window \(windowId) of copy \(instance.prefix(8))"
+        case .placeholder: "its lists, with Tabs to come"
+        case .unseen: "a window its copy can't see, from the tab bar"
+        }
+    }
+
+    /// The profile last named in the log by `logShownSpace`.
+    @ObservationIgnored private var loggedSpace: String?
+
+    /// Logs whose window the sidebar shows when that changes from one profile (or a private window)
+    /// to another, with how many favorites and pinned items it shows then. Never a profile's name.
+    private func logShownSpace() {
+        guard let selection = currentWindow else { return }
+        let profile = profile(of: selection.window, instance: selection.instance)
+        let space = profile.map { $0.isDefault ? "the default profile" : "profile \($0.rawValue.prefix(8))" } ?? "a private window"
+        guard space != loggedSpace else { return }
+        loggedSpace = space
+        guard let profile else {
+            log.notice("the sidebar shows \(space, privacy: .public): no favorites or pinned")
+            return
+        }
+        let favorites = bookmarkLists.items(in: .favorites(profile)).count
+        let pinned = bookmarkLists.items(in: .pinned(profile)).count
+        log.notice("the sidebar shows \(space, privacy: .public): \(favorites) favorites, \(pinned) pinned")
+    }
+
+    // MARK: - Favorites and Pinned
+
+    func bookmarks(in list: BookmarkList) -> [Bookmark] {
+        bookmarkLists.items(in: list)
+    }
+
+    /// The ids of the bookmarks a window shows: its profile's Favorites and Pinned list, and none in a
+    /// private window. A tab only belongs to a bookmark its window shows, so links never cross profiles.
+    func bookmarkIds(shownIn window: BrowserWindow, instance: String) -> Set<UUID> {
+        Set(bookmarkLists.shown(in: profile(of: window, instance: instance)).map(\.id))
+    }
+
+    /// The bookmark's own tab in the window the sidebar shows, if it has one there. Wherever the
+    /// tab has browsed to since, it's the bookmark's until it closes.
+    func openTab(for bookmark: Bookmark) -> BrowserTab? {
+        guard let selection = currentWindow else { return nil }
+        return bookmarkTabs.tab(of: bookmark.id, in: selection.window, instance: selection.instance)
+    }
+
+    /// What a press on a favorite's tile or a pinned row does on mouse-down. One whose tab is open in
+    /// this window switches to it at once, like a tab row. Otherwise nothing happens until the button
+    /// goes up, and then `open(_:inNewTab:)` opens it: a press that turns into a drag to reorder mustn't
+    /// open a tab. A press with ⌘ always waits, and opens an ordinary new tab. Says whether the press
+    /// waits for the button to go up.
+    func pressBookmark(_ bookmark: Bookmark, command: Bool) -> Bool {
+        if !command, openTab(for: bookmark) != nil {
+            open(bookmark)
+            return false
+        }
+        return true
+    }
+
+    /// Opens a favorite or pinned item in the window the sidebar shows: switches to its tab there, or
+    /// opens its saved page in a new tab of that window, which becomes its tab.
     func open(_ bookmark: Bookmark, inNewTab: Bool = false) {
         guard let selection = currentWindow else {
-            openInSafari(bookmark.url)
+            if let unseen = unseenDockedWindow, unseen.profile != nil {
+                openOutside(unseen, bookmark)
+            } else {
+                openInSafari(bookmark.url)
+            }
             return
         }
         if !inNewTab, let tab = openTab(for: bookmark) {
-            bookmarkLinks[bookmark.id] = TabKey(instance: selection.instance, tabId: tab.id)
             activate(tab, instance: selection.instance)
             return
         }
-        // A quick second click arrives before Safari reports the new tab; don't open two.
+        // An ordinary tab that is on the saved page becomes the bookmark's, rather than a second
+        // copy opening.
+        if !inNewTab, let tab = tabOnSavedPage(of: bookmark, in: selection) {
+            changeBookmarkTabs { $0.link(TabKey(instance: selection.instance, tabId: tab.id), to: bookmark.id) }
+            activate(tab, instance: selection.instance)
+            return
+        }
+        // A quick second click can arrive before a snapshot has the tab the first one opened; don't
+        // open two. Once a snapshot has it, the click switches to it (above), and once it's closed,
+        // a click opens a new one.
         pendingBookmarkOpens = pendingBookmarkOpens.filter { Date().timeIntervalSince($0.value.at) < 2 }
-        if !inNewTab, pendingBookmarkOpens.values.contains(where: { $0.bookmark == bookmark.id }) {
+        let opening = pendingBookmarkOpens.values.contains { pending in
+            pending.bookmark == bookmark.id && pending.windowId == selection.window.id
+                && pending.tab.map { bookmarkTabs.bookmark(owning: $0) == bookmark.id && tab(for: $0) == nil } ?? true
+        }
+        if !inNewTab, opening {
             return
         }
         let requestId = UUID().uuidString
-        pendingBookmarkOpens[requestId] = (bookmark.id, Date())
+        pendingBookmarkOpens[requestId] = (bookmark.id, selection.window.id, Date(), nil)
         send([
             "action": "create",
             "windowId": selection.window.id,
@@ -976,36 +1708,69 @@ final class TabStore {
         ], to: selection.instance)
     }
 
-    func addBookmark(from tab: BrowserTab, instance: String, at index: Int? = nil) {
+    /// Opens a favorite or pinned item clicked in a window its profile's copy can't see (#41). The copy can't
+    /// name that window, so the page opens through it in one it can: its most recent window, brought forward,
+    /// or a new window of the profile when it sees none. Either way it's in the right profile, and the sidebar
+    /// follows to a window it lists in full.
+    private func openOutside(_ unseen: UnseenWindow, _ bookmark: Bookmark) {
+        let windows = liveSnapshots[unseen.instance]?.windows.filter { !$0.incognito } ?? []
+        let last = liveSnapshots[unseen.instance]?.lastFocusedWindowId
+        if let window = windows.first(where: { $0.id == last }) ?? windows.first {
+            let requestId = UUID().uuidString
+            pendingBookmarkOpens[requestId] = (bookmark.id, window.id, Date(), nil)
+            log.notice("opening a bookmark from a window its copy can't see: in another window of the profile")
+            send(["action": "create", "windowId": window.id, "url": bookmark.url, "requestId": requestId, "focus": true], to: unseen.instance)
+        } else {
+            log.notice("opening a bookmark from a window its copy can't see: in a new window of the profile")
+            send(["action": "openWindow", "url": bookmark.url], to: unseen.instance)
+        }
+    }
+
+    /// Makes a favorite or pinned item of the tab's page, at `index` in `list` (at the end without
+    /// one). It's what dragging a tab onto Favorites or Pinned does, and the tab's menu.
+    func addBookmark(from tab: BrowserTab, instance: String, to list: BookmarkList, at index: Int? = nil) {
         guard let url = tab.url, !url.isEmpty else { return }
         let bookmark = Bookmark(
             title: displayTitle(for: tab, instance: instance),
             url: url,
             faviconURL: tab.favIconUrl
         )
-        insert(bookmark, at: index)
-        bookmarkLinks[bookmark.id] = TabKey(instance: instance, tabId: tab.id)
+        insert(bookmark, into: list, at: index)
+        // The tab moves up as the new bookmark's tab, unless it's another bookmark's, or its window
+        // doesn't show that list (another profile's, or a private window).
+        if let window = window(instance: instance, id: tab.windowId),
+           bookmarkIds(shownIn: window, instance: instance).contains(bookmark.id) {
+            changeBookmarkTabs { $0.link(TabKey(instance: instance, tabId: tab.id), to: bookmark.id) }
+        }
     }
 
+    /// Add Bookmark for the current tab (the + in Pinned's header). It pins the tab in the current
+    /// window's profile's Pinned list. A private window has no lists, so there it does nothing (and the
+    /// sidebar shows no + there).
     func addBookmarkForCurrentTab() {
-        guard let selection = currentWindow, let tab = selection.window.tabs.first(where: \.active) else { return }
-        addBookmark(from: tab, instance: selection.instance)
+        guard let selection = currentWindow, let tab = selection.window.tabs.first(where: \.active),
+              let profile = profile(of: selection.window, instance: selection.instance) else { return }
+        addBookmark(from: tab, instance: selection.instance, to: .pinned(profile))
     }
 
-    func addBookmark(url: URL, at index: Int? = nil) {
+    /// A link dragged in from a web page or Safari's address bar.
+    func addBookmark(url: URL, to list: BookmarkList, at index: Int? = nil) {
         guard let scheme = url.scheme, ["http", "https"].contains(scheme.lowercased()) else { return }
-        insert(Bookmark(title: url.host() ?? url.absoluteString, url: url.absoluteString), at: index)
+        insert(Bookmark(title: url.host() ?? url.absoluteString, url: url.absoluteString), into: list, at: index)
     }
 
-    private func insert(_ bookmark: Bookmark, at index: Int?) {
-        let position = index.map { min(max($0, 0), bookmarks.count) } ?? bookmarks.count
-        bookmarks.insert(bookmark, at: position)
+    private func insert(_ bookmark: Bookmark, into list: BookmarkList, at index: Int?) {
+        bookmarkLists.insert(bookmark, into: list, at: index)
+        log.notice("added a bookmark to \(list, privacy: .public), which has \(self.bookmarkLists.items(in: list).count) now")
         scheduleSave()
     }
 
+    /// Takes a favorite or pinned item out of its list. Its tabs stay open, back under Tabs.
     func removeBookmark(_ bookmark: Bookmark) {
-        bookmarks.removeAll { $0.id == bookmark.id }
-        bookmarkLinks[bookmark.id] = nil
+        guard let list = bookmarkLists.list(containing: bookmark.id) else { return }
+        bookmarkLists.remove(bookmark.id)
+        changeBookmarkTabs { $0.forget(bookmark: bookmark.id) }
+        log.notice("removed a bookmark from \(list, privacy: .public), which has \(self.bookmarkLists.items(in: list).count) now")
         scheduleSave()
     }
 
@@ -1013,26 +1778,86 @@ final class TabStore {
         guard let selection = currentWindow,
               let tab = selection.window.tabs.first(where: \.active),
               let url = tab.url,
-              let index = bookmarks.firstIndex(where: { $0.id == bookmark.id }) else { return }
-        bookmarks[index].url = url
-        bookmarks[index].faviconURL = tab.favIconUrl
-        bookmarkLinks[bookmark.id] = TabKey(instance: selection.instance, tabId: tab.id)
-        scheduleSave()
-    }
-
-    /// Moves a bookmark to `index` (its position once moved).
-    func moveBookmark(_ id: UUID, to index: Int) {
-        guard let from = bookmarks.firstIndex(where: { $0.id == id }) else { return }
-        let bookmark = bookmarks.remove(at: from)
-        bookmarks.insert(bookmark, at: min(max(index, 0), bookmarks.count))
-        scheduleSave()
-    }
-
-    private func pruneBookmarkLinks() {
-        let stale = bookmarkLinks.filter { tab(for: $0.value) == nil }.map(\.key)
-        for id in stale {
-            bookmarkLinks[id] = nil
+              bookmarkLists.bookmark(bookmark.id) != nil else { return }
+        bookmarkLists.update(bookmark.id) { saved in
+            saved.url = url
+            saved.faviconURL = tab.favIconUrl
         }
+        // The tab showing the page becomes the bookmark's too, if the bookmark has none in this window
+        // (and the tab isn't another bookmark's). The bookmark's own tab is already.
+        if bookmarkTabs.tab(of: bookmark.id, in: selection.window, instance: selection.instance) == nil,
+           bookmarkIds(shownIn: selection.window, instance: selection.instance).contains(bookmark.id) {
+            changeBookmarkTabs { $0.link(TabKey(instance: selection.instance, tabId: tab.id), to: bookmark.id) }
+        }
+        scheduleSave()
+    }
+
+    /// Moves a favorite or pinned item to `index` in `list` (its position once moved): reordering a
+    /// list, or moving between its profile's Favorites and Pinned, where it keeps its tabs. It stays
+    /// within its profile (#38): a move to another profile's list is refused.
+    func moveBookmark(_ id: UUID, to list: BookmarkList, at index: Int) {
+        guard let from = bookmarkLists.list(containing: id) else { return }
+        guard from.profile == list.profile else {
+            log.notice("not moving a bookmark from \(from, privacy: .public) to \(list, privacy: .public): lists don't cross profiles")
+            return
+        }
+        bookmarkLists.move(id, to: list, at: index)
+        if from != list {
+            log.notice("moved a bookmark from \(from, privacy: .public) to \(list, privacy: .public)")
+            // Its profile's windows show both lists, so it keeps its tabs. Any a window doesn't show are let
+            // go all the same, so no link outlives the rule.
+            changeBookmarkTabs { tabs in
+                for snapshot in snapshots.values {
+                    tabs.unlinkTabs(in: snapshot) { bookmarkIds(shownIn: $0, instance: snapshot.instance) }
+                }
+            }
+        }
+        scheduleSave()
+    }
+
+    /// An ordinary tab in the window on the bookmark's saved page: the one showing, or the first.
+    private func tabOnSavedPage(of bookmark: Bookmark, in selection: WindowSelection) -> BrowserTab? {
+        let page = bookmark.url.comparableURL
+        let candidates = selection.window.tabs.filter {
+            $0.url?.comparableURL == page && bookmarkTabs.bookmark(owning: TabKey(instance: selection.instance, tabId: $0.id)) == nil
+        }
+        return candidates.first(where: \.active) ?? candidates.first
+    }
+
+    /// A tab opened for a bookmark becomes its tab, unless the bookmark already has one in that
+    /// window (Open in New Tab on an open bookmark gives an ordinary tab), or was removed or moved to
+    /// a list that window doesn't show meanwhile.
+    private func linkOpenedTab(_ key: TabKey, to bookmark: UUID, windowId: Int) {
+        guard bookmarkLists.bookmark(bookmark) != nil else { return }
+        if let window = window(instance: key.instance, id: windowId) {
+            guard bookmarkIds(shownIn: window, instance: key.instance).contains(bookmark),
+                  bookmarkTabs.tab(of: bookmark, in: window, instance: key.instance) == nil else { return }
+        }
+        changeBookmarkTabs { $0.link(key, to: bookmark) }
+    }
+
+    private func updateBookmarkTabs(with snapshot: Snapshot) {
+        let before = bookmarkTabs.owners.count
+        changeBookmarkTabs { tabs in
+            tabs.update(with: snapshot, live: Set(snapshots.keys), bookmarks: bookmarkLists.all) {
+                bookmarkIds(shownIn: $0, instance: snapshot.instance)
+            }
+        }
+        let after = bookmarkTabs.owners.count
+        if after != before {
+            log.notice("bookmarks' tabs: \(before) before snapshot \(snapshot.seq), \(after) after")
+        }
+        logShownSpace()
+    }
+
+    /// Changes the links on a copy, so views aren't told of a change when nothing changed, and saves
+    /// them when something did.
+    private func changeBookmarkTabs(_ change: (inout BookmarkTabs) -> Void) {
+        var tabs = bookmarkTabs
+        change(&tabs)
+        guard tabs != bookmarkTabs else { return }
+        bookmarkTabs = tabs
+        scheduleSave()
     }
 
     // MARK: - Persistence
@@ -1044,9 +1869,23 @@ final class TabStore {
     }
 
     private struct SavedState: Codable {
+        /// Cleanup's clocks and its list of closed tabs. Missing from files saved before it existed.
+        var cleanup: TabCleanup.Saved?
+        /// The default profile's favorites. Before there were profiles' lists this held every bookmark,
+        /// and Side Tabs 1.2.5 still reads it as its bookmarks, so it's still written (#38). It's only read
+        /// when `favorites` is missing: then these become the default profile's favorites.
         var bookmarks: [Bookmark]
+        /// Each profile's Favorites, by `ProfileKey.rawValue` (#38). Missing from files saved before
+        /// favorites belonged to profiles, or by a version that didn't know the key.
+        var favorites: [String: [Bookmark]]?
+        /// Each profile's Pinned list, by `ProfileKey.rawValue`. Missing from files saved before it existed.
+        var pinned: [String: [Bookmark]]?
         var names: [SavedName]
         var orphanNames: [String: String]
+        /// Which tabs belong to bookmarks, and the extension instances running when they were saved
+        /// (#25). Optional, so a file saved before there were any still loads.
+        var bookmarkTabs: [BookmarkTabs.Saved]?
+        var instances: [String]?
     }
 
     static var defaultStateURL: URL {
@@ -1057,12 +1896,14 @@ final class TabStore {
     private func load() {
         guard let data = try? Data(contentsOf: stateURL),
               let state = try? JSONDecoder().decode(SavedState.self, from: data) else { return }
-        bookmarks = state.bookmarks
+        cleanup.restore(state.cleanup)
+        bookmarkLists = BookmarkLists(favorites: state.favorites, bookmarks: state.bookmarks, pinned: state.pinned ?? [:])
         orphanNames = state.orphanNames
         customNames = Dictionary(
             state.names.map { (TabKey(instance: $0.instance, tabId: $0.tabId), $0.name) },
             uniquingKeysWith: { first, _ in first }
         )
+        bookmarkTabs = BookmarkTabs(saved: state.bookmarkTabs ?? [], instances: state.instances ?? [], bookmarks: bookmarkLists.all)
     }
 
     private func scheduleSave() {
@@ -1074,9 +1915,14 @@ final class TabStore {
 
     func save() {
         let state = SavedState(
-            bookmarks: bookmarks,
+            cleanup: cleanup.saved,
+            bookmarks: bookmarkLists.items(in: .favorites(.defaultProfile)),
+            favorites: bookmarkLists.savedFavorites,
+            pinned: bookmarkLists.savedPinned,
             names: customNames.map { SavedName(instance: $0.key.instance, tabId: $0.key.tabId, name: $0.value) },
-            orphanNames: orphanNames
+            orphanNames: orphanNames,
+            bookmarkTabs: bookmarkTabs.saved,
+            instances: bookmarkTabs.savedInstances
         )
         do {
             let url = stateURL

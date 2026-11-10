@@ -59,8 +59,19 @@ final class ExtensionBridge {
         return (try? JSONSerialization.data(withJSONObject: reply)) ?? Data("{}".utf8)
     }
 
+    /// Tells this launch's command ids apart from an earlier launch's, which a copy of the extension may
+    /// still remember.
+    private let launchTag = String(UUID().uuidString.prefix(8))
+    private var commandCount = 0
+
     /// Sends a command to background.js. `command["instance"]` limits it to one profile.
+    ///
+    /// Every command gets an id, and background.js skips one it has already run: after the extension
+    /// reloads, Safari has delivered commands to a copy twice (#37).
     func send(_ command: [String: Any]) {
+        commandCount += 1
+        var command = command
+        command["id"] = "\(launchTag)-\(commandCount)"
         SFSafariApplication.dispatchMessage(
             withName: "command",
             toExtensionWithIdentifier: SideTabsBridge.extensionBundleIdentifier,

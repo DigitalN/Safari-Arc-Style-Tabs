@@ -1,8 +1,8 @@
 import CoreGraphics
 import Foundation
 
-// Checks for finding the tab row under a point (RowHitTesting.swift), which is how a middle click
-// is matched to a row (#21 item 1).
+// Checks for finding the tab or bookmark row under a point (RowHitTesting.swift), which is how a
+// middle click is matched to a row (#21 item 1, #25).
 
 var failures = 0
 func check(_ condition: Bool, _ message: String, line: Int = #line) {
@@ -54,6 +54,21 @@ do {
     list.remove(key(3))
     check(list.tab(at: CGPoint(x: 100, y: 315)) == nil, "a removed row isn't found")
     check(SidebarRows().tab(at: CGPoint(x: 100, y: 115)) == nil, "with nothing known, nothing is hit (a list that hasn't reported its size)")
+}
+
+do {
+    // Bookmark rows are found too, so a middle click on an open bookmark closes its tab (#25).
+    let list = rows(2)
+    let id = UUID()
+    list.setFrame(CGRect(x: 8, y: 300, width: 240, height: 30), forBookmark: id)
+    check(list.bookmark(at: CGPoint(x: 100, y: 315)) == id, "a point on a bookmark row is that bookmark")
+    check(list.tab(at: CGPoint(x: 100, y: 315)) == nil, "and not a tab")
+    check(list.bookmark(at: CGPoint(x: 100, y: 115)) == nil, "a point on a tab row is no bookmark")
+    list.setFrame(CGRect(x: 8, y: 20, width: 240, height: 30), forBookmark: id)
+    check(list.bookmark(at: CGPoint(x: 100, y: 30)) == nil, "a bookmark row scrolled up under the address bar can't be hit there")
+    list.setFrame(CGRect(x: 8, y: 300, width: 240, height: 30), forBookmark: id)
+    list.removeBookmark(id)
+    check(list.bookmark(at: CGPoint(x: 100, y: 315)) == nil, "a removed bookmark row isn't found")
 }
 
 if failures == 0 {

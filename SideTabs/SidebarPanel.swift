@@ -46,7 +46,14 @@ final class SidebarPanel: NSPanel {
 
     /// Called on left and middle mouse-down anywhere in the panel, before the click is
     /// handled. Right-clicks are left alone so context menus open without switching apps.
+    /// A left click on the profile dropdown runs it once the menu closes (`finishMenuMouseDown`),
+    /// and one on the Settings gear never does (`keepsSafariBehind()`).
     var onMouseDown: (() -> Void)?
+
+    /// Called in place of `onMouseDown` on a left mouse-down on the Settings gear (`keepsSafariBehind()`),
+    /// once the click is handled. Like any click, it ordered the panel in front of Safari's window, where its
+    /// corner fill would show over Safari's corners; this puts it back without bringing Safari forward.
+    var onMouseDownKeepingSafariBehind: (() -> Void)?
 
     /// Called on a middle mouse-down with its position in the window's coordinates (origin at the
     /// top left, like SwiftUI's `.global`), after Safari has been brought forward. Says whether
@@ -61,9 +68,16 @@ final class SidebarPanel: NSPanel {
     private(set) var lastMouseDown = Date.distantPast
 
     override func sendEvent(_ event: NSEvent) {
+        var keepingSafariBehind = false
         if event.type == .leftMouseDown || event.type == .otherMouseDown {
             lastMouseDown = Date(timeIntervalSinceNow: event.timestamp - ProcessInfo.processInfo.systemUptime)
-            onMouseDown?()
+            // The Settings gear (#43) never runs this: it brings Side Tabs' own Settings window forward, and
+            // Safari would cover it. A view that opens a menu on mouse-down (the profile dropdown, #39) runs
+            // it itself once the menu has closed: Safari coming forward now would close the menu as it opens.
+            keepingSafariBehind = event.type == .leftMouseDown && keepsSafariBehind(at: event)
+            if !keepingSafariBehind && !(event.type == .leftMouseDown && opensMenu(at: event)) {
+                onMouseDown?()
+            }
         }
         if event.type == .otherMouseDown, event.buttonNumber == 2, let onMiddleClick, let view = contentView {
             let local = view.convert(event.locationInWindow, from: nil)
@@ -73,6 +87,41 @@ final class SidebarPanel: NSPanel {
             }
         }
         super.sendEvent(event)
+        if keepingSafariBehind {
+            onMouseDownKeepingSafariBehind?()
+        }
+    }
+
+    /// Runs what a left mouse-down normally does first (`onMouseDown`: bringing Safari forward), for a
+    /// view that opens a menu on mouse-down, once its menu has closed.
+    func finishMenuMouseDown() {
+        onMouseDown?()
+    }
+
+    /// Whether the click lands on a view that opens a menu on mouse-down. The hit can land on the view
+    /// SwiftUI wraps an AppKit view in, so this also looks at the topmost views inside it under the click.
+    private func opensMenu(at event: NSEvent) -> Bool {
+        guard let contentView, let frameView = contentView.superview,
+              var view = contentView.hitTest(frameView.convert(event.locationInWindow, from: nil)) else { return false }
+        while !(view is OpensMenuOnMouseDown) {
+            let point = view.convert(event.locationInWindow, from: nil)
+            guard let inner = view.subviews.last(where: { !$0.isHidden && $0.frame.contains(point) }) else { return false }
+            view = inner
+        }
+        return true
+    }
+
+    /// The areas `keepsSafariBehind()` marks, each added as it comes into the panel. Those areas take no
+    /// clicks themselves, so hit-testing can't find them, and SwiftUI's order of the views it hosts says
+    /// nothing about which is on top; so they say where they are instead. Weak, so a gone one drops out.
+    fileprivate let safariStaysBehindAreas = NSHashTable<KeepsSafariBehindArea>.weakObjects()
+
+    /// Whether the click lands where a left click leaves Safari where it is (`keepsSafariBehind()`).
+    private func keepsSafariBehind(at event: NSEvent) -> Bool {
+        safariStaysBehindAreas.allObjects.contains { area in
+            area.window === self && !area.isHiddenOrHasHiddenAncestor
+                && area.bounds.contains(area.convert(event.locationInWindow, from: nil))
+        }
     }
 
     /// Needed for renaming; `becomesKeyOnlyIfNeeded` keeps plain clicks from taking focus.
@@ -83,6 +132,31 @@ final class SidebarPanel: NSPanel {
 /// Lets the first click on the panel act immediately; the panel is almost never key.
 final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+extension View {
+    /// A left click here doesn't bring Safari forward, as every other one on the sidebar does: for a button
+    /// that brings one of Side Tabs' own windows forward (the Settings gear, #43), which Safari would cover.
+    /// The click still goes to the SwiftUI view; this only marks where it lands for the panel.
+    func keepsSafariBehind() -> some View {
+        background(KeepsSafariBehindMarker())
+    }
+}
+
+/// The area `keepsSafariBehind()` marks, as big as the view it's behind. It never takes a click, like the
+/// hover views (MouseTracking), so the button in front of it gets every one; it tells the panel it's there.
+final class KeepsSafariBehindArea: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        (window as? SidebarPanel)?.safariStaysBehindAreas.add(self)
+    }
+}
+
+private struct KeepsSafariBehindMarker: NSViewRepresentable {
+    func makeNSView(context: Context) -> KeepsSafariBehindArea { KeepsSafariBehindArea() }
+    func updateNSView(_ view: KeepsSafariBehindArea, context: Context) {}
 }
 
 /// Background and clipping for the sidebar content.

@@ -33,10 +33,18 @@ Runs what can be checked without Safari: `background.js` against a stand-in `bro
 (`Tests/ExtensionChecks`), the Swift logic compiled with small test programs (`TabStore`'s
 handling of messages, where Safari's tab bar is in a window's Accessibility tree and which
 of its buttons a tab matches and which one Safari has selected, checked against trees kept as data in
-`Tests/TabBarFinderChecks/trees`; what a press on a row turns into; which row is under a
+`Tests/TabBarFinderChecks/trees`; which of Safari's windows are browser windows the sidebar
+docks to, and never Settings, against the same trees; what a press on a row turns into; which row is under a
 middle click; which queued
-Accessibility requests are still wanted; which notifications the docked window is watched for),
-a check that no log line carries a window or tab title, and a compile check of the app's sources. It doesn't touch the
+Accessibility requests are still wanted; which notifications the docked window is watched for;
+where the sidebar slides out over the page in full screen or when it hides automatically, below which
+of Safari's bars (against trees in `Tests/SidebarOverlayChecks/trees`), and what
+brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
+and where they reopen; with *Minimize other profiles' windows* on, which windows a change of profile
+minimizes and brings back, which window a switch brings forward, the list of windows Side Tabs minimized
+and how it's matched after a restart, and when a click on Safari's Dock icon opens a window; what the
+sidebar shows while a switch's window comes back from the Dock, and when Safari's report ends it),
+a check that no log line carries a window or tab title or a page's URL, and a compile check of the app's sources. It doesn't touch the
 installed app, Safari, or your saved bookmarks and names. Anything that needs the real
 Safari (clicks, windows, timing) still has to be tried by hand.
 
@@ -154,7 +162,15 @@ separate window that the app keeps attached to Safari's window:
   fetches favicons for the app, which never connects to websites itself: reaching a
   device on the local network, like a router, would make macOS ask for Local Network
   access. `content.js` reports each page's favicon URL, which Safari's tabs API doesn't
-  provide.
+  provide. Safari can lose a native message's reply, so `background.js` gives up on each
+  message after 4 seconds and counts it as not delivered. Each Safari profile runs its own
+  copy of `background.js`; the app hides a copy's windows after 30 seconds without a
+  message from it, and drops the copy once a newer copy of the same profile reports (after
+  the extension reloads or is reinstalled). Those 30 seconds are awake time in which the copy
+  could have spoken: sleep, a locked screen, the screen saver, a switched-away session and
+  Safari hidden don't count, and each copy gets 30 seconds again when they end
+  (`CopySilence`, `HoldWatcher`). Every command from the app carries an id, and
+  `background.js` skips one it has already run, since Safari has delivered commands twice.
 - `SideTabsExtension/`: the extension's native handler. It passes messages to the app
   over a CFMessagePort named after the app group, which is what lets the sandboxed
   extension reach the app.
@@ -162,9 +178,35 @@ separate window that the app keeps attached to Safari's window:
   - `SafariTracker` follows Safari's front window through the Accessibility API and
     brings Safari forward.
   - `DockController` positions the panel directly behind Safari's window, narrows Safari
-    to fit, and handles full screen.
+    to fit, and handles full screen. In full screen, and in any window when *Hide sidebar
+    automatically* is on, the sidebar is an overlay that slides out from the left edge;
+    `SidebarOverlay` holds where it goes and when it comes out and goes away. It starts below
+    the lowest of Safari's bars (toolbar, Favourites bar, tab bar, find bar), which `SafariBars`
+    finds among the window's children.
   - `TabStore` holds tabs, bookmarks and custom names.
+  - `TabCleanup` closes tabs nobody has looked at for a while, when that's turned on, and keeps
+    the list of them for reopening. `TabCleanupScheduler` runs it every few minutes and when
+    Safari comes forward.
   - `FaviconStore` asks the extension for icons and keeps them.
+  - `SafariProfiles` runs the profile buttons in the bottom bar. `ProfileReader` reads Safari's
+    profiles through Accessibility (File → New Window, and each window's toolbar profile button),
+    `ProfileSwitcher` brings a profile's window forward in place of the current one, and
+    `ProfileRules` decides which profile a window is in and when Side Tabs counts as off in one.
+    `ProfileBarLayout` keeps the buttons centred and says when a dropdown takes their place.
+    When the docked window is one its profile's extension copy can't see (Safari keeps windows that were
+    open when the extension reloaded from it), `UnseenWindowTabs` lists its tabs from its tab bar instead.
+    What it learns (names, symbols, order, each profile's extension copy) is kept in
+    `profiles.json`, beside `state.json`.
+  - With *Minimize other profiles' windows* on, `MinimizeOtherProfiles` keeps the current profile and
+    decides when to sweep, `WindowMinimizer` minimizes the other profiles' windows and brings the
+    current one's back, on `ProfileReader`'s queue one window at a time, and `MinimizeRules` holds the
+    rules. The windows Side Tabs minimized are listed in `minimized-windows.json`, beside
+    `profiles.json`; a minimized window that isn't on it is the user's. Quitting Side Tabs brings
+    nothing back: turning the setting off does.
+  - While a switch's window comes back from the Dock, the sidebar doesn't wait for Safari
+    (`TabStore.switchPreview`): one set of sections fades out over the old contents, then back in with
+    the target profile's, ending as the window lands (`SidebarFade`), never both at once. It shows the window `SwitchPreviewRules` guesses from the
+    store, or the profile's lists and a placeholder for Tabs, until Safari reports.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
   - `AppLocation` offers to move the app into Applications.
   - `Updater` checks GitHub for new releases, verifies the download's code signature
@@ -175,7 +217,16 @@ separate window that the app keeps attached to Safari's window:
   image (with artwork from `make-dmg-background.swift`), `build.sh` is shared by both,
   and `make-icons.swift` regenerates the icons.
 
-Bookmarks and tab names are stored in `~/Library/Application Support/Side Tabs/state.json`.
+Bookmarks and tab names are stored in `~/Library/Application Support/Side Tabs/state.json`,
+and so are tab cleanup's clocks (when each tab was last looked at) and its list of closed tabs.
+The list holds titles and URLs, so it stays out of the log.
+
+To try cleanup without waiting 12 hours, leave Safari open (tab ids are only good until it
+restarts), quit Side Tabs, move times in `cleanup.lastViewed` back by a day or more (they're
+seconds since 2001), and start Side Tabs again within five minutes, or set `cleanup.savedAt` to
+the present too: after longer away, Side Tabs starts every clock over, because tabs may have been
+looked at meanwhile. The next run, within five minutes or a few seconds after Safari comes
+forward, closes those tabs.
 
 To watch live logs from the app and the extension, run the command below. In zsh, plain
 `log` is a shell built-in, so use the full path:

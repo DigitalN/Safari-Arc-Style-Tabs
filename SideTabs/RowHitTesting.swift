@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import Observation
 
-// Which tab row is under a point. SwiftUI's own hit testing can't be asked from SidebarPanel: on
+// Which tab or bookmark row is under a point. SwiftUI's own hit testing can't be asked from SidebarPanel: on
 // macOS 26 it answers with an internal container view for rows built with views embedded in
 // SwiftUI, never the row (#21), so a middle click (which SwiftUI has no gesture for) wouldn't
 // reach the row. The rows report where they are instead, and the panel looks the point up.
@@ -20,15 +20,19 @@ nonisolated struct RowHitTester<ID: Hashable> {
     }
 }
 
-/// Where the sidebar's tab rows are, in the window's coordinates (origin at the top left, like
-/// SwiftUI's `.global`).
+/// Where the sidebar's tab and bookmark rows are, in the window's coordinates (origin at the top
+/// left, like SwiftUI's `.global`).
 @Observable
 final class SidebarRows {
     @ObservationIgnored private var tester = RowHitTester<TabKey>()
+    @ObservationIgnored private var bookmarkTester = RowHitTester<UUID>()
 
     var viewport: CGRect {
         get { tester.viewport }
-        set { tester.viewport = newValue }
+        set {
+            tester.viewport = newValue
+            bookmarkTester.viewport = newValue
+        }
     }
 
     func setFrame(_ frame: CGRect, for key: TabKey) {
@@ -43,5 +47,19 @@ final class SidebarRows {
 
     func tab(at point: CGPoint) -> TabKey? {
         tester.row(at: point)
+    }
+
+    func setFrame(_ frame: CGRect, forBookmark id: UUID) {
+        if bookmarkTester.frames[id] != frame {
+            bookmarkTester.frames[id] = frame
+        }
+    }
+
+    func removeBookmark(_ id: UUID) {
+        bookmarkTester.frames[id] = nil
+    }
+
+    func bookmark(at point: CGPoint) -> UUID? {
+        bookmarkTester.row(at: point)
     }
 }

@@ -114,6 +114,21 @@ nonisolated enum TabBarFinder {
         }
     }
 
+    /// The tab bar's tabs, left to right: each one's title and whether it's the selected one. What the sidebar
+    /// lists for a window the extension can't see (#41).
+    static func tabs<Node: TabBarNode>(in bar: Node) -> [TabBarItem] {
+        let items = buttons(in: bar).map(\.item)
+        return TabBarMatcher.visualOrder(of: items).map { items[$0] }
+    }
+
+    /// A tab button's close action, if it has one. Safari offers it as a custom action named "close tab" whose
+    /// selector is `_closeButtonClicked:` (`Name:close tab\nTarget:…\nSelector:_closeButtonClicked:`); Safari 26
+    /// gave just the name. The selector isn't translated, so it's looked for first. A window's only tab has none.
+    static func closeAction(among actions: [String]) -> String? {
+        actions.first { $0.contains("Selector:_closeButtonClicked:") }
+            ?? actions.first { $0.split(separator: "\n").first?.lowercased() == "name:close tab" }
+    }
+
     /// The button to press for `target`, or why not. Never guesses (see TabBarMatcher), and never
     /// picks a button that can't be pressed: Safari sometimes shows a tab's button without its
     /// title or actions for a moment after a window opens. A button Safari marks as selected isn't

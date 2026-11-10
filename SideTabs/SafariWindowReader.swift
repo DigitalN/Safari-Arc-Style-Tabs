@@ -15,8 +15,9 @@ nonisolated struct WindowReading {
     var isFullScreen = false
     /// The window server's id for the window.
     var number: Int?
-    /// Bottom edge of Safari's toolbar and tab bar. Only read in full screen, where the
-    /// overlay has to start below it.
+    /// Bottom edge of the lowest bar Safari shows above the page (SafariBars.swift), nil if none. Only
+    /// read in full screen, and in normal windows while the sidebar hides automatically: the overlay
+    /// has to start below it.
     var toolbarBottom: CGFloat?
 }
 
@@ -50,6 +51,7 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
     private var observedWindow: AXUIElement?
     private var lastWindowDescription = ""
     private var lastRejectedDescription = ""
+    private var lastBarsSummary = ""
 
     static let windowNotifications = DockedWindowNotifications.names
 
@@ -105,8 +107,9 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
     // MARK: - Reading
 
     /// Picks the window to dock to (when `full`) and reads its frame and the rest. `current` is
-    /// the window docked to now and `previous` what was read from it.
-    func read(application: AXUIElement, current: AXUIElement?, previous: WindowReading, full: Bool) -> Outcome {
+    /// the window docked to now and `previous` what was read from it. `toolbarInWindows` also reads
+    /// where the toolbar ends when the window isn't full screen.
+    func read(application: AXUIElement, current: AXUIElement?, previous: WindowReading, full: Bool, toolbarInWindows: Bool = false) -> Outcome {
         query.clearTimedOut()
         var outcome = Outcome()
         var window = current
@@ -124,7 +127,7 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
             return outcome
         }
         let sameWindow = current.map { CFEqual($0, window) } ?? false
-        let (reading, complete) = readGeometry(window, previous: sameWindow ? previous : WindowReading())
+        let (reading, complete) = readGeometry(window, previous: sameWindow ? previous : WindowReading(), toolbarInWindows: toolbarInWindows)
         if !complete && !sameWindow {
             // A window whose frame Safari wouldn't give can't be docked to yet; stay where we are.
             outcome.keepPrevious = true
@@ -139,7 +142,7 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
 
     /// Reads everything but the window itself. Stops at the first read Safari doesn't answer,
     /// keeping what was read so far and the previous value of the rest.
-    private func readGeometry(_ window: AXUIElement, previous: WindowReading) -> (reading: WindowReading, complete: Bool) {
+    private func readGeometry(_ window: AXUIElement, previous: WindowReading, toolbarInWindows: Bool) -> (reading: WindowReading, complete: Bool) {
         var reading = previous
         func step<Value>(_ body: () -> Value, _ assign: (inout WindowReading, Value) -> Void) -> Bool {
             query.clearTimedOut()
@@ -148,15 +151,14 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
             assign(&reading, value)
             return true
         }
-        guard step({ frame(of: window) }, { $0.frame = $1 }),
-              step({ query.string(window, kAXTitleAttribute) }, { $0.title = $1 }),
-              step({ query.bool(window, "AXFullScreen") ?? false }, { $0.isFullScreen = $1 }) else {
+        // In one round trip: this runs every second and after every window event, docked or not.
+        guard step({ basics(of: window) }, { $0.frame = $1.frame; $0.title = $1.title; $0.isFullScreen = $1.isFullScreen }) else {
             return (reading, false)
         }
         if reading.number == nil {
             reading.number = windowNumber(of: window)
         }
-        if reading.isFullScreen, let frame = reading.frame {
+        if reading.isFullScreen || toolbarInWindows, let frame = reading.frame {
             guard step({ toolbarBottom(of: window, windowFrame: frame) }, { $0.toolbarBottom = $1 }) else {
                 return (reading, false)
             }
@@ -167,7 +169,7 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
     }
 
     /// Writes a frame, then reads the window back. Call on `queue`.
-    func setFrame(_ frame: CGRect, of window: AXUIElement, previous: WindowReading) -> WindowReading {
+    func setFrame(_ frame: CGRect, of window: AXUIElement, previous: WindowReading, toolbarInWindows: Bool = false) -> WindowReading {
         query.clearTimedOut()
         var position = frame.origin
         var size = frame.size
@@ -179,81 +181,87 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
             query.set(window, kAXPositionAttribute, positionValue)
         }
         query.clearTimedOut()
-        return readGeometry(window, previous: previous).reading
+        return readGeometry(window, previous: previous, toolbarInWindows: toolbarInWindows).reading
     }
 
     // MARK: - Choosing the window
 
-    /// Picks the browser window to dock to: the focused one if it's a browser window,
-    /// otherwise keeps the current one, otherwise the frontmost browser window.
+    /// Picks the browser window to dock to (BrowserWindowRule.choose): the focused one if the
+    /// sidebar can dock to it, otherwise the main one, otherwise the current one, otherwise the
+    /// frontmost one it can dock to. So Settings and the other windows that aren't browser windows
+    /// are never docked to, and while one is in front the sidebar stays where it was.
     private func chooseWindow(_ application: AXUIElement, current: AXUIElement?) -> (window: AXUIElement?, focused: AXUIElement?) {
         let focused = query.element(application, kAXFocusedWindowAttribute)
         if query.timedOut {
             return (nil, nil)
         }
-        if let focused, isBrowserWindow(focused) {
-            return (focused, focused)
-        }
-        if let main = query.element(application, kAXMainWindowAttribute), isBrowserWindow(main) {
-            return (main, focused)
-        }
-        if let focused {
-            let description = describe(focused)
-            if description != lastRejectedDescription {
-                lastRejectedDescription = description
-                log.notice("focused window isn't a browser window: \(description, privacy: .public)")
+        // Each window is read once per choice: the focused window is usually the main one too.
+        var known: [(window: AXUIElement, traits: WindowTraits)] = []
+        func traits(of window: AXUIElement) -> WindowTraits {
+            if let entry = known.first(where: { CFEqual($0.window, window) }) {
+                return entry.traits
             }
+            let traits = WindowTraits.read(window, using: query)
+            known.append((window, traits))
+            return traits
         }
-        if let current, isBrowserWindow(current) {
-            return (current, focused)
-        }
-        let windows = query.elements(application, kAXWindowsAttribute)
-        if let first = windows.first(where: isBrowserWindow) {
-            return (first, focused)
-        }
+        var listed: [AXUIElement] = []
+        let chosen = BrowserWindowRule.choose(
+            focused: focused,
+            main: { query.element(application, kAXMainWindowAttribute) },
+            current: current,
+            windows: {
+                listed = query.elements(application, kAXWindowsAttribute)
+                return listed
+            },
+            canDock: { BrowserWindowRule.canDock(traits(of: $0)) },
+            gaveUp: { query.timedOut }
+        )
         if query.timedOut {
             return (nil, focused)
         }
-        let description = windows.isEmpty ? "Safari reports no windows" : windows.map(describe).joined(separator: "; ")
-        if description != lastWindowDescription {
-            lastWindowDescription = description
-            log.notice("no browser window among: \(description, privacy: .public)")
+        if let focused, chosen.map({ !CFEqual($0, focused) }) ?? true {
+            // Once each time such a window comes to the front, not every second while it stays.
+            let description = traits(of: focused).summary
+            if description != lastRejectedDescription {
+                lastRejectedDescription = description
+                let outcome = chosen == nil ? "nothing to dock to" : "docking to a browser window behind it"
+                log.notice("focused window isn't a browser window: \(description, privacy: .public); \(outcome, privacy: .public)")
+            }
+        } else {
+            lastRejectedDescription = ""
         }
-        return (nil, focused)
-    }
-
-    private func describe(_ window: AXUIElement) -> String {
-        let button = query.element(window, kAXFullScreenButtonAttribute)
-        let buttonState = button.map { query.bool($0, kAXEnabledAttribute).map { $0 ? "enabled" : "disabled" } ?? "unknown" } ?? "missing"
-        // Without the window's title: it is the page's, and the log keeps no browsing history.
-        return "role=\(query.string(window, kAXRoleAttribute) ?? "nil") subrole=\(query.string(window, kAXSubroleAttribute) ?? "nil") minimized=\(query.bool(window, kAXMinimizedAttribute).map(String.init) ?? "nil") fullScreenButton=\(buttonState)"
-    }
-
-    /// Browser windows are standard windows that can go full screen. Safari's Settings
-    /// window has a disabled full-screen button, which is how it's told apart. Safari now and
-    /// then leaves the button out of a browser window for a few seconds, so a missing button
-    /// doesn't count against a window.
-    private func isBrowserWindow(_ window: AXUIElement) -> Bool {
-        guard query.string(window, kAXRoleAttribute) == kAXWindowRole,
-              query.string(window, kAXSubroleAttribute) == kAXStandardWindowSubrole,
-              query.bool(window, kAXMinimizedAttribute) != true else { return false }
-        if query.bool(window, "AXFullScreen") ?? false {
-            return true
+        if chosen == nil {
+            let description = listed.isEmpty ? "Safari reports no windows" : listed.map { traits(of: $0).summary }.joined(separator: "; ")
+            if description != lastWindowDescription {
+                lastWindowDescription = description
+                log.notice("no browser window among: \(description, privacy: .public)")
+            }
         }
-        guard let button = query.element(window, kAXFullScreenButtonAttribute) else { return true }
-        return query.bool(button, kAXEnabledAttribute) ?? true
+        return (chosen, focused)
     }
 
     // MARK: - Geometry
 
-    private func frame(of element: AXUIElement) -> CGRect? {
-        guard let positionValue = query.value(element, kAXPositionAttribute),
-              let sizeValue = query.value(element, kAXSizeAttribute) else { return nil }
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(positionValue, .cgPoint, &position),
-              AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
-        return CGRect(origin: position, size: size)
+    /// A window's frame, title and whether it's full screen, in one round trip. What Safari doesn't
+    /// give comes back nil (or not full screen), as the separate reads did.
+    private func basics(of window: AXUIElement) -> (frame: CGRect?, title: String?, isFullScreen: Bool) {
+        let attributes = [kAXPositionAttribute, kAXSizeAttribute, kAXTitleAttribute, "AXFullScreen"]
+        guard let values = query.copyMultiple(window, attributes), values.count == attributes.count else {
+            return (nil, nil, false)
+        }
+        return (Self.frame(position: values[0], size: values[1]), values[2] as? String, values[3] as? Bool ?? false)
+    }
+
+    /// A frame from an element's `AXPosition` and `AXSize` values, if both are there.
+    nonisolated private static func frame(position: CFTypeRef?, size: CFTypeRef?) -> CGRect? {
+        guard let position, let size,
+              CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero
+        var extent = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(size as! AXValue, .cgSize, &extent) else { return nil }
+        return CGRect(origin: origin, size: extent)
     }
 
     private func windowNumber(of window: AXUIElement) -> Int? {
@@ -262,19 +270,86 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
         return Int(id)
     }
 
-    /// Bottom edge (AX coordinates) of Safari's toolbar and tab bar, from the window's direct
-    /// children only so it stays fast. Nil if Safari doesn't report them (e.g. a hidden
-    /// full-screen toolbar).
+    /// Bottom edge (AX coordinates) of the lowest bar Safari shows above the page: its toolbar, the
+    /// Favourites bar, the tab bar, the find bar (SafariBars.swift). Nil if Safari reports none (e.g.
+    /// a hidden full-screen toolbar).
+    ///
+    /// Kept cheap, since it's read every second while the sidebar can slide out: the window's children
+    /// and its own buttons come in one round trip, the buttons aren't read further, each other child
+    /// takes one more, and only the split group's children are read below that.
     private func toolbarBottom(of window: AXUIElement, windowFrame: CGRect) -> CGFloat? {
-        var bottom: CGFloat?
-        for child in query.elements(window, kAXChildrenAttribute) {
-            guard let role = query.string(child, kAXRoleAttribute),
-                  role == kAXToolbarRole || role == kAXTabGroupRole,
-                  let childFrame = frame(of: child),
-                  childFrame.height < 200,
-                  childFrame.minY < windowFrame.minY + 200 else { continue }
-            bottom = max(bottom ?? childFrame.maxY, childFrame.maxY)
+        let attributes = [kAXChildrenAttribute, kAXCloseButtonAttribute, kAXMinimizeButtonAttribute, kAXZoomButtonAttribute, kAXFullScreenButtonAttribute]
+        guard let values = query.copyMultiple(window, attributes) else { return nil }
+        let buttons = values.dropFirst().compactMap { value -> AXUIElement? in
+            guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+            return (value as! AXUIElement)
         }
-        return bottom
+        let children = ((values.first ?? nil) as? [AXUIElement] ?? []).filter { child in
+            !buttons.contains { CFEqual($0, child) }
+        }
+        let bars = SafariBars.bars(among: children.compactMap { BarNode.read($0, using: query) }, windowFrame: windowFrame)
+        guard !query.timedOut else { return nil }
+        // Measured from the window's top, so moving the window doesn't log a line for every read.
+        let summary = SafariBars.summary(bars, windowTop: windowFrame.minY)
+        if summary != lastBarsSummary {
+            lastBarsSummary = summary
+            log.notice("bars above the page, from the window's top: \(summary, privacy: .public)")
+        }
+        return SafariBars.bottom(of: bars)
+    }
+
+    /// An element of the window, with what SafariBars needs read in one round trip. After a read
+    /// Safari didn't answer, the rest aren't made: each would wait as long again.
+    nonisolated private struct BarNode: SafariBarNode {
+        let element: AXUIElement
+        let query: AXQuery
+        let role: String?
+        let identifier: String?
+        let frame: CGRect?
+
+        static func read(_ element: AXUIElement, using query: AXQuery) -> BarNode? {
+            guard !query.timedOut else { return nil }
+            let attributes = [kAXRoleAttribute, kAXIdentifierAttribute, kAXPositionAttribute, kAXSizeAttribute]
+            guard let values = query.copyMultiple(element, attributes), values.count == attributes.count else { return nil }
+            return BarNode(element: element, query: query, role: values[0] as? String, identifier: values[1] as? String,
+                           frame: SafariWindowReader.frame(position: values[2], size: values[3]))
+        }
+
+        func children() -> [BarNode] {
+            guard !query.timedOut else { return [] }
+            return query.elements(element, kAXChildrenAttribute).compactMap { Self.read($0, using: query) }
+        }
+    }
+}
+
+nonisolated extension WindowTraits {
+    /// Reads what BrowserWindowRule goes by from one of Safari's windows, in one round trip. Only a
+    /// window without an identifier costs more: its full-screen button, and its zoom button if it
+    /// has no full-screen button. Call on the queue `query` belongs to; if Safari doesn't answer,
+    /// `query.timedOut` says so.
+    static func read(_ window: AXUIElement, using query: AXQuery) -> WindowTraits {
+        var traits = WindowTraits()
+        let names = [kAXRoleAttribute, kAXSubroleAttribute, kAXIdentifierAttribute, kAXMinimizedAttribute, "AXFullScreen"]
+        guard let values = query.copyMultiple(window, names), values.count == names.count else { return traits }
+        traits.role = values[0] as? String
+        traits.subrole = values[1] as? String
+        traits.identifier = values[2] as? String
+        traits.isMinimized = values[3] as? Bool
+        traits.isFullScreen = values[4] as? Bool
+        guard BrowserWindowRule.needsButtons(traits) else { return traits }
+        traits.fullScreenButton = buttonState(window, kAXFullScreenButtonAttribute, query)
+        if traits.fullScreenButton == .missing {
+            traits.zoomButton = buttonState(window, kAXZoomButtonAttribute, query)
+        }
+        return traits
+    }
+
+    private static func buttonState(_ window: AXUIElement, _ attribute: String, _ query: AXQuery) -> WindowButtonState {
+        guard let button = query.element(window, attribute) else { return .missing }
+        switch query.bool(button, kAXEnabledAttribute) {
+        case true?: return .enabled
+        case false?: return .disabled
+        case nil: return .unknown
+        }
     }
 }

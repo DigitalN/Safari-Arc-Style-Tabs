@@ -4,12 +4,12 @@ import os.log
 
 /// Keeps the sidebar panel attached to the left edge of Safari's front window, makes
 /// room for it by narrowing Safari when needed, and switches to a hover-to-reveal
-/// overlay while Safari is full screen.
+/// overlay while Safari is full screen, or in any window when the sidebar hides automatically.
 final class DockController {
-    private enum Mode {
+    private enum Mode: Equatable {
         case hidden
         case docked
-        case overlay
+        case overlay(OverlayPlace)
     }
 
     let panel: SidebarPanel
@@ -23,11 +23,10 @@ final class DockController {
     private var isEditing = false
 
     private var overlayTimer: Timer?
-    private var overlayScreen: NSScreen?
-    private var overlayRevealed = false
-    /// Revealed with the shortcut rather than by hovering.
-    private var overlayPinned = false
-    private var mouseEnteredOverlay = false
+    /// Where the overlay's panel goes and the strip that brings it out, for the current window.
+    private var overlayLayout: OverlayLayout?
+    /// Whether the overlay is out, and why (SidebarOverlay.swift).
+    private var overlayReveal = OverlayReveal()
 
     /// Width + gap the last layout used, to keep Safari flush when the width changes.
     private var appliedInset: Double?
@@ -56,6 +55,7 @@ final class DockController {
         tracker.onEvent = { [weak self] event in self?.handle(event) }
         // Any click on the sidebar means "take me to Safari".
         panel.onMouseDown = { [weak self] in self?.bringSafariForward() }
+        tracker.readsToolbarInWindows = settings.hidesAutomatically
         tracker.start()
         observeSettings()
         update(makeRoom: true)
@@ -89,6 +89,7 @@ final class DockController {
             update(makeRoom: false)
             scheduleMakeRoom()
         case .launched:
+            store.safariDidLaunch()
             update(makeRoom: true)
             store.requestSnapshot()
         case .focusChanged, .visibilityChanged, .windowChanged:
@@ -108,6 +109,7 @@ final class DockController {
     private func observeSettings() {
         withObservationTracking {
             _ = settings.sidebarVisible
+            _ = settings.hidesAutomatically
             _ = settings.width
         } onChange: { [weak self] in
             DispatchQueue.main.async {
@@ -119,6 +121,11 @@ final class DockController {
     }
 
     private func settingsChanged() {
+        if tracker.readsToolbarInWindows != settings.hidesAutomatically {
+            tracker.readsToolbarInWindows = settings.hidesAutomatically
+            // The overlay starts below the toolbar, which a normal window's last read didn't include.
+            tracker.refreshWindow(full: false) { [weak self] _ in self?.update(makeRoom: false) }
+        }
         guard settings.sidebarVisible else {
             restoreSafariFrame()
             hide()
@@ -167,10 +174,24 @@ final class DockController {
             return
         }
 
-        if tracker.isFullScreen(window) {
-            note("full screen overlay")
-            showOverlay(on: screen(containing: axFrame), window: window)
+        switch SidebarPlacement.choose(fullScreen: tracker.isFullScreen(window), hidesAutomatically: settings.hidesAutomatically) {
+        case .overlay(.fullScreen):
+            let layout = fullScreenLayout(on: screen(containing: axFrame), window: window)
+            showOverlay(.fullScreen, layout: layout)
+            note("full screen overlay: panel at \(layout.panel)")
             return
+        case .overlay(.window):
+            // Safari keeps its whole window. If the sidebar had made room beside it, give it back.
+            if appliedInset != nil {
+                restoreSafariFrame { [weak self] in self?.update(makeRoom: false) }
+                appliedInset = nil
+            }
+            let layout = windowLayout(for: axFrame, window: window)
+            showOverlay(.window, layout: layout)
+            note("hidden until pointed at: Safari at \(axFrame.integral), panel at \(layout.panel)")
+            return
+        case .docked:
+            break
         }
         stopOverlay()
 
@@ -215,12 +236,28 @@ final class DockController {
         if !tracker.isOnActiveSpace(window) {
             return "Safari's window is on another Space"
         }
-        let fullScreen = tracker.isFullScreen(window)
-        if mode == .overlay {
-            return fullScreen ? nil : "Safari left full screen"
-        }
-        if fullScreen {
+        let wanted = SidebarPlacement.choose(fullScreen: tracker.isFullScreen(window), hidesAutomatically: settings.hidesAutomatically)
+        switch (mode, wanted) {
+        case (.hidden, _):
+            return nil
+        // Safari's bars come and go without the window moving or changing size (the Favourites bar,
+        // the find bar, the tab layout, the full-screen toolbar sliding down), so nothing announces
+        // them: the last read may only now include them (#35). Compared with the layout last applied,
+        // not the panel's frame, so a frame AppKit adjusts can't make this fix it every second.
+        case (.overlay(.fullScreen), .overlay(.fullScreen)):
+            return overlayLayout != fullScreenLayout(on: screen(containing: frame), window: window) ? "sidebar isn't below Safari's bars in full screen" : nil
+        case (.overlay(.fullScreen), _):
+            return "Safari left full screen"
+        case (_, .overlay(.fullScreen)):
             return "Safari is full screen"
+        case (.overlay(.window), .overlay(.window)):
+            return overlayLayout != windowLayout(for: frame, window: window) ? "sidebar isn't where it comes out over Safari's window" : nil
+        case (.overlay(.window), .docked):
+            return "the sidebar no longer hides automatically"
+        case (.docked, .overlay(.window)):
+            return "the sidebar hides automatically now"
+        case (.docked, .docked):
+            break
         }
         if !panel.isVisible || panel.alphaValue < 1 || !tracker.isOnActiveSpace(windowNumber: panel.windowNumber) {
             return "sidebar isn't showing"
@@ -313,7 +350,7 @@ final class DockController {
     /// When the sidebar width changes and Safari was sitting right against it, move
     /// Safari's left edge along with it.
     private func keepSafariFlush() {
-        guard let previous = appliedInset,
+        guard let previous = appliedInset, !settings.hidesAutomatically,
               let window = tracker.window,
               let frame = tracker.frame(of: window),
               !tracker.isFullScreen(window) else { return }
@@ -327,9 +364,10 @@ final class DockController {
         appliedInset = settings.width
     }
 
-    /// Gives Safari its space back when the sidebar is hidden or the app quits. When quitting,
-    /// `waiting` holds the app until Safari has been moved, since nothing runs afterwards.
-    func restoreSafariFrame(waiting: Bool = false) {
+    /// Gives Safari its space back when the sidebar is hidden, starts hiding automatically, or the
+    /// app quits. When quitting, `waiting` holds the app until Safari has been moved, since nothing
+    /// runs afterwards. Otherwise `completion` runs once Safari has been moved.
+    func restoreSafariFrame(waiting: Bool = false, then completion: (() -> Void)? = nil) {
         guard let inset = appliedInset,
               let window = tracker.window,
               let frame = tracker.frame(of: window),
@@ -340,7 +378,7 @@ final class DockController {
         if waiting {
             tracker.setFrameAndWait(target, of: window)
         } else {
-            tracker.setFrame(target, of: window)
+            tracker.setFrame(target, of: window) { _ in completion?() }
         }
     }
 
@@ -352,23 +390,34 @@ final class DockController {
         return best ?? NSScreen.main ?? NSScreen.screens[0]
     }
 
-    // MARK: - Full screen
+    // MARK: - Overlay
 
     /// A full-screen window can't be resized, so the sidebar stays hidden and slides out
     /// over the page when the pointer reaches the left edge of the screen (or the Side Tabs
-    /// toolbar button / shortcut is used).
-    private func showOverlay(on screen: NSScreen, window: AXUIElement) {
-        mode = .overlay
-        overlayScreen = screen
-        panel.style.attached = false
-        layOutOverlay(on: screen, window: window)
-        panel.level = .floating
-        if overlayRevealed {
-            if !panel.isVisible {
-                panel.orderFrontRegardless()
-            }
-        } else if panel.isVisible {
+    /// toolbar button / shortcut is used). When the sidebar hides automatically, a normal window
+    /// gets the same, from the window's left edge.
+    private func showOverlay(_ place: OverlayPlace, layout: OverlayLayout) {
+        if case .overlay(let previous) = mode, previous != place {
+            // Safari went into or out of full screen with the setting on: what was out belonged to
+            // the other place.
+            stopOverlay()
+        }
+        mode = .overlay(place)
+        overlayLayout = layout
+        // Out of sight before it changes shape and level, so a sidebar docked a moment ago never
+        // shows over Safari on its way out.
+        if !overlayReveal.isRevealed && panel.isVisible {
             panel.orderOut(nil)
+        }
+        panel.style.attached = false
+        // Sized as soon as the place is known, so revealing it later is instant.
+        if panel.frame != layout.panel {
+            panel.setFrame(layout.panel, display: true)
+            panel.invalidateShadow()
+        }
+        panel.level = .floating
+        if overlayReveal.isRevealed && !panel.isVisible {
+            panel.orderFrontRegardless()
         }
         if overlayTimer == nil {
             let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
@@ -379,103 +428,100 @@ final class DockController {
         }
     }
 
-    /// Starts below Safari's toolbar and tab bar so the sidebar never covers them. Sized
-    /// when full screen is detected, so revealing it later is instant.
-    private func layOutOverlay(on screen: NSScreen, window: AXUIElement) {
-        let inset: CGFloat = 8
-        // Safari's full-screen toolbar is about 52 pt tall; never start above that.
-        let minimumToolbar: CGFloat = 60
-        let mainHeight = NSScreen.screens.first?.frame.height ?? screen.frame.maxY
-        let screenTop = mainHeight - screen.frame.maxY
-        let toolbarBottom = max(tracker.toolbarBottom(of: window) ?? 0, screenTop + minimumToolbar)
-        let top = mainHeight - toolbarBottom - inset
-        let bottom = screen.frame.minY + inset
-        let target = NSRect(
-            x: screen.frame.minX + inset,
-            y: bottom,
-            width: settings.width,
-            height: max(top - bottom, 200)
-        ).integral
-        if panel.frame != target {
-            panel.setFrame(target, display: true)
-            panel.invalidateShadow()
-        }
+    /// Starts below Safari's toolbar and the bars under it, so the sidebar never covers them.
+    private func fullScreenLayout(on screen: NSScreen, window: AXUIElement) -> OverlayLayout {
+        OverlayLayout.fullScreen(
+            screen: screen.frame,
+            toolbarBottom: tracker.toolbarBottom(of: window),
+            mainHeight: NSScreen.screens.first?.frame.height ?? screen.frame.maxY,
+            width: settings.width
+        )
+    }
+
+    /// Over the page of a normal window at `axFrame`, below its toolbar and the bars under it, with
+    /// the strip along its left edge.
+    private func windowLayout(for axFrame: CGRect, window: AXUIElement) -> OverlayLayout {
+        let screen = screen(containing: axFrame)
+        return OverlayLayout.window(
+            frame: axFrame.flippedScreenCoordinates,
+            visible: screen.visibleFrame,
+            toolbarBottom: tracker.toolbarBottom(of: window),
+            mainHeight: NSScreen.screens.first?.frame.height ?? screen.frame.maxY,
+            width: settings.width
+        )
     }
 
     private func stopOverlay() {
         overlayTimer?.invalidate()
         overlayTimer = nil
-        overlayScreen = nil
-        overlayRevealed = false
-        overlayPinned = false
-        mouseEnteredOverlay = false
+        overlayLayout = nil
+        overlayReveal = OverlayReveal()
         panel.alphaValue = 1
     }
 
-    var isShowingFullScreenOverlay: Bool { mode == .overlay }
-
-    /// The toolbar button / shortcut in full screen: slide the sidebar out or put it away.
-    func toggleOverlay() {
-        guard mode == .overlay else { return }
-        if overlayRevealed {
-            concealOverlay()
-        } else {
-            overlayPinned = true
-            revealOverlay()
+    /// Whether the toolbar button, its shortcut and the menu bar item slide the sidebar out or
+    /// away rather than turning it off. In a normal window another app can be in front, as when the
+    /// menu bar item is used from it; the sidebar can't come out over Safari then, so the item turns
+    /// it off as its name says.
+    var togglesOverlay: Bool {
+        switch mode {
+        case .overlay(.fullScreen): true
+        case .overlay(.window): tracker.isSafariFrontmost
+        case .hidden, .docked: false
         }
+    }
+
+    /// The toolbar button / shortcut while there's an overlay: slide the sidebar out or put it away.
+    func toggleOverlay() {
+        guard case .overlay = mode else { return }
+        perform(overlayReveal.toggle(), because: "toolbar button or shortcut")
     }
 
     private func pollOverlay() {
-        guard let screen = overlayScreen, tracker.isSafariFrontmost else {
-            if overlayRevealed {
-                concealOverlay()
-            }
-            return
-        }
-        let mouse = NSEvent.mouseLocation
-        let edge = screen.frame
-        if !overlayRevealed {
-            let atLeftEdge = mouse.x <= edge.minX + 2 && mouse.y >= edge.minY && mouse.y <= edge.maxY
-            if atLeftEdge {
-                revealOverlay()
-            }
-            return
-        }
+        guard let layout = overlayLayout else { return }
+        // Keep it out while a context menu or drag is in progress, or while renaming.
+        let holding = isEditing || RunLoop.current.currentMode == .eventTracking || NSEvent.pressedMouseButtons != 0
+        let safariInFront = tracker.isSafariFrontmost
+        let action = overlayReveal.poll(
+            pointer: NSEvent.mouseLocation,
+            strip: layout.strip,
+            panel: panel.frame,
+            safariInFront: safariInFront,
+            holding: holding,
+            // Never over another Space or a full-screen video, even in the moment before the
+            // dock hears about the switch.
+            mayReveal: { tracker.window.map { tracker.isOnActiveSpace($0) } ?? false }
+        )
+        perform(action, because: action == .reveal ? "pointer at the edge" : safariInFront ? "pointer left" : "Safari isn't in front")
+    }
 
-        let inside = panel.frame.insetBy(dx: -24, dy: -24).contains(mouse)
-        if inside {
-            mouseEnteredOverlay = true
-        }
-        // Opened with the shortcut: stay until the pointer has visited the sidebar and left.
-        if overlayPinned && !mouseEnteredOverlay {
+    private func perform(_ action: OverlayReveal.Action, because reason: String) {
+        switch action {
+        case .none:
             return
-        }
-        // Keep it open while a context menu or drag is in progress, or while renaming.
-        let tracking = RunLoop.current.currentMode == .eventTracking || NSEvent.pressedMouseButtons != 0
-        if !isEditing && !tracking && !inside {
+        case .reveal:
+            revealOverlay()
+        case .conceal:
             concealOverlay()
         }
+        log.notice("overlay \(action == .reveal ? "out" : "away", privacy: .public): \(reason, privacy: .public)")
     }
 
     private func revealOverlay() {
-        overlayRevealed = true
-        mouseEnteredOverlay = false
         panel.alphaValue = 1
         panel.orderFrontRegardless()
     }
 
     private func concealOverlay() {
-        overlayRevealed = false
-        overlayPinned = false
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.1
             panel.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, !self.overlayRevealed else { return }
+                guard let self, !self.overlayReveal.isRevealed else { return }
                 // Safari may have left full screen while the sidebar faded out. If the
                 // sidebar is docked beside it now, leave it showing.
-                if self.mode == .overlay {
+                if case .overlay = self.mode {
                     self.panel.orderOut(nil)
                 }
                 self.panel.alphaValue = 1
