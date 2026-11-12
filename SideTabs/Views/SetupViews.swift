@@ -286,6 +286,9 @@ private struct SetupTip: View {
 }
 
 struct SettingsView: View {
+    /// The app's one updater, the menu bar menu's too, so the two show the same state at the same moment.
+    let updater: Updater
+
     @Environment(AppSettings.self) private var settings
     /// The Mac's "Minimize windows into application icon" option. Read when Settings opens and each
     /// time it comes back to the front, so the recommendation goes away once the option is turned on
@@ -363,6 +366,13 @@ struct SettingsView: View {
                 Toggle(isOn: $settings.updatesAutomatically) {
                     Text("Update automatically")
                     Text("Checks GitHub when Safari starts and installs new versions when you're not using your Mac.")
+                }
+                // The menu bar menu's control, beside the same version line (#70). While the updater is
+                // busy it's a button that can't be clicked, as the menu greys its item out.
+                LabeledContent("Side Tabs \(Updater.currentVersion)") {
+                    let update = UpdateControl(updater.status)
+                    Button(update.title) { updater.checkNow() }
+                        .disabled(!update.isButton)
                 }
             }
 
@@ -470,15 +480,11 @@ struct MenuContent: View {
             .keyboardShortcut(",")
         Divider()
         Text("Side Tabs \(Updater.currentVersion)")
-        switch app.updater.status {
-        case .idle:
-            Button("Check for Updates…") { app.updater.checkNow() }
-        case .checking:
-            Text("Checking for Updates…")
-        case .downloading(let version):
-            Text("Downloading Side Tabs \(version)…")
-        case .ready(let version):
-            Button("Restart to Update to \(version)") { app.updater.checkNow() }
+        let update = UpdateControl(app.updater.status)
+        if update.isButton {
+            Button(update.title) { app.updater.checkNow() }
+        } else {
+            Text(update.title)
         }
         Divider()
         Button("Quit Side Tabs") { NSApp.terminate(nil) }

@@ -69,6 +69,12 @@ echo "== dock recommendation"
 swiftc -o "$WORK/dock-recommendation-checks" Tests/DockRecommendationChecks/main.swift SideTabs/DockMinimizeOption.swift
 "$WORK/dock-recommendation-checks"
 
+# What Check for Updates… shows in each of the updater's states, in the menu bar menu and Settings → General
+# (#70), and which states can be clicked.
+echo "== update control"
+swiftc -o "$WORK/update-control-checks" Tests/UpdateControlChecks/main.swift SideTabs/UpdateControl.swift
+"$WORK/update-control-checks"
+
 echo "== docked window notifications"
 swiftc -o "$WORK/docked-window-checks" Tests/DockedWindowChecks/main.swift SideTabs/DockedWindowNotifications.swift
 "$WORK/docked-window-checks"
