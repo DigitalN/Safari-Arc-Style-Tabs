@@ -29,8 +29,13 @@ Building, the release checklist, how it works, and testing the updater are in
 ## Testing on the maintainer's Mac
 
 - Don't quit Safari or other apps to test something without asking.
-- After testing the updater, remove `UpdateFeedURL`, delete test builds, and reinstall a
-  normal build with `scripts/install.sh`.
+- After testing the updater, or a live test with a build of its own, remove `UpdateFeedURL`,
+  delete test builds, and put back the release that was installed before: from that
+  release's DMG on GitHub, opened with `hdiutil attach -nobrowse` so no Finder window opens
+  (*Putting the release back* in DEVELOPMENT.md). Side Tabs quits for this; Safari doesn't.
+  Then run `scripts/check-installed.sh`, which must pass.
+- Downloading the maintainer's own release DMGs from GitHub to put the release back needs no
+  extra ask.
 - Say so before switching apps or opening windows on screen for a test (for example
   `open -a Finder`). The maintainer may be in the middle of something.
 - Claude's shell has no Accessibility or Screen Recording access, so it can't read
