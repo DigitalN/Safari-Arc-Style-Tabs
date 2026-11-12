@@ -2756,6 +2756,166 @@ do {
     check(creates(sent()).count == createsBefore + 2, "after a failed open, the next click opens it")
 }
 
+// MARK: - Which copy of the extension Safari runs (#67)
+
+let appPath = "/Applications/Side Tabs.app"
+let ownExtension = appPath + "/Contents/PlugIns/Side Tabs Extension.appex"
+let leftoverApp = "/Users/someone/Library/Developer/Xcode/DerivedData/SideTabs-CLI/Build/Products/Release/Side Tabs.app"
+let leftoverExtension = leftoverApp + "/Contents/PlugIns/Side Tabs Extension.appex"
+
+do {
+    // Where a message's handler is, against the running app's bundle.
+    check(ExtensionCopyCheck.sender(extensionPath: ownExtension, appPath: appPath) == .own, "the extension inside the running app is its own")
+    check(ExtensionCopyCheck.sender(extensionPath: leftoverExtension, appPath: appPath) == .other(leftoverApp),
+          "one inside another copy of the app is that copy's")
+    check(ExtensionCopyCheck.sender(extensionPath: nil, appPath: appPath) == .unknown
+              && ExtensionCopyCheck.sender(extensionPath: "", appPath: appPath) == .unknown,
+          "an extension that sends no path can't be told")
+    check(ExtensionCopyCheck.sender(extensionPath: "/applications/side tabs.app/Contents/PlugIns/Side Tabs Extension.appex", appPath: appPath) == .own,
+          "case doesn't count, as on the Mac's disk")
+    check(ExtensionCopyCheck.sender(extensionPath: "/Applications/Other/../Side Tabs.app/Contents/PlugIns/Side Tabs Extension.appex", appPath: appPath + "/") == .own,
+          "nor do .. or a slash at the end")
+    check(ExtensionCopyCheck.sender(extensionPath: "/Applications/Side Tabs.app copy.app/Contents/PlugIns/Side Tabs Extension.appex", appPath: appPath)
+              == .other("/Applications/Side Tabs.app copy.app"),
+          "a copy whose path only starts like the app's is another copy")
+    let loose = "/Users/someone/Library/Developer/Xcode/DerivedData/SideTabs-CLI/Build/Products/Release/Side Tabs Extension.appex"
+    check(ExtensionCopyCheck.sender(extensionPath: loose, appPath: appPath) == .other(loose),
+          "the extension Xcode leaves on its own beside the app is a copy of its own")
+    check(ExtensionCopyCheck.bundle(ofExtension: "/Volumes/Side Tabs/Side Tabs.app/Contents/PlugIns/Side Tabs Extension.appex") == "/Volumes/Side Tabs/Side Tabs.app",
+          "the copy on a mounted disk image is that app")
+
+    let listing = """
+         com.digitaln.sidetabs.extension(1.3.0)\t7D1C3191-109F-4D43-8086-5D586EB9B069\t2026-11-12 14:01:30 +0000\t/Applications/Side Tabs.app/Contents/PlugIns/Side Tabs Extension.appex
+    +    com.digitaln.sidetabs.extension(9.0)\tA6F2E0B1-0000-4000-8000-000000000000\t2026-11-12 08:01:30 +0000\t\(leftoverExtension)
+     (2 plug-ins)
+    """
+    check(ExtensionCopyCheck.paths(inPluginkitListing: listing) == [ownExtension, leftoverExtension], "pluginkit's listing gives each copy's path")
+    check(ExtensionCopyCheck.paths(inPluginkitListing: "  (no matches)\n").isEmpty, "and none when it has none")
+}
+
+/// A store in an app at `appPath`, with its own awake clock, whose repairs the test finishes:
+/// `repairs()` are the copies each was given, and `finish(found)` ends the one running.
+func makeCopyStore(appPath: String = appPath) -> (TabStore, advance: (TimeInterval) -> Void, repairs: () -> [String?], finish: ([String]) -> Void) {
+    storeCount += 1
+    let store = TabStore(stateURL: stateFolder.appending(path: "state-\(storeCount).json"))
+    store.sendCommand = { _, _ in }
+    store.extensionCopies = ExtensionCopyCheck(appPath: appPath)
+    var ahead: TimeInterval = 0
+    store.uptime = { ProcessInfo.processInfo.systemUptime + ahead }
+    var asked: [String?] = []
+    var running: (([String]) -> Void)?
+    store.repairExtensionRegistration = { reported, done in
+        asked.append(reported)
+        running = done
+    }
+    return (store, { ahead += $0 }, { asked }, { found in
+        let done = running
+        running = nil
+        done?(found)
+    })
+}
+
+func heartbeat(_ store: TabStore, from path: String?) {
+    var object: [String: Any] = ["type": "heartbeat", "instance": instance, "seq": 0]
+    if let path { object["extensionPath"] = path }
+    send(store, object)
+}
+
+do {
+    let (store, advance, repairs, finish) = makeCopyStore()
+    heartbeat(store, from: ownExtension)
+    check(repairs().isEmpty && store.otherExtensionCopy == nil, "messages from the app's own extension are fine")
+
+    heartbeat(store, from: leftoverExtension)
+    check(repairs() == [leftoverApp], "one from another copy's extension registers the app's own in its place, naming that copy")
+    heartbeat(store, from: leftoverExtension)
+    check(repairs().count == 1, "only one repair at a time")
+    finish([leftoverApp])
+    advance(2)
+    heartbeat(store, from: leftoverExtension)
+    check(store.otherExtensionCopy == nil, "a message from the other copy right after the repair shows nothing yet: Safari takes a moment to switch")
+    check(repairs().count == 1, "nor repairs again")
+
+    advance(ExtensionCopyCheck.switchTime)
+    heartbeat(store, from: leftoverExtension)
+    check(store.otherExtensionCopy == ExtensionCopyCheck.OtherCopy(path: leftoverApp),
+          "once Safari had its time and still runs the other copy, the sidebar says where it is")
+    check(repairs().count == 1, "and doesn't repair again straight away")
+    advance(ExtensionCopyCheck.firstWait)
+    heartbeat(store, from: leftoverExtension)
+    check(repairs().count == 2, "a minute after the last repair, it tries again")
+    finish([leftoverApp])
+    check(store.extensionCopies.waitBeforeNextRepair == 2 * ExtensionCopyCheck.firstWait, "and waits twice as long before the next")
+    check(store.otherExtensionCopy != nil, "the notice stays meanwhile")
+
+    heartbeat(store, from: ownExtension)
+    check(store.otherExtensionCopy == nil, "the notice goes once the app's own extension talks to it")
+    check(store.extensionCopies.waitBeforeNextRepair == 0, "and the next problem is repaired at once")
+    heartbeat(store, from: leftoverExtension)
+    check(repairs().count == 3, "as when Safari picks up the other copy again")
+}
+
+do {
+    // An extension too old to say where it is: only a command that finds no extension of the app's tells.
+    let (store, advance, repairs, finish) = makeCopyStore()
+    heartbeat(store, from: nil)
+    check(repairs().isEmpty, "an extension without a path isn't a problem by itself (after an update Safari runs the old one from the same place for a while)")
+    store.commandFoundNoExtension()
+    check(repairs() == [nil], "a command that finds no extension of the app's registers its own, with no copy to name")
+    finish(["/Volumes/Side Tabs/Side Tabs.app"])
+    advance(ExtensionCopyCheck.switchTime + 1)
+    heartbeat(store, from: nil)
+    store.commandFoundNoExtension()
+    check(store.otherExtensionCopy == ExtensionCopyCheck.OtherCopy(path: "/Volumes/Side Tabs/Side Tabs.app"),
+          "if commands still fail while that extension talks, the notice names the copy the repair found")
+}
+
+do {
+    // No copy talking at all: commands fail (the extension is off, say), and registering the app's own is harmless,
+    // but nothing says another copy runs.
+    let (store, advance, repairs, finish) = makeCopyStore()
+    store.commandFoundNoExtension()
+    check(repairs().count == 1, "a failed command with no extension talking still registers the app's own")
+    finish([])
+    advance(ExtensionCopyCheck.switchTime + 1)
+    store.commandFoundNoExtension()
+    check(store.otherExtensionCopy == nil, "but no notice: no other copy is talking")
+    advance(ExtensionCopyCheck.firstWait)
+    store.commandFoundNoExtension()
+    check(repairs().count == 2, "it tries again after the wait")
+
+    // The app's own extension talking, and a command failing anyway (Safari reloading it, say): no notice.
+    heartbeat(store, from: ownExtension)
+    finish([])
+    advance(ExtensionCopyCheck.switchTime + 1)
+    store.commandFoundNoExtension()
+    check(store.otherExtensionCopy == nil, "a command failing while the app's own extension talks shows no notice")
+}
+
+do {
+    // The app runs from where macOS made up a path for it (App Translocation): it can't put that extension in
+    // Safari's hands, so it only says where the copy Safari runs is.
+    let translocated = "/private/var/folders/xy/abc/T/AppTranslocation/0A1B2C3D/d/Side Tabs.app"
+    let (store, _, repairs, _) = makeCopyStore(appPath: translocated)
+    heartbeat(store, from: ownExtension)
+    check(repairs().isEmpty, "a translocated app doesn't register its own extension")
+    check(store.otherExtensionCopy == ExtensionCopyCheck.OtherCopy(path: appPath), "and the sidebar says where Safari's copy is right away")
+}
+
+do {
+    var copies = ExtensionCopyCheck(appPath: appPath)
+    var waits: [TimeInterval] = []
+    var now: TimeInterval = 0
+    for _ in 0..<8 {
+        now += 3600
+        _ = copies.heard(extensionPath: leftoverExtension, at: now)
+        copies.repairStarted()
+        copies.repairFinished(otherCopies: [], at: now)
+        waits.append(copies.waitBeforeNextRepair)
+    }
+    check(waits == [60, 120, 240, 480, 960, 1800, 1800, 1800], "repairs that don't work wait 1, 2, 4, 8, 16 minutes, then half an hour")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

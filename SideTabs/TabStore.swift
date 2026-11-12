@@ -220,6 +220,7 @@ final class TabStore {
 
     func handleMessage(type: String, payload: Data, object: [String: Any]) -> [String: Any] {
         lastMessageAt = uptime()
+        noteExtensionPath(object["extensionPath"] as? String)
         let sender = hear(from: object)
         if sender == .replaced {
             return [:]
@@ -930,6 +931,76 @@ final class TabStore {
     /// A profile for the log: its UUID's first characters, never its name.
     private static func describe(_ profile: String?) -> String {
         profile.map { "profile \($0.prefix(8))" } ?? "default profile"
+    }
+
+    // MARK: - Which copy of the extension Safari runs (#67)
+
+    /// Safari runs another copy of Side Tabs' extension, and registering this app's in its place didn't make it
+    /// switch: where that copy is, for the notice at the top of the sidebar. Nil otherwise, and again as soon as
+    /// this app's extension talks to it.
+    private(set) var otherExtensionCopy: ExtensionCopyCheck.OtherCopy?
+    /// Which copy Safari runs. Only the checks in Tests/ give it another app path.
+    @ObservationIgnored var extensionCopies = ExtensionCopyCheck(appPath: Bundle.main.bundlePath)
+    /// Registers this app's extension with macOS in place of other copies' (ExtensionRegistration), given the
+    /// copy Safari runs when that's known. `done` runs on the main thread, with the other copies it found.
+    @ObservationIgnored var repairExtensionRegistration: ((_ otherCopy: String?, _ done: @escaping (_ otherCopies: [String]) -> Void) -> Void)?
+    @ObservationIgnored private let bridgeLog = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "bridge")
+
+    /// Notes where the handler that passed on a message is (`extensionPath`; nil from an extension older than
+    /// this app's).
+    private func noteExtensionPath(_ path: String?) {
+        let before = extensionCopies.lastSender
+        let repair = extensionCopies.heard(extensionPath: path, at: uptime())
+        if extensionCopies.lastSender != before {
+            bridgeLog.notice("messages come from \(Self.describe(self.extensionCopies.lastSender), privacy: .public)")
+        }
+        if repair {
+            startRepair(because: "Safari runs another copy's extension")
+        }
+        showOtherCopyIfNeeded()
+    }
+
+    /// A command failed with `SFErrorNoExtensionFound` (ExtensionBridge): Safari runs no extension of this app's.
+    func commandFoundNoExtension() {
+        if extensionCopies.commandFoundNoExtension(at: uptime()) {
+            startRepair(because: "a command found no extension of this app's in Safari")
+        }
+        showOtherCopyIfNeeded()
+    }
+
+    private func startRepair(because reason: String) {
+        guard let repairExtensionRegistration else { return }
+        extensionCopies.repairStarted()
+        var otherCopy: String?
+        if case .other(let path) = extensionCopies.lastSender {
+            otherCopy = path
+        }
+        bridgeLog.notice("\(reason, privacy: .public): registering this app's extension in place of other copies'")
+        repairExtensionRegistration(otherCopy) { [weak self] others in
+            guard let self else { return }
+            extensionCopies.repairFinished(otherCopies: others, at: uptime())
+        }
+    }
+
+    private func showOtherCopyIfNeeded() {
+        let notice = extensionCopies.notice
+        guard notice != otherExtensionCopy else { return }
+        otherExtensionCopy = notice
+        if let notice {
+            bridgeLog.notice("Safari still runs another copy's extension, \(ExtensionCopyCheck.describe(notice.path), privacy: .public); the sidebar says where it is")
+        } else {
+            bridgeLog.notice("this app's extension talks to it now; the sidebar no longer shows the other copy")
+        }
+    }
+
+    /// Where a message came from, for the log.
+    private static func describe(_ sender: ExtensionCopyCheck.Sender?) -> String {
+        switch sender {
+        case .own: "this app's extension"
+        case .other(let path): "another copy's extension, in \(ExtensionCopyCheck.describe(path))"
+        case .unknown: "an extension that doesn't say where it is, older than this app"
+        case nil: "no extension yet"
+        }
     }
 
     // MARK: - Window selection

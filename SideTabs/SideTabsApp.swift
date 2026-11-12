@@ -75,6 +75,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.sendCommand = { [weak self] command, failed in
             self?.bridge.send(command, failed: failed)
         }
+        // Safari running another copy's extension (#67): commands fail, and the store has this app's registered
+        // in its place.
+        bridge.onNoExtensionFound = { [store] in store.commandFoundNoExtension() }
+        store.repairExtensionRegistration = { reported, done in
+            ExtensionRegistration.repair(reported: reported, done: done)
+        }
         store.currentHolds = { [holdWatcher] in holdWatcher.holds }
         holdWatcher.onChange = { [store] in store.holdsMayHaveChanged() }
         holdWatcher.start()
