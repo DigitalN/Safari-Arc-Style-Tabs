@@ -14,14 +14,51 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 VOLUME_NAME="Side Tabs"
 
 BUILT=$(scripts/build.sh "$@")
-# Keep the build product from showing up in Safari as a second copy of the extension.
-"$LSREGISTER" -u "$BUILT" >/dev/null 2>&1 || true
+# Xcode also leaves the extension on its own beside the app.
+BUILT_EXTENSION="$(dirname "$BUILT")/Side Tabs Extension.appex"
+# Both are deleted at the end, so make sure they're the build's.
+[[ "$BUILT" == "$HOME/Library/Developer/Xcode/DerivedData/SideTabs-CLI/"*"/Side Tabs.app" ]] || {
+    echo "Unexpected build path: $BUILT" >&2
+    exit 1
+}
+
+# Work outside the repo, which may be synced by iCloud Drive (see build.sh).
+WORK="$HOME/Library/Developer/Xcode/DerivedData/SideTabs-CLI/dmg"
+MOUNT=""
+
+detach() {
+    [[ -n "$MOUNT" ]] || return 0
+    hdiutil detach -quiet "$MOUNT" 2>/dev/null || hdiutil detach -quiet -force "$MOUNT" 2>/dev/null || true
+    MOUNT=""
+}
+
+unregister() {
+    "$LSREGISTER" -u "$1" >/dev/null 2>&1 || true
+    if [[ "$1" == *.appex ]]; then
+        pluginkit -r "$1" >/dev/null 2>&1 || true
+    else
+        pluginkit -r "$1/Contents/PlugIns/Side Tabs Extension.appex" >/dev/null 2>&1 || true
+    fi
+}
+
+# Keep the build from showing up in Safari as a second copy of the extension, and leave no copy of
+# Side Tabs behind once the disk image is made, or if this stops early: a copy left on disk gets
+# registered again, after a restart for one, and Safari can then run its extension instead of the
+# installed one (#67). The .dSYMs stay.
+cleanup() {
+    detach
+    unregister "$WORK/source/Side Tabs.app"
+    unregister "$BUILT"
+    unregister "$BUILT_EXTENSION"
+    rm -rf "$WORK" "$BUILT" "$BUILT_EXTENSION"
+}
+trap cleanup EXIT
+unregister "$BUILT"
+unregister "$BUILT_EXTENSION"
 
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$BUILT/Contents/Info.plist")
 DMG="dist/Side-Tabs-$VERSION.dmg"
 
-# Work outside the repo, which may be synced by iCloud Drive (see build.sh).
-WORK="$HOME/Library/Developer/Xcode/DerivedData/SideTabs-CLI/dmg"
 rm -rf "$WORK"
 mkdir -p "$WORK/source/.background"
 ditto "$BUILT" "$WORK/source/Side Tabs.app"
@@ -34,8 +71,6 @@ hdiutil create -quiet -volname "$VOLUME_NAME" -srcfolder "$WORK/source" -fs HFS+
     -format UDRW -size 40m -ov "$WORK/layout.dmg"
 MOUNT=$(hdiutil attach -readwrite -noverify -noautoopen "$WORK/layout.dmg" | grep -o '/Volumes/.*$')
 DISK=$(basename "$MOUNT")
-detach() { hdiutil detach -quiet "$MOUNT" 2>/dev/null || hdiutil detach -quiet -force "$MOUNT" 2>/dev/null || true; }
-trap detach EXIT
 
 # Icon positions match the arrow in make-dmg-background.swift: a 660 × 420 pt window
 # with icon centers at x = 170 and x = 490.
@@ -84,11 +119,9 @@ xcrun SetFile -a C "$MOUNT"
 rm -rf "$MOUNT/.fseventsd"
 sync
 detach
-trap - EXIT
 
 mkdir -p dist
 rm -f "$DMG"
 hdiutil convert -quiet "$WORK/layout.dmg" -format UDZO -imagekey zlib-level=9 -o "$DMG"
-rm -rf "$WORK"
 
 echo "$DMG"
