@@ -87,6 +87,10 @@ final class TabStore {
             settleSwitchPreview()
         }
     }
+    /// Each copy's windows as it last reported them: its last snapshot, with the highlight where its reports of
+    /// tab switches since have put it. `snapshots` also has what the sidebar changed at once for a click, a
+    /// close, a move or a mute; a window goes back to this when its command can't reach the extension (#67).
+    @ObservationIgnored private var reportedSnapshots: [String: Snapshot] = [:]
     /// Closes tabs nobody has looked at for a while, when that's turned on, and keeps the list for
     /// reopening them (TabCleanup.swift).
     let cleanup = TabCleanup()
@@ -156,7 +160,9 @@ final class TabStore {
     /// What the sidebar showed when the fade began, kept on screen while it fades out.
     private(set) var fadingOutContent: ShownContent?
 
-    @ObservationIgnored var sendCommand: (([String: Any]) -> Void)?
+    /// Sends a command to the extension (ExtensionBridge.send). The closure it's given runs on the main thread
+    /// if Safari couldn't take the command (#67).
+    @ObservationIgnored var sendCommand: ((_ command: [String: Any], _ failed: @escaping () -> Void) -> Void)?
     @ObservationIgnored var onToggleSidebar: (() -> Void)?
     @ObservationIgnored var onRenameStateChanged: ((Bool) -> Void)?
     @ObservationIgnored var onOpenAddressBar: (() -> Void)?
@@ -296,6 +302,7 @@ final class TabStore {
             return
         }
         let isNewInstance = snapshots[snapshot.instance] == nil
+        reportedSnapshots[snapshot.instance] = snapshot
         snapshots[snapshot.instance] = snapshot
         let tabCounts = snapshot.windows.map { String($0.tabs.count) }.joined(separator: "+")
         log.info("snapshot \(snapshot.seq) from \(snapshot.instance.prefix(8), privacy: .public): \(snapshot.windows.count) windows, tabs \(tabCounts, privacy: .public), focused \(snapshot.focusedWindowId ?? -1)")
@@ -392,6 +399,14 @@ final class TabStore {
                 log.info("ignoring an older tab switch report (\(seq)) from \(instance.prefix(8), privacy: .public)")
                 return
             }
+        }
+        // It's what the copy says, whatever the sidebar makes of it below.
+        if var copy = reportedSnapshots[instance], let index = copy.windows.firstIndex(where: { $0.id == windowId }),
+           copy.windows[index].tabs.contains(where: { $0.id == tabId }) {
+            for position in copy.windows[index].tabs.indices {
+                copy.windows[index].tabs[position].active = copy.windows[index].tabs[position].id == tabId
+            }
+            reportedSnapshots[instance] = copy
         }
         let reported = TabKey(instance: instance, tabId: tabId)
         let window = WindowID(instance: instance, windowId: windowId)
@@ -567,6 +582,7 @@ final class TabStore {
     /// Safari quit: forget its tabs but remember names by URL for next launch.
     func safariDidTerminate() {
         snapshots.removeAll()
+        reportedSnapshots.removeAll()
         lastActivation.removeAll()
         switchAsks.removeAll()
         anchors.removeAll()
@@ -585,7 +601,7 @@ final class TabStore {
 
     func requestSnapshot() {
         lastSnapshotRequest = Date()
-        sendCommand?(["action": "snapshot"])
+        sendCommand?(["action": "snapshot"]) {}
     }
 
     /// Safari doesn't always tell extensions about windows it restores (Reopen Last Closed
@@ -774,6 +790,7 @@ final class TabStore {
             return
         }
         snapshots[old] = nil
+        reportedSnapshots[old] = nil
         let tabs = Set(snapshot.windows.flatMap(\.tabs).map(\.id))
         replacedIds[new] = (now, Set(snapshot.windows.map(\.id)), tabs, -1)
         log.notice("extension copy \(old.prefix(8), privacy: .public) is replaced by \(new.prefix(8), privacy: .public), a newer copy of its profile; dropping its \(snapshot.windows.count) windows and \(tabs.count) tabs")
@@ -1236,12 +1253,12 @@ final class TabStore {
         switch plan {
         case .push(let why):
             log.notice("tab switch via push: \(why, privacy: .public)")
-            sendActivation(of: tab, instance: instance)
+            sendActivation(of: tab, instance: instance, request: request)
         case .press(let target):
             // The press is made off the main thread; the extension's command is the fallback.
             guard let pressTab else {
                 log.notice("tab switch via push: no way to press the tab bar")
-                sendActivation(of: tab, instance: instance)
+                sendActivation(of: tab, instance: instance, request: request)
                 return
             }
             pendingActivation?.path = "accessibility"
@@ -1321,15 +1338,29 @@ final class TabStore {
             }
             log.notice("tab switch via push: accessibility fell back (\(reason, privacy: .public))")
             pendingActivation?.path = "push after accessibility fell back"
-            sendActivation(of: tab, instance: instance)
+            sendActivation(of: tab, instance: instance, request: request)
         }
     }
 
-    private func sendActivation(of tab: BrowserTab, instance: String) {
-        send(["action": "activate", "tabId": tab.id], to: instance)
+    /// If the command can't reach the extension, the click didn't happen as far as Safari knows: it isn't waited
+    /// for, it holds no window on its tab, and the highlight goes back to where the copy last said it was.
+    private func sendActivation(of tab: BrowserTab, instance: String, request: PendingActivation) {
+        let window = WindowID(instance: instance, windowId: tab.windowId)
+        send(["action": "activate", "tabId": tab.id], to: instance, window: tab.windowId) { [weak self] in
+            guard let self else { return }
+            switchAsks.removeAll { $0.id == request.id }
+            if pendingActivation?.id == request.id {
+                pendingActivation = nil
+            }
+            if anchors[window]?.clickId == request.id {
+                anchors[window] = nil
+            }
+        }
     }
 
-    func close(_ tabs: [BrowserTab], instance: String) {
+    /// Closes tabs of one window. The rows go at once; if the command can't reach the extension, they come back
+    /// (#67), and `ifFailed` runs.
+    func close(_ tabs: [BrowserTab], instance: String, ifFailed: (() -> Void)? = nil) {
         guard let windowId = tabs.first?.windowId else { return }
         let ids = Set(tabs.map(\.id))
         mutateWindow(instance: instance, windowId: windowId) { window in
@@ -1344,8 +1375,15 @@ final class TabStore {
             window.tabs.removeAll { ids.contains($0.id) }
         }
         // A bookmark whose tab this was is closed again at once, so a click on it opens its saved page.
-        changeBookmarkTabs { $0.unlink(ids.map { TabKey(instance: instance, tabId: $0) }) }
-        send(["action": "close", "tabIds": Array(ids)], to: instance)
+        var unlinked = BookmarkTabs.Unlinked()
+        changeBookmarkTabs { unlinked = $0.unlink(ids.map { TabKey(instance: instance, tabId: $0) }) }
+        send(["action": "close", "tabIds": Array(ids)], to: instance, window: windowId) { [weak self] in
+            guard let self else { return }
+            // The tabs are still open, and still their bookmarks'.
+            let bookmarks = Set(bookmarkLists.all.map(\.id))
+            changeBookmarkTabs { $0.relink(unlinked, bookmarks: bookmarks) }
+            ifFailed?()
+        }
     }
 
     /// Closes the other tabs listed under Tabs. Bookmarks' tabs aren't listed there, so they stay open.
@@ -1363,7 +1401,8 @@ final class TabStore {
         close(Array(listed[(index + 1)...]), instance: instance)
     }
 
-    func newTab(url: String? = nil) {
+    /// Opens a new tab in the window the sidebar shows. `ifFailed` runs if the command can't reach the extension.
+    func newTab(url: String? = nil, ifFailed: (() -> Void)? = nil) {
         guard let selection = currentWindow else {
             openInSafari(url ?? "")
             return
@@ -1372,7 +1411,7 @@ final class TabStore {
         if let url {
             command["url"] = url
         }
-        send(command, to: selection.instance)
+        send(command, to: selection.instance, undo: ifFailed)
     }
 
     func duplicate(_ tab: BrowserTab, instance: String) {
@@ -1391,7 +1430,7 @@ final class TabStore {
                 window.tabs[index].muted = muted
             }
         }
-        send(["action": "mute", "tabId": tab.id, "muted": muted], to: instance)
+        send(["action": "mute", "tabId": tab.id, "muted": muted], to: instance, window: tab.windowId)
     }
 
     func copyLink(_ url: String?) {
@@ -1413,7 +1452,7 @@ final class TabStore {
             }
         }
         guard destination != tab.index else { return }
-        send(["action": "move", "tabId": tab.id, "index": destination], to: instance)
+        send(["action": "move", "tabId": tab.id, "index": destination], to: instance, window: tab.windowId)
     }
 
     private func window(instance: String, id: Int) -> BrowserWindow? {
@@ -1427,10 +1466,43 @@ final class TabStore {
         snapshots[instance] = snapshot
     }
 
-    private func send(_ command: [String: Any], to instance: String) {
+    /// Sends a command to one copy of the extension. If Safari can't take it (#67), `undo` puts back what the
+    /// command changed besides the window, and the window it was for, `windowId`, goes back to how its copy last
+    /// reported it: the sidebar never shows a tab closed, moved, muted or switched to when it isn't.
+    func send(_ command: [String: Any], to instance: String, window windowId: Int? = nil, undo: (() -> Void)? = nil) {
         var command = command
         command["instance"] = instance
-        sendCommand?(command)
+        let action = command["action"] as? String ?? "?"
+        sendCommand?(command) { [weak self] in
+            self?.commandFailed(action, instance: instance, windowId: windowId, undo: undo)
+        }
+    }
+
+    private func commandFailed(_ action: String, instance: String, windowId: Int?, undo: (() -> Void)?) {
+        undo?()
+        guard let windowId else {
+            log.notice("the extension didn't get “\(action, privacy: .public)”")
+            return
+        }
+        let wentBack = putBack(windowId: windowId, of: instance)
+        log.notice("the extension didn't get “\(action, privacy: .public)”; \(wentBack ? "its window shows what its copy last reported" : "its copy hasn't reported its window", privacy: .public)")
+    }
+
+    /// Puts a window back to how its copy last reported it (`reportedSnapshots`), except that a recent click
+    /// that worked keeps the highlight on its tab, as against a snapshot (`holdAnchoredTabs`). Says whether there
+    /// was a report to go back to.
+    private func putBack(windowId: Int, of instance: String) -> Bool {
+        guard var reported = reportedSnapshots[instance]?.windows.first(where: { $0.id == windowId }) else { return false }
+        if let anchor = recentAnchor(of: WindowID(instance: instance, windowId: windowId)),
+           reported.tabs.contains(where: { $0.id == anchor.tabId }) {
+            for index in reported.tabs.indices {
+                reported.tabs[index].active = reported.tabs[index].id == anchor.tabId
+            }
+        }
+        mutateWindow(instance: instance, windowId: windowId) { window in
+            window = reported
+        }
+        return true
     }
 
     private func openInSafari(_ url: String) {
@@ -1705,7 +1777,10 @@ final class TabStore {
             "windowId": selection.window.id,
             "url": bookmark.url,
             "requestId": requestId,
-        ], to: selection.instance)
+        ], to: selection.instance) { [weak self] in
+            // Nothing is opening: the next click tries again.
+            self?.pendingBookmarkOpens[requestId] = nil
+        }
     }
 
     /// Opens a favorite or pinned item clicked in a window its profile's copy can't see (#41). The copy can't
@@ -1719,7 +1794,9 @@ final class TabStore {
             let requestId = UUID().uuidString
             pendingBookmarkOpens[requestId] = (bookmark.id, window.id, Date(), nil)
             log.notice("opening a bookmark from a window its copy can't see: in another window of the profile")
-            send(["action": "create", "windowId": window.id, "url": bookmark.url, "requestId": requestId, "focus": true], to: unseen.instance)
+            send(["action": "create", "windowId": window.id, "url": bookmark.url, "requestId": requestId, "focus": true], to: unseen.instance) { [weak self] in
+                self?.pendingBookmarkOpens[requestId] = nil
+            }
         } else {
             log.notice("opening a bookmark from a window its copy can't see: in a new window of the profile")
             send(["action": "openWindow", "url": bookmark.url], to: unseen.instance)

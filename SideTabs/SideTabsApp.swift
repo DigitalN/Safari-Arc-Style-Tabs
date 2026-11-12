@@ -72,8 +72,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         bridge.start()
 
-        store.sendCommand = { [weak self] command in
-            self?.bridge.send(command)
+        store.sendCommand = { [weak self] command, failed in
+            self?.bridge.send(command, failed: failed)
         }
         store.currentHolds = { [holdWatcher] in holdWatcher.holds }
         holdWatcher.onChange = { [store] in store.holdsMayHaveChanged() }

@@ -60,7 +60,7 @@ func makeStore(active: Int = 1) -> (TabStore, sent: () -> [[String: Any]]) {
     storeCount += 1
     let store = TabStore(stateURL: stateFolder.appending(path: "state-\(storeCount).json"))
     var commands: [[String: Any]] = []
-    store.sendCommand = { commands.append($0) }
+    store.sendCommand = { command, _ in commands.append(command) }
     send(store, snapshotObject(seq: 1, active: active))
     return (store, { commands })
 }
@@ -1076,7 +1076,7 @@ func windowsOf(_ copy: String, profile: String?, seq: Int, focused: Int = -1, at
 func dockedToWork(_ title: String, likeWindows: Int? = 1) -> (TabStore, sent: () -> [[String: Any]]) {
     let store = storeWithoutCopies()
     var commands: [[String: Any]] = []
-    store.sendCommand = { commands.append($0) }
+    store.sendCommand = { command, _ in commands.append(command) }
     send(store, windowsOf("A", profile: nil, seq: 1, focused: 1, at: 300, [(1, ["Mail"], false)]))
     store.dockedWindowProfile = workProfile
     store.dockedWindowTitle = title
@@ -1449,7 +1449,7 @@ do {
     let url = stateFolder.appending(path: "state-\(storeCount).json")
     let store = TabStore(stateURL: url)
     var sent: [[String: Any]] = []
-    store.sendCommand = { sent.append($0) }
+    store.sendCommand = { command, _ in sent.append(command) }
     let other = "other-profile"
     let work = "WORK-PROFILE"
     send(store, pagesSnapshot(seq: 1, [(1, [(1, "https://example.com/1")])], active: [1]))
@@ -1498,7 +1498,7 @@ do {
     let url = stateFolder.appending(path: "state-\(storeCount).json")
     let store = TabStore(stateURL: url)
     var sent: [[String: Any]] = []
-    store.sendCommand = { sent.append($0) }
+    store.sendCommand = { command, _ in sent.append(command) }
     send(store, pagesSnapshot(seq: 1, [(1, [(1, "https://example.com/1")])], active: [1]))
     let saved = bookmark(store, news)
     openAndCreate(store, saved, commands: { sent }, tabId: 10)
@@ -1588,7 +1588,7 @@ final class Spaces {
             workTabs = other.workTabs
             active = other.active
         }
-        store.sendCommand = { [unowned self] in self.commands.append($0) }
+        store.sendCommand = { [unowned self] command, _ in self.commands.append(command) }
         show(.personal)
     }
 
@@ -2218,7 +2218,7 @@ func clockedStore() -> (TabStore, Clocks, sent: () -> [[String: Any]]) {
     store.uptime = { clocks.awakeBase + clocks.awake }
     store.currentHolds = { clocks.holds }
     var commands: [[String: Any]] = []
-    store.sendCommand = { commands.append($0) }
+    store.sendCommand = { command, _ in commands.append(command) }
     send(store, snapshotObject(seq: 1, active: 1))
     return (store, clocks, { commands })
 }
@@ -2618,6 +2618,142 @@ do {
     // #41: a target its copy can't see shows its profile's lists and the tab bar list.
     store.beginSwitchPreview(id: 3, profile: switchedWork, guess: .unseen, arrivesAt: Date())
     check(store.shownContent == .unseen(profile: switchedWork) && store.shownProfile == switchedWork, "a window its copy can't see: its profile's lists, and the tab bar list")
+}
+
+// MARK: - Commands that don't reach the extension (#67)
+
+// When Safari runs another copy's extension, SFSafariApplication.dispatchMessage fails every command. The
+// sidebar changes at once for a close, a move, a mute or a click, so each change has to be undone.
+
+/// A store whose commands can be made to fail, as dispatchMessage does: `failures()[n]()` is the n-th command's.
+func makeFailingStore(active: Int = 1) -> (TabStore, sent: () -> [[String: Any]], failures: () -> [() -> Void]) {
+    storeCount += 1
+    let store = TabStore(stateURL: stateFolder.appending(path: "state-\(storeCount).json"))
+    var commands: [[String: Any]] = []
+    var failed: [() -> Void] = []
+    store.sendCommand = { command, fail in
+        commands.append(command)
+        failed.append(fail)
+    }
+    send(store, snapshotObject(seq: 1, active: active))
+    return (store, { commands }, { failed })
+}
+
+func tabIds(_ store: TabStore) -> [Int] {
+    store.snapshots[instance]?.windows.first?.tabs.map(\.id) ?? []
+}
+
+func storeTab(_ store: TabStore, _ id: Int) -> BrowserTab {
+    store.tab(for: TabKey(instance: instance, tabId: id))!
+}
+
+do {
+    let (store, sent, failures) = makeFailingStore()
+    store.close([storeTab(store, 3)], instance: instance)
+    check(tabIds(store) == [1, 2, 4], "a closed tab's row goes at once")
+    failures().last?()
+    check(tabIds(store) == [1, 2, 3, 4], "and comes back if the close doesn't reach the extension")
+    check(highlighted(store) == 1, "with the highlight where it was")
+
+    store.close([storeTab(store, 1)], instance: instance)
+    check(highlighted(store) == 2, "closing the active tab highlights the next at once")
+    failures().last?()
+    check(tabIds(store) == [1, 2, 3, 4] && highlighted(store) == 1, "and a failed close puts the tab and the highlight back")
+    check(closes(sent()).count == 2, "a failed command isn't sent again")
+}
+
+do {
+    let (store, _, failures) = makeFailingStore()
+    store.moveTab(storeTab(store, 1), instance: instance, to: 3)
+    check(tabIds(store) == [2, 3, 4, 1], "a moved tab moves at once")
+    failures().last?()
+    check(tabIds(store) == [1, 2, 3, 4], "and goes back if the move doesn't reach the extension")
+    check(store.snapshots[instance]?.windows.first?.tabs.map(\.index) == [0, 1, 2, 3], "with its position as Safari reported it")
+
+    store.setMuted(true, tab: storeTab(store, 2), instance: instance)
+    check(storeTab(store, 2).muted, "a mute shows at once")
+    failures().last?()
+    check(!storeTab(store, 2).muted, "and goes if it doesn't reach the extension")
+}
+
+do {
+    // A click the extension has to make (no way to press the tab bar here).
+    let (store, sent, failures) = makeFailingStore()
+    click(store, tab: 3)
+    check(activations(sent()) == [3] && highlighted(store) == 3, "a click sends the switch and highlights the tab at once")
+    failures().last?()
+    check(highlighted(store) == 1, "if the switch doesn't reach the extension, the highlight goes back to Safari's tab")
+    activated(store, tab: 2)
+    check(highlighted(store) == 2, "and the click that didn't happen holds nothing back: Safari's next report moves the highlight")
+    send(store, snapshotObject(seq: 2, active: 4, startedAt: nowMilliseconds() + 1))
+    check(highlighted(store) == 4, "nor does it hold the window on its tab against a snapshot")
+}
+
+do {
+    // The window goes back to the copy's last word: its snapshot, and the switches it reported since.
+    let (store, _, failures) = makeFailingStore()
+    activated(store, tab: 4, seq: 2)
+    check(highlighted(store) == 4, "a report moves the highlight")
+    store.close([storeTab(store, 2)], instance: instance)
+    failures().last?()
+    check(tabIds(store) == [1, 2, 3, 4] && highlighted(store) == 4, "a failed command puts the window back with the highlight its copy last reported")
+
+    // A snapshot that came after the command was sent is the copy's last word.
+    store.close([storeTab(store, 3)], instance: instance)
+    send(store, snapshotObject(seq: 3, active: 1, tabs: [1, 2, 3, 4, 5]))
+    store.close([storeTab(store, 5)], instance: instance)
+    failures()[failures().count - 2]()
+    check(tabIds(store) == [1, 2, 3, 4, 5], "a failure goes back to the newest report, not the one before the command")
+}
+
+withPresser { store, presses, _ in
+    // A press on Safari's tab bar that worked isn't undone by another command failing.
+    var failed: [() -> Void] = []
+    store.sendCommand = { _, fail in failed.append(fail) }
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    store.setMuted(true, tab: storeTab(store, 2), instance: instance)
+    failed.last?()
+    check(!storeTab(store, 2).muted, "the failed mute goes")
+    check(highlighted(store) == 3, "but the tab the click pressed stays highlighted")
+}
+
+do {
+    // A command without anything to put back, and one for a window the copy hasn't reported.
+    let (store, sent, failures) = makeFailingStore()
+    store.reload(storeTab(store, 2), instance: instance)
+    let before = store.snapshots[instance]?.windows
+    failures().last?()
+    check(store.snapshots[instance]?.windows == before, "a failed reload changes nothing")
+    store.newTab()
+    check(sent().last?["action"] as? String == "create", "+ asks for a new tab")
+    failures().last?()
+    check(store.snapshots[instance]?.windows == before, "and a failed one changes nothing either")
+}
+
+do {
+    // A bookmark's tab, closed from its row.
+    let (store, sent, failures) = makeFailingStore()
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: sent, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, news)])], active: [1]))
+    check(store.openTab(for: saved)?.id == 10, "the bookmark has its tab")
+    store.closeBookmarkTab(saved.id)
+    check(store.openTab(for: saved) == nil, "its − closes it at once")
+    failures().last?()
+    check(store.openTab(for: saved)?.id == 10, "if the close doesn't reach the extension, the tab is the bookmark's again")
+    check(listedIds(store) == [1], "and stays out of the Tabs list")
+
+    // Opening one: a second click while the first open is on its way opens nothing more...
+    let other = bookmark(store, "https://docs.example/")
+    let createsBefore = creates(sent()).count
+    store.open(other)
+    store.open(other)
+    check(creates(sent()).count == createsBefore + 1, "a second click on a bookmark that's opening opens nothing more")
+    // ... but once the first didn't reach the extension, nothing is opening.
+    failures().last?()
+    store.open(other)
+    check(creates(sent()).count == createsBefore + 2, "after a failed open, the next click opens it")
 }
 
 try? FileManager.default.removeItem(at: stateFolder)

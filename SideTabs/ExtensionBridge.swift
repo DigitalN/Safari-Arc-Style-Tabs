@@ -64,21 +64,25 @@ final class ExtensionBridge {
     private let launchTag = String(UUID().uuidString.prefix(8))
     private var commandCount = 0
 
-    /// Sends a command to background.js. `command["instance"]` limits it to one profile.
+    /// Sends a command to background.js. `command["instance"]` limits it to one profile. `failed` runs on the
+    /// main thread if Safari couldn't take it (#67), so the sidebar can put back what it changed for it.
     ///
     /// Every command gets an id, and background.js skips one it has already run: after the extension
     /// reloads, Safari has delivered commands to a copy twice (#37).
-    func send(_ command: [String: Any]) {
+    func send(_ command: [String: Any], failed: (() -> Void)? = nil) {
         commandCount += 1
         var command = command
         command["id"] = "\(launchTag)-\(commandCount)"
+        let action = command["action"] as? String ?? "?"
         SFSafariApplication.dispatchMessage(
             withName: "command",
             toExtensionWithIdentifier: SideTabsBridge.extensionBundleIdentifier,
             userInfo: command
         ) { [log] error in
-            if let error {
-                log.error("dispatchMessage failed: \(error.localizedDescription, privacy: .public)")
+            guard let error else { return }
+            log.error("dispatchMessage failed (“\(action, privacy: .public)”): \(error.localizedDescription, privacy: .public)")
+            DispatchQueue.main.async {
+                failed?()
             }
         }
     }

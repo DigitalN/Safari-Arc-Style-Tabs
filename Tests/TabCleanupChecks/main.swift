@@ -84,7 +84,7 @@ func makeStore(stateURL: URL? = nil, on: Bool = true) -> (TabStore, commands: ()
     let store = TabStore(stateURL: stateURL ?? stateFolder.appending(path: "state-\(storeCount).json"))
     store.cleanup.clock = { now }
     var commands: [[String: Any]] = []
-    store.sendCommand = { commands.append($0) }
+    store.sendCommand = { command, _ in commands.append(command) }
     store.cleanup.setOn(on, tabs: store.snapshots)
     return (store, { commands })
 }
@@ -520,6 +520,62 @@ do {
     check(TabCleanup.reopenWindow(forProfile: "solo", in: snapshots, current: current) == current,
           "a profile with only a private window open has no window to reopen in")
     check(TabCleanup.reopenWindow(forProfile: "work", in: [:], current: nil) == nil, "with no windows at all, there's nowhere")
+}
+
+// MARK: - Commands that don't reach the extension (#67)
+
+/// A store whose commands can be made to fail, as when Safari runs another copy's extension:
+/// `failures()[n]()` is the n-th command's.
+func makeFailingStore() -> (TabStore, commands: () -> [[String: Any]], failures: () -> [() -> Void]) {
+    storeCount += 1
+    let store = TabStore(stateURL: stateFolder.appending(path: "state-\(storeCount).json"))
+    store.cleanup.clock = { now }
+    var commands: [[String: Any]] = []
+    var failed: [() -> Void] = []
+    store.sendCommand = { command, fail in
+        commands.append(command)
+        failed.append(fail)
+    }
+    store.cleanup.setOn(true, tabs: store.snapshots)
+    return (store, { commands }, { failed })
+}
+
+do {
+    // Tabs cleanup closed that didn't close: back in the sidebar, off the list, with their clocks.
+    now = start
+    let (store, commands, failures) = makeFailingStore()
+    send(store, snapshotObject(seq: 1, [
+        windowObject(1, [tabObject(1, active: true), tabObject(2), tabObject(3)]),
+        windowObject(2, [tabObject(4, window: 2, active: true), tabObject(5, window: 2)]),
+    ]))
+    now = start + 2 * day
+    store.runCleanup(after: day)
+    check(closedIds(commands()) == [[2, 3], [5]], "cleanup closes each window's idle tabs")
+    check(store.cleanup.closedTabs.count == 3, "and lists them")
+    failures()[0]()
+    check(tabIds(store) == [1, 2, 3, 4], "a close that doesn't reach the extension puts its window's tabs back")
+    check(Set(store.cleanup.closedTabs.map(\.url)) == ["https://example.com/5"], "and takes them off the list, leaving the other window's")
+    check(store.cleanup.lastViewed[key(2)] == start && store.cleanup.lastViewed[key(3)] == start,
+          "they keep the clocks they had, so they aren't taken for tabs just looked at")
+    store.runCleanup(after: day)
+    check(closedIds(commands()).last == [2, 3], "and the next run closes them again")
+    now = start
+}
+
+do {
+    // A reopened tab that didn't open goes back on the list.
+    now = start
+    let (store, commands, failures) = makeFailingStore()
+    send(store, simpleSnapshot(seq: 1, active: 1))
+    let closed = closedTab(1, closedAt: start - hour)
+    store.cleanup.record([closed, closedTab(2, closedAt: start - 2 * hour)])
+    store.reopen(closed)
+    check(creates(commands()).last?["url"] as? String == closed.url, "reopening asks Safari for the tab")
+    check(!store.cleanup.closedTabs.contains(closed), "and takes it off the list")
+    failures().last?()
+    check(store.cleanup.closedTabs.map(\.id) == [closed.id, store.cleanup.closedTabs.last!.id] && store.cleanup.closedTabs.first == closed,
+          "if the command doesn't reach the extension, it's back on the list, where it was")
+    now = start
 }
 
 // MARK: - Copies of the extension that go quiet (#31)
