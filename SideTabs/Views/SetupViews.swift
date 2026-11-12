@@ -470,15 +470,11 @@ struct MenuContent: View {
             .keyboardShortcut(",")
         Divider()
         Text("Side Tabs \(Updater.currentVersion)")
-        switch app.updater.status {
-        case .idle:
-            Button("Check for Updates…") { app.updater.checkNow() }
-        case .checking:
-            Text("Checking for Updates…")
-        case .downloading(let version):
-            Text("Downloading Side Tabs \(version)…")
-        case .ready(let version):
-            Button("Restart to Update to \(version)") { app.updater.checkNow() }
+        let update = UpdateControl(app.updater.status)
+        if update.isButton {
+            Button(update.title) { app.updater.checkNow() }
+        } else {
+            Text(update.title)
         }
         Divider()
         Button("Quit Side Tabs") { NSApp.terminate(nil) }

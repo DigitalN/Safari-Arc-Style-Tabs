@@ -18,13 +18,9 @@ import os.log
 /// a certificate from the same team can replace this one.
 @Observable
 final class Updater {
-    enum Status: Equatable {
-        case idle
-        case checking
-        case downloading(version: String)
-        /// Downloaded and verified, waiting for a quiet moment to relaunch.
-        case ready(version: String)
-    }
+    /// Idle, checking, downloading or ready to relaunch. It's in UpdateControl.swift, beside what the
+    /// menu and Settings show for each state, so the checks can compile it without the updater.
+    typealias Status = UpdateStatus
 
     private(set) var status: Status = .idle
 
