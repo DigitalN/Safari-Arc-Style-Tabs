@@ -22,7 +22,7 @@ struct BookmarkTabs: Equatable {
     /// extension page from before snapshots had one).
     static let unstampedGrace: TimeInterval = 2
 
-    private struct Link: Equatable {
+    fileprivate struct Link: Equatable {
         let bookmark: UUID
         /// When the tab became the bookmark's. A snapshot started before then may not have the tab
         /// yet (one only just opened for the bookmark), so its absence there doesn't mean it closed.
@@ -70,10 +70,27 @@ struct BookmarkTabs: Equatable {
         links[key] = Link(bookmark: bookmark, since: now)
     }
 
-    /// The tabs no longer belong to their bookmarks: they closed, or are closing.
-    mutating func unlink(_ keys: some Sequence<TabKey>) {
+    /// Links `unlink` took away, for `relink` to put back.
+    struct Unlinked: Equatable {
+        fileprivate var links: [TabKey: Link] = [:]
+    }
+
+    /// The tabs no longer belong to their bookmarks: they closed, or are closing. Returns the links it took
+    /// away, for `relink`.
+    @discardableResult
+    mutating func unlink(_ keys: some Sequence<TabKey>) -> Unlinked {
+        var unlinked = Unlinked()
         for key in keys {
-            links[key] = nil
+            unlinked.links[key] = links.removeValue(forKey: key)
+        }
+        return unlinked
+    }
+
+    /// The tabs `unlink` let go of didn't close after all (#67): each belongs to its bookmark again, as it did
+    /// before, unless it has another bookmark since or its bookmark is no longer among `bookmarks`.
+    mutating func relink(_ unlinked: Unlinked, bookmarks: Set<UUID>) {
+        for (key, link) in unlinked.links where links[key] == nil && bookmarks.contains(link.bookmark) {
+            links[key] = link
         }
     }
 

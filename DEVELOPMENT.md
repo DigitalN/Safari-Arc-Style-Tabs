@@ -21,7 +21,11 @@ unsigned extensions* turned on after every restart.
 
 Builds go to `~/Library/Developer/Xcode/DerivedData/SideTabs-CLI`, not the repository.
 Folders synced by iCloud Drive (such as `~/Documents`) add Finder metadata to app
-bundles, and codesign rejects bundles that have it.
+bundles, and codesign rejects bundles that have it. `install.sh` and `package.sh` delete the
+built app and extension from there once they're installed or packaged (the `.dSYM`s stay): a
+copy left on disk can be registered again after a restart, and then Safari runs its extension,
+which the installed app's commands can't reach. `scripts/check-installed.sh` checks that the
+copy in `/Applications` is the only one.
 
 ## Checks
 
@@ -43,8 +47,10 @@ brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, 
 and where they reopen; with *Minimize other profiles' windows* on, which windows a change of profile
 minimizes and brings back, which window a switch brings forward, the list of windows Side Tabs minimized
 and how it's matched after a restart, and when a click on Safari's Dock icon opens a window; what the
-sidebar shows while a switch's window comes back from the Dock, and when Safari's report ends it),
-a check that no log line carries a window or tab title or a page's URL, and a compile check of the app's sources. It doesn't touch the
+sidebar shows while a switch's window comes back from the Dock, and when Safari's report ends it;
+what a command that doesn't reach the extension puts back, and when the extension Safari runs is another
+copy's and the app registers its own), a check that no log line carries a window or tab title or a page's
+URL, that commands only go to the extension one way, and a compile check of the app's sources. It doesn't touch the
 installed app, Safari, or your saved bookmarks and names. Anything that needs the real
 Safari (clicks, windows, timing) still has to be tried by hand.
 
@@ -91,8 +97,11 @@ release is published.
   the extension reconnects.
 - [ ] It refuses a build changed after signing, a build signed by someone else, and a
   release whose tag is newer than the app inside it.
-- [ ] Afterwards, `UpdateFeedURL` is removed, the test builds are deleted, and a normal
-  build is reinstalled with `scripts/install.sh`.
+- [ ] Afterwards, `UpdateFeedURL` is removed, the test builds are deleted, and the release
+  that was installed before is put back from its DMG on GitHub, opened with
+  `hdiutil attach -nobrowse` so no Finder window opens (see *Putting the release back*
+  below). Side Tabs quits for this; Safari doesn't. Then `scripts/check-installed.sh`
+  passes.
 
 ### Publish
 
@@ -125,6 +134,8 @@ release is published.
   page has nothing stale in it.
 - [ ] An installed copy, restarted while Safari is open, logs `up to date at <version>` (or
   updates itself, if it was older).
+- [ ] `scripts/check-installed.sh` passes: no development copy is left on the Mac, and no
+  disk image is still mounted.
 
 ### Signing
 
@@ -173,7 +184,9 @@ separate window that the app keeps attached to Safari's window:
   `background.js` skips one it has already run, since Safari has delivered commands twice.
 - `SideTabsExtension/`: the extension's native handler. It passes messages to the app
   over a CFMessagePort named after the app group, which is what lets the sandboxed
-  extension reach the app.
+  extension reach the app, and adds its own path to each (`extensionPath`). Any copy of the
+  extension can reach the app that way, but `dispatchMessage` only reaches the extension
+  inside the app that calls it, so commands fail when Safari runs another copy's.
 - `SideTabs/`: the app.
   - `SafariTracker` follows Safari's front window through the Accessibility API and
     brings Safari forward.
@@ -183,7 +196,14 @@ separate window that the app keeps attached to Safari's window:
     `SidebarOverlay` holds where it goes and when it comes out and goes away. It starts below
     the lowest of Safari's bars (toolbar, Favourites bar, tab bar, find bar), which `SafariBars`
     finds among the window's children.
-  - `TabStore` holds tabs, bookmarks and custom names.
+  - `TabStore` holds tabs, bookmarks and custom names. A click, a close, a move or a mute
+    changes the sidebar at once; if its command doesn't reach the extension, the window goes
+    back to how its copy last reported it.
+  - `ExtensionCopyCheck` tells when Safari runs another copy's extension: a message whose
+    `extensionPath` isn't inside the running app, or a command that fails with
+    `SFErrorNoExtensionFound`. `ExtensionRegistration` then unregisters the other copies from
+    LaunchServices and pluginkit and registers this app's extension, as `install.sh` does; it
+    never deletes anything. If Safari keeps running the other copy, the sidebar shows where it is.
   - `TabCleanup` closes tabs nobody has looked at for a while, when that's turned on, and keeps
     the list of them for reopening. `TabCleanupScheduler` runs it every few minutes and when
     Safari comes forward.
@@ -215,7 +235,8 @@ separate window that the app keeps attached to Safari's window:
     reordering with its own drag gesture rather than system drag and drop.
 - `scripts/`: `install.sh` builds and installs, `package.sh` makes the release disk
   image (with artwork from `make-dmg-background.swift`), `build.sh` is shared by both,
-  and `make-icons.swift` regenerates the icons.
+  `check-installed.sh` checks that `/Applications` has the only copy, `run-checks.sh` runs
+  the checks, and `make-icons.swift` regenerates the icons.
 
 Bookmarks and tab names are stored in `~/Library/Application Support/Side Tabs/state.json`,
 and so are tab cleanup's clocks (when each tab was last looked at) and its list of closed tabs.
@@ -254,8 +275,8 @@ To try an update without publishing anything:
      CODE_SIGN_STYLE=Manual "CODE_SIGN_IDENTITY=Apple Development" DEVELOPMENT_TEAM=<team id> \
      PROVISIONING_PROFILE_SPECIFIER= MARKETING_VERSION=9.9 build
    ```
-   Then run `lsregister -u` on it (the full path is in `install.sh`), so Safari doesn't
-   pick up a second copy of the extension.
+   Then run `lsregister -u` on it (the full path is in `install.sh`) and `pluginkit -r` on
+   its extension, so Safari doesn't pick up a second copy of the extension.
 2. Put it in a disk image with `hdiutil create -srcfolder`, and write a stand-in for
    GitHub's
    [latest release](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
@@ -271,9 +292,45 @@ To try an update without publishing anything:
    signed, or re-sign it with `codesign --force --deep -s -`. Each should log
    `update check failed` and leave the installed copy alone.
 5. Clean up: `defaults delete com.digitaln.sidetabs UpdateFeedURL`, delete the test build
-   folder, and reinstall with `scripts/install.sh`.
+   folder and the stand-in disk image, and put back the release that was installed before
+   (below).
 
 The updater mounts the disk image in `/Volumes`, like any other disk image, but hidden
 from Finder. Mounted anywhere else, macOS's file access protection stops Side Tabs from
 reading it. `hdiutil attach` is deprecated in macOS 27 in favor of `diskutil image attach`;
 it still works.
+
+## Putting the release back
+
+After an updater test or any test with a build of its own, `/Applications` gets back the
+release it had before, from that release's DMG on GitHub, even if a newer release exists:
+the copy there updates itself with Check for Updates. Note its version before the test:
+
+```bash
+V=$(defaults read "/Applications/Side Tabs.app/Contents/Info" CFBundleShortVersionString)
+```
+
+Afterwards, download and open its DMG without a Finder window:
+
+```bash
+D=$(mktemp -d)
+gh release download "v$V" --repo DigitalN/Safari-Arc-Style-Tabs --pattern '*.dmg' --dir "$D"
+M=$(hdiutil attach -nobrowse -readonly -noautoopen "$D"/*.dmg | grep -o '/Volumes/.*$')
+defaults read "$M/Side Tabs.app/Contents/Info" CFBundleShortVersionString
+codesign --verify --deep --strict "$M/Side Tabs.app"
+```
+
+Once those show the version and a valid signature, quit Side Tabs (not Safari), swap the
+copy, register it as `install.sh` does, and start it again:
+
+```bash
+osascript -e 'tell application id "com.digitaln.sidetabs" to quit'
+rm -rf "/Applications/Side Tabs.app"
+ditto "$M/Side Tabs.app" "/Applications/Side Tabs.app"
+hdiutil detach "$M"
+rm -rf "$D"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R "/Applications/Side Tabs.app"
+pluginkit -a "/Applications/Side Tabs.app/Contents/PlugIns/Side Tabs Extension.appex"
+open "/Applications/Side Tabs.app"
+scripts/check-installed.sh
+```

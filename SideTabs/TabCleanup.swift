@@ -148,9 +148,24 @@ final class TabCleanup {
     }
 
     func remove(_ id: UUID) {
-        guard closedTabs.contains(where: { $0.id == id }) else { return }
-        closedTabs.removeAll { $0.id == id }
+        remove([id])
+    }
+
+    func remove(_ ids: Set<UUID>) {
+        guard closedTabs.contains(where: { ids.contains($0.id) }) else { return }
+        closedTabs.removeAll { ids.contains($0.id) }
         onChange?()
+    }
+
+    /// Gives tabs back the clocks they had: their close didn't reach the extension (#67), so they're still
+    /// open, and were looked at no more recently than before. Their rows come back right after, which keeps
+    /// these clocks rather than starting new ones (`noteViewing`); a tab that doesn't come back loses its clock
+    /// at the next change, as usual. Only while the clocks run.
+    func restoreClocks(_ times: [TabKey: Date]) {
+        guard isOn else { return }
+        for (key, time) in times {
+            lastViewed[key] = time
+        }
     }
 
     // MARK: - Saving
@@ -362,25 +377,36 @@ extension TabStore {
 
         let closedAt = cleanup.clock()
         var closed: [ClosedTab] = []
-        var windows: [(instance: String, windowId: Int, tabs: [BrowserTab])] = []
+        var windows: [(instance: String, windowId: Int, tabs: [BrowserTab], closed: [ClosedTab])] = []
         for key in keys {
             guard let tab = tab(for: key), let url = tab.url else { continue }
-            closed.append(ClosedTab(
+            let entry = ClosedTab(
                 title: pageTitle(for: tab),
                 customName: customNames[key]?.name,
                 url: url,
                 faviconURL: tab.favIconUrl,
                 closedAt: closedAt,
                 profile: snapshots[key.instance]?.profile
-            ))
+            )
+            closed.append(entry)
             if let index = windows.firstIndex(where: { $0.instance == key.instance && $0.windowId == tab.windowId }) {
                 windows[index].tabs.append(tab)
+                windows[index].closed.append(entry)
             } else {
-                windows.append((key.instance, tab.windowId, [tab]))
+                windows.append((key.instance, tab.windowId, [tab], [entry]))
             }
         }
         for window in windows {
-            close(window.tabs, instance: window.instance)
+            let clocks = cleanup.lastViewed.filter { key, _ in
+                key.instance == window.instance && window.tabs.contains { $0.id == key.tabId }
+            }
+            close(window.tabs, instance: window.instance) { [weak self] in
+                // The tabs are still open (#67): off the list, with the clocks they had, for the next run.
+                guard let self else { return }
+                cleanup.remove(Set(window.closed.map(\.id)))
+                cleanup.restoreClocks(clocks)
+                cleanup.log.notice("\(window.tabs.count) tabs cleanup closed didn't close: the command didn't reach the extension; back in the sidebar and off the list")
+            }
         }
         cleanup.record(closed)
         cleanup.log.notice("closed \(closed.count) tabs not looked at for \(Int(interval / 3600)) h; \(self.cleanup.closedTabs.count) in the list")
@@ -400,7 +426,9 @@ extension TabStore {
         // Only a live copy's windows: a quiet copy may not be there to open the tab.
         guard let target = TabCleanup.reopenWindow(forProfile: closed.profile, in: liveSnapshots, current: current) else {
             // Safari has no windows: open the page in Safari.
-            newTab(url: closed.url)
+            newTab(url: closed.url) { [weak self] in
+                self?.cleanup.record([closed])
+            }
             return
         }
         // The default profile's copy sends no profile: nil is the default profile.
@@ -435,11 +463,15 @@ extension TabStore {
         cleanup.log.notice("reopened a closed tab in a window of its profile, \(switched ? "after a switch the sidebar didn't follow in time" : "after a switch that didn't work", privacy: .public)")
     }
 
+    /// If the command can't reach the extension, the tab goes back on the list (#67).
     private func open(_ closed: ClosedTab, in window: TabCleanup.Window, focus: Bool) {
-        var command: [String: Any] = ["action": "create", "instance": window.instance, "windowId": window.windowId, "url": closed.url]
+        var command: [String: Any] = ["action": "create", "windowId": window.windowId, "url": closed.url]
         if focus {
             command["focus"] = true
         }
-        sendCommand?(command)
+        send(command, to: window.instance) { [weak self] in
+            self?.cleanup.record([closed])
+            self?.cleanup.log.notice("a reopened tab didn't open: the command didn't reach the extension; back on the list")
+        }
     }
 }

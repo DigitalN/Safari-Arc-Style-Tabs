@@ -60,7 +60,7 @@ func makeStore(active: Int = 1) -> (TabStore, sent: () -> [[String: Any]]) {
     storeCount += 1
     let store = TabStore(stateURL: stateFolder.appending(path: "state-\(storeCount).json"))
     var commands: [[String: Any]] = []
-    store.sendCommand = { commands.append($0) }
+    store.sendCommand = { command, _ in commands.append(command) }
     send(store, snapshotObject(seq: 1, active: active))
     return (store, { commands })
 }
@@ -1076,7 +1076,7 @@ func windowsOf(_ copy: String, profile: String?, seq: Int, focused: Int = -1, at
 func dockedToWork(_ title: String, likeWindows: Int? = 1) -> (TabStore, sent: () -> [[String: Any]]) {
     let store = storeWithoutCopies()
     var commands: [[String: Any]] = []
-    store.sendCommand = { commands.append($0) }
+    store.sendCommand = { command, _ in commands.append(command) }
     send(store, windowsOf("A", profile: nil, seq: 1, focused: 1, at: 300, [(1, ["Mail"], false)]))
     store.dockedWindowProfile = workProfile
     store.dockedWindowTitle = title
@@ -1449,7 +1449,7 @@ do {
     let url = stateFolder.appending(path: "state-\(storeCount).json")
     let store = TabStore(stateURL: url)
     var sent: [[String: Any]] = []
-    store.sendCommand = { sent.append($0) }
+    store.sendCommand = { command, _ in sent.append(command) }
     let other = "other-profile"
     let work = "WORK-PROFILE"
     send(store, pagesSnapshot(seq: 1, [(1, [(1, "https://example.com/1")])], active: [1]))
@@ -1498,7 +1498,7 @@ do {
     let url = stateFolder.appending(path: "state-\(storeCount).json")
     let store = TabStore(stateURL: url)
     var sent: [[String: Any]] = []
-    store.sendCommand = { sent.append($0) }
+    store.sendCommand = { command, _ in sent.append(command) }
     send(store, pagesSnapshot(seq: 1, [(1, [(1, "https://example.com/1")])], active: [1]))
     let saved = bookmark(store, news)
     openAndCreate(store, saved, commands: { sent }, tabId: 10)
@@ -1588,7 +1588,7 @@ final class Spaces {
             workTabs = other.workTabs
             active = other.active
         }
-        store.sendCommand = { [unowned self] in self.commands.append($0) }
+        store.sendCommand = { [unowned self] command, _ in self.commands.append(command) }
         show(.personal)
     }
 
@@ -2218,7 +2218,7 @@ func clockedStore() -> (TabStore, Clocks, sent: () -> [[String: Any]]) {
     store.uptime = { clocks.awakeBase + clocks.awake }
     store.currentHolds = { clocks.holds }
     var commands: [[String: Any]] = []
-    store.sendCommand = { commands.append($0) }
+    store.sendCommand = { command, _ in commands.append(command) }
     send(store, snapshotObject(seq: 1, active: 1))
     return (store, clocks, { commands })
 }
@@ -2618,6 +2618,302 @@ do {
     // #41: a target its copy can't see shows its profile's lists and the tab bar list.
     store.beginSwitchPreview(id: 3, profile: switchedWork, guess: .unseen, arrivesAt: Date())
     check(store.shownContent == .unseen(profile: switchedWork) && store.shownProfile == switchedWork, "a window its copy can't see: its profile's lists, and the tab bar list")
+}
+
+// MARK: - Commands that don't reach the extension (#67)
+
+// When Safari runs another copy's extension, SFSafariApplication.dispatchMessage fails every command. The
+// sidebar changes at once for a close, a move, a mute or a click, so each change has to be undone.
+
+/// A store whose commands can be made to fail, as dispatchMessage does: `failures()[n]()` is the n-th command's.
+func makeFailingStore(active: Int = 1) -> (TabStore, sent: () -> [[String: Any]], failures: () -> [() -> Void]) {
+    storeCount += 1
+    let store = TabStore(stateURL: stateFolder.appending(path: "state-\(storeCount).json"))
+    var commands: [[String: Any]] = []
+    var failed: [() -> Void] = []
+    store.sendCommand = { command, fail in
+        commands.append(command)
+        failed.append(fail)
+    }
+    send(store, snapshotObject(seq: 1, active: active))
+    return (store, { commands }, { failed })
+}
+
+func tabIds(_ store: TabStore) -> [Int] {
+    store.snapshots[instance]?.windows.first?.tabs.map(\.id) ?? []
+}
+
+func storeTab(_ store: TabStore, _ id: Int) -> BrowserTab {
+    store.tab(for: TabKey(instance: instance, tabId: id))!
+}
+
+do {
+    let (store, sent, failures) = makeFailingStore()
+    store.close([storeTab(store, 3)], instance: instance)
+    check(tabIds(store) == [1, 2, 4], "a closed tab's row goes at once")
+    failures().last?()
+    check(tabIds(store) == [1, 2, 3, 4], "and comes back if the close doesn't reach the extension")
+    check(highlighted(store) == 1, "with the highlight where it was")
+
+    store.close([storeTab(store, 1)], instance: instance)
+    check(highlighted(store) == 2, "closing the active tab highlights the next at once")
+    failures().last?()
+    check(tabIds(store) == [1, 2, 3, 4] && highlighted(store) == 1, "and a failed close puts the tab and the highlight back")
+    check(closes(sent()).count == 2, "a failed command isn't sent again")
+}
+
+do {
+    let (store, _, failures) = makeFailingStore()
+    store.moveTab(storeTab(store, 1), instance: instance, to: 3)
+    check(tabIds(store) == [2, 3, 4, 1], "a moved tab moves at once")
+    failures().last?()
+    check(tabIds(store) == [1, 2, 3, 4], "and goes back if the move doesn't reach the extension")
+    check(store.snapshots[instance]?.windows.first?.tabs.map(\.index) == [0, 1, 2, 3], "with its position as Safari reported it")
+
+    store.setMuted(true, tab: storeTab(store, 2), instance: instance)
+    check(storeTab(store, 2).muted, "a mute shows at once")
+    failures().last?()
+    check(!storeTab(store, 2).muted, "and goes if it doesn't reach the extension")
+}
+
+do {
+    // A click the extension has to make (no way to press the tab bar here).
+    let (store, sent, failures) = makeFailingStore()
+    click(store, tab: 3)
+    check(activations(sent()) == [3] && highlighted(store) == 3, "a click sends the switch and highlights the tab at once")
+    failures().last?()
+    check(highlighted(store) == 1, "if the switch doesn't reach the extension, the highlight goes back to Safari's tab")
+    activated(store, tab: 2)
+    check(highlighted(store) == 2, "and the click that didn't happen holds nothing back: Safari's next report moves the highlight")
+    send(store, snapshotObject(seq: 2, active: 4, startedAt: nowMilliseconds() + 1))
+    check(highlighted(store) == 4, "nor does it hold the window on its tab against a snapshot")
+}
+
+do {
+    // The window goes back to the copy's last word: its snapshot, and the switches it reported since.
+    let (store, _, failures) = makeFailingStore()
+    activated(store, tab: 4, seq: 2)
+    check(highlighted(store) == 4, "a report moves the highlight")
+    store.close([storeTab(store, 2)], instance: instance)
+    failures().last?()
+    check(tabIds(store) == [1, 2, 3, 4] && highlighted(store) == 4, "a failed command puts the window back with the highlight its copy last reported")
+
+    // A snapshot that came after the command was sent is the copy's last word.
+    store.close([storeTab(store, 3)], instance: instance)
+    send(store, snapshotObject(seq: 3, active: 1, tabs: [1, 2, 3, 4, 5]))
+    store.close([storeTab(store, 5)], instance: instance)
+    failures()[failures().count - 2]()
+    check(tabIds(store) == [1, 2, 3, 4, 5], "a failure goes back to the newest report, not the one before the command")
+}
+
+withPresser { store, presses, _ in
+    // A press on Safari's tab bar that worked isn't undone by another command failing.
+    var failed: [() -> Void] = []
+    store.sendCommand = { _, fail in failed.append(fail) }
+    click(store, tab: 3)
+    presses()[0].finish(.pressed(milliseconds: 4))
+    store.setMuted(true, tab: storeTab(store, 2), instance: instance)
+    failed.last?()
+    check(!storeTab(store, 2).muted, "the failed mute goes")
+    check(highlighted(store) == 3, "but the tab the click pressed stays highlighted")
+}
+
+do {
+    // A command without anything to put back, and one for a window the copy hasn't reported.
+    let (store, sent, failures) = makeFailingStore()
+    store.reload(storeTab(store, 2), instance: instance)
+    let before = store.snapshots[instance]?.windows
+    failures().last?()
+    check(store.snapshots[instance]?.windows == before, "a failed reload changes nothing")
+    store.newTab()
+    check(sent().last?["action"] as? String == "create", "+ asks for a new tab")
+    failures().last?()
+    check(store.snapshots[instance]?.windows == before, "and a failed one changes nothing either")
+}
+
+do {
+    // A bookmark's tab, closed from its row.
+    let (store, sent, failures) = makeFailingStore()
+    let saved = bookmark(store, news)
+    openAndCreate(store, saved, commands: sent, tabId: 10)
+    send(store, pagesSnapshot(seq: 2, [(1, [(1, "https://example.com/1"), (10, news)])], active: [1]))
+    check(store.openTab(for: saved)?.id == 10, "the bookmark has its tab")
+    store.closeBookmarkTab(saved.id)
+    check(store.openTab(for: saved) == nil, "its − closes it at once")
+    failures().last?()
+    check(store.openTab(for: saved)?.id == 10, "if the close doesn't reach the extension, the tab is the bookmark's again")
+    check(listedIds(store) == [1], "and stays out of the Tabs list")
+
+    // Opening one: a second click while the first open is on its way opens nothing more...
+    let other = bookmark(store, "https://docs.example/")
+    let createsBefore = creates(sent()).count
+    store.open(other)
+    store.open(other)
+    check(creates(sent()).count == createsBefore + 1, "a second click on a bookmark that's opening opens nothing more")
+    // ... but once the first didn't reach the extension, nothing is opening.
+    failures().last?()
+    store.open(other)
+    check(creates(sent()).count == createsBefore + 2, "after a failed open, the next click opens it")
+}
+
+// MARK: - Which copy of the extension Safari runs (#67)
+
+let appPath = "/Applications/Side Tabs.app"
+let ownExtension = appPath + "/Contents/PlugIns/Side Tabs Extension.appex"
+let leftoverApp = "/Users/someone/Library/Developer/Xcode/DerivedData/SideTabs-CLI/Build/Products/Release/Side Tabs.app"
+let leftoverExtension = leftoverApp + "/Contents/PlugIns/Side Tabs Extension.appex"
+
+do {
+    // Where a message's handler is, against the running app's bundle.
+    check(ExtensionCopyCheck.sender(extensionPath: ownExtension, appPath: appPath) == .own, "the extension inside the running app is its own")
+    check(ExtensionCopyCheck.sender(extensionPath: leftoverExtension, appPath: appPath) == .other(leftoverApp),
+          "one inside another copy of the app is that copy's")
+    check(ExtensionCopyCheck.sender(extensionPath: nil, appPath: appPath) == .unknown
+              && ExtensionCopyCheck.sender(extensionPath: "", appPath: appPath) == .unknown,
+          "an extension that sends no path can't be told")
+    check(ExtensionCopyCheck.sender(extensionPath: "/applications/side tabs.app/Contents/PlugIns/Side Tabs Extension.appex", appPath: appPath) == .own,
+          "case doesn't count, as on the Mac's disk")
+    check(ExtensionCopyCheck.sender(extensionPath: "/Applications/Other/../Side Tabs.app/Contents/PlugIns/Side Tabs Extension.appex", appPath: appPath + "/") == .own,
+          "nor do .. or a slash at the end")
+    check(ExtensionCopyCheck.sender(extensionPath: "/Applications/Side Tabs.app copy.app/Contents/PlugIns/Side Tabs Extension.appex", appPath: appPath)
+              == .other("/Applications/Side Tabs.app copy.app"),
+          "a copy whose path only starts like the app's is another copy")
+    let loose = "/Users/someone/Library/Developer/Xcode/DerivedData/SideTabs-CLI/Build/Products/Release/Side Tabs Extension.appex"
+    check(ExtensionCopyCheck.sender(extensionPath: loose, appPath: appPath) == .other(loose),
+          "the extension Xcode leaves on its own beside the app is a copy of its own")
+    check(ExtensionCopyCheck.bundle(ofExtension: "/Volumes/Side Tabs/Side Tabs.app/Contents/PlugIns/Side Tabs Extension.appex") == "/Volumes/Side Tabs/Side Tabs.app",
+          "the copy on a mounted disk image is that app")
+
+    let listing = """
+         com.digitaln.sidetabs.extension(1.3.0)\t7D1C3191-109F-4D43-8086-5D586EB9B069\t2026-11-12 14:01:30 +0000\t/Applications/Side Tabs.app/Contents/PlugIns/Side Tabs Extension.appex
+    +    com.digitaln.sidetabs.extension(9.0)\tA6F2E0B1-0000-4000-8000-000000000000\t2026-11-12 08:01:30 +0000\t\(leftoverExtension)
+     (2 plug-ins)
+    """
+    check(ExtensionCopyCheck.paths(inPluginkitListing: listing) == [ownExtension, leftoverExtension], "pluginkit's listing gives each copy's path")
+    check(ExtensionCopyCheck.paths(inPluginkitListing: "  (no matches)\n").isEmpty, "and none when it has none")
+}
+
+/// A store in an app at `appPath`, with its own awake clock, whose repairs the test finishes:
+/// `repairs()` are the copies each was given, and `finish(found)` ends the one running.
+func makeCopyStore(appPath: String = appPath) -> (TabStore, advance: (TimeInterval) -> Void, repairs: () -> [String?], finish: ([String]) -> Void) {
+    storeCount += 1
+    let store = TabStore(stateURL: stateFolder.appending(path: "state-\(storeCount).json"))
+    store.sendCommand = { _, _ in }
+    store.extensionCopies = ExtensionCopyCheck(appPath: appPath)
+    var ahead: TimeInterval = 0
+    store.uptime = { ProcessInfo.processInfo.systemUptime + ahead }
+    var asked: [String?] = []
+    var running: (([String]) -> Void)?
+    store.repairExtensionRegistration = { reported, done in
+        asked.append(reported)
+        running = done
+    }
+    return (store, { ahead += $0 }, { asked }, { found in
+        let done = running
+        running = nil
+        done?(found)
+    })
+}
+
+func heartbeat(_ store: TabStore, from path: String?) {
+    var object: [String: Any] = ["type": "heartbeat", "instance": instance, "seq": 0]
+    if let path { object["extensionPath"] = path }
+    send(store, object)
+}
+
+do {
+    let (store, advance, repairs, finish) = makeCopyStore()
+    heartbeat(store, from: ownExtension)
+    check(repairs().isEmpty && store.otherExtensionCopy == nil, "messages from the app's own extension are fine")
+
+    heartbeat(store, from: leftoverExtension)
+    check(repairs() == [leftoverApp], "one from another copy's extension registers the app's own in its place, naming that copy")
+    heartbeat(store, from: leftoverExtension)
+    check(repairs().count == 1, "only one repair at a time")
+    finish([leftoverApp])
+    advance(2)
+    heartbeat(store, from: leftoverExtension)
+    check(store.otherExtensionCopy == nil, "a message from the other copy right after the repair shows nothing yet: Safari takes a moment to switch")
+    check(repairs().count == 1, "nor repairs again")
+
+    advance(ExtensionCopyCheck.switchTime)
+    heartbeat(store, from: leftoverExtension)
+    check(store.otherExtensionCopy == ExtensionCopyCheck.OtherCopy(path: leftoverApp),
+          "once Safari had its time and still runs the other copy, the sidebar says where it is")
+    check(repairs().count == 1, "and doesn't repair again straight away")
+    advance(ExtensionCopyCheck.firstWait)
+    heartbeat(store, from: leftoverExtension)
+    check(repairs().count == 2, "a minute after the last repair, it tries again")
+    finish([leftoverApp])
+    check(store.extensionCopies.waitBeforeNextRepair == 2 * ExtensionCopyCheck.firstWait, "and waits twice as long before the next")
+    check(store.otherExtensionCopy != nil, "the notice stays meanwhile")
+
+    heartbeat(store, from: ownExtension)
+    check(store.otherExtensionCopy == nil, "the notice goes once the app's own extension talks to it")
+    check(store.extensionCopies.waitBeforeNextRepair == 0, "and the next problem is repaired at once")
+    heartbeat(store, from: leftoverExtension)
+    check(repairs().count == 3, "as when Safari picks up the other copy again")
+}
+
+do {
+    // An extension too old to say where it is: only a command that finds no extension of the app's tells.
+    let (store, advance, repairs, finish) = makeCopyStore()
+    heartbeat(store, from: nil)
+    check(repairs().isEmpty, "an extension without a path isn't a problem by itself (after an update Safari runs the old one from the same place for a while)")
+    store.commandFoundNoExtension()
+    check(repairs() == [nil], "a command that finds no extension of the app's registers its own, with no copy to name")
+    finish(["/Volumes/Side Tabs/Side Tabs.app"])
+    advance(ExtensionCopyCheck.switchTime + 1)
+    heartbeat(store, from: nil)
+    store.commandFoundNoExtension()
+    check(store.otherExtensionCopy == ExtensionCopyCheck.OtherCopy(path: "/Volumes/Side Tabs/Side Tabs.app"),
+          "if commands still fail while that extension talks, the notice names the copy the repair found")
+}
+
+do {
+    // No copy talking at all: commands fail (the extension is off, say), and registering the app's own is harmless,
+    // but nothing says another copy runs.
+    let (store, advance, repairs, finish) = makeCopyStore()
+    store.commandFoundNoExtension()
+    check(repairs().count == 1, "a failed command with no extension talking still registers the app's own")
+    finish([])
+    advance(ExtensionCopyCheck.switchTime + 1)
+    store.commandFoundNoExtension()
+    check(store.otherExtensionCopy == nil, "but no notice: no other copy is talking")
+    advance(ExtensionCopyCheck.firstWait)
+    store.commandFoundNoExtension()
+    check(repairs().count == 2, "it tries again after the wait")
+
+    // The app's own extension talking, and a command failing anyway (Safari reloading it, say): no notice.
+    heartbeat(store, from: ownExtension)
+    finish([])
+    advance(ExtensionCopyCheck.switchTime + 1)
+    store.commandFoundNoExtension()
+    check(store.otherExtensionCopy == nil, "a command failing while the app's own extension talks shows no notice")
+}
+
+do {
+    // The app runs from where macOS made up a path for it (App Translocation): it can't put that extension in
+    // Safari's hands, so it only says where the copy Safari runs is.
+    let translocated = "/private/var/folders/xy/abc/T/AppTranslocation/0A1B2C3D/d/Side Tabs.app"
+    let (store, _, repairs, _) = makeCopyStore(appPath: translocated)
+    heartbeat(store, from: ownExtension)
+    check(repairs().isEmpty, "a translocated app doesn't register its own extension")
+    check(store.otherExtensionCopy == ExtensionCopyCheck.OtherCopy(path: appPath), "and the sidebar says where Safari's copy is right away")
+}
+
+do {
+    var copies = ExtensionCopyCheck(appPath: appPath)
+    var waits: [TimeInterval] = []
+    var now: TimeInterval = 0
+    for _ in 0..<8 {
+        now += 3600
+        _ = copies.heard(extensionPath: leftoverExtension, at: now)
+        copies.repairStarted()
+        copies.repairFinished(otherCopies: [], at: now)
+        waits.append(copies.waitBeforeNextRepair)
+    }
+    check(waits == [60, 120, 240, 480, 960, 1800, 1800, 1800], "repairs that don't work wait 1, 2, 4, 8, 16 minutes, then half an hour")
 }
 
 try? FileManager.default.removeItem(at: stateFolder)

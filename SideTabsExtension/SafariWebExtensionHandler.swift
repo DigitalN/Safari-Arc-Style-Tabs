@@ -16,6 +16,9 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         if let profile {
             envelope["profile"] = profile.uuidString
         }
+        // Where this copy of the extension is, so the app can tell when Safari runs another copy's: commands
+        // from the app only reach the extension inside it (#67).
+        envelope["extensionPath"] = Bundle.main.bundlePath
 
         var reply: [String: Any] = ["appRunning": false]
         if let data = try? JSONSerialization.data(withJSONObject: envelope) {

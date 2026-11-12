@@ -21,7 +21,8 @@ echo "== TabStore"
 swiftc -o "$WORK/store-checks" \
     Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift SideTabs/TabBarMatcher.swift \
     SideTabs/BookmarkTabs.swift Shared/Bridge.swift SideTabs/TabCleanup.swift \
-    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift
+    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift \
+    SideTabs/ExtensionCopyCheck.swift
 "$WORK/store-checks"
 
 # Which tabs cleanup closes, the clocks it keeps, its list of closed tabs and reopening them (#27).
@@ -30,7 +31,8 @@ echo "== tab cleanup"
 swiftc -o "$WORK/cleanup-checks" \
     Tests/TabCleanupChecks/main.swift SideTabs/TabCleanup.swift SideTabs/TabStore.swift SideTabs/Models.swift \
     SideTabs/TabBarMatcher.swift SideTabs/AppSettings.swift SideTabs/BookmarkTabs.swift Shared/Bridge.swift \
-    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift
+    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift \
+    SideTabs/ExtensionCopyCheck.swift
 "$WORK/cleanup-checks"
 
 echo "== click actions"
@@ -127,6 +129,17 @@ echo "== Dock icon"
 swiftc -o "$WORK/dock-icon-checks" \
     Tests/DockIconChecks/main.swift SideTabs/SafariDockIconWatcher.swift SideTabs/AccessibilityQuery.swift Shared/Bridge.swift
 "$WORK/dock-icon-checks"
+
+# Commands go to the extension one way only, SFSafariApplication.dispatchMessage (ExtensionBridge.send). Not
+# also in replies to its messages, though background.js still runs a reply's `commands`: a heartbeat's reply
+# comes up to 5 s late, replies are lost for minutes after the extension reloads, and a late command is what
+# #20 was about. A command that fails puts its window back instead (#67).
+echo "== one way for commands"
+if grep -nE '"commands"' SideTabs/*.swift SideTabs/Views/*.swift; then
+    echo "FAIL: the app puts commands in a reply to the extension; send them with ExtensionBridge.send"
+    exit 1
+fi
+echo "no commands in replies"
 
 # A row has one mouse gesture, the one sidebarRowGesture attaches. A press gesture of its own,
 # inside the reorder gesture, wins every press and the reorder never starts (#20).

@@ -13,6 +13,11 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             if profiles.profileToTurnOn != nil {
+                if let copy = store.otherExtensionCopy {
+                    OtherCopyBanner(copy: copy)
+                        .padding(.horizontal, 8)
+                        .padding(.top, 12)
+                }
                 // Side Tabs is off in the front window's profile (#33): one row to turn it on, in place
                 // of the sections, which would list another window's tabs.
                 TurnOnSideTabsRow()
@@ -26,6 +31,10 @@ struct SidebarView: View {
                     .padding(.bottom, 4)
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 0) {
+                        if let copy = store.otherExtensionCopy {
+                            OtherCopyBanner(copy: copy)
+                                .padding(.bottom, 8)
+                        }
                         if store.lacksWebsiteAccess {
                             WebsiteAccessBanner()
                                 .padding(.bottom, 8)
@@ -60,6 +69,11 @@ struct SidebarView: View {
                 .replaced(by: ClosedTabsList(isShown: $showsClosedTabs), when: showsClosedTabs && settings.closesUnviewedTabs)
                 BottomBar(showsClosedTabs: $showsClosedTabs)
             } else {
+                if let copy = store.otherExtensionCopy {
+                    OtherCopyBanner(copy: copy)
+                        .padding(.horizontal, 8)
+                        .padding(.top, 12)
+                }
                 EmptySidebar()
             }
         }
@@ -279,6 +293,41 @@ private struct TabsSection: View {
                 store.newTab(url: url.absoluteString)
             }
         }
+    }
+}
+
+/// Safari runs another copy of Side Tabs' extension, and registering this app's in its place didn't make it
+/// switch (#67): the sidebar's commands can't reach Safari. Says where the other copy is, so it can be deleted.
+/// It goes away once this app's extension talks to it.
+private struct OtherCopyBanner: View {
+    let copy: ExtensionCopyCheck.OtherCopy
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Safari is using another copy of Side Tabs")
+                .font(.system(size: 12, weight: .semibold))
+            Text(copy.path == nil
+                 ? "Closing, opening and moving tabs from the sidebar won't work until Safari uses this copy."
+                 : "Closing, opening and moving tabs from the sidebar won't work until Safari uses this copy. The other one is here:")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let path = copy.path {
+                Text((path as NSString).abbreviatingWithTildeInPath)
+                    .font(.system(size: 11))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                if FileManager.default.fileExists(atPath: path) {
+                    Button("Show in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                    }
+                    .controlSize(.small)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.yellow.opacity(0.15)))
     }
 }
 
