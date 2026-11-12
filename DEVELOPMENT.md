@@ -48,6 +48,7 @@ and where they reopen; with *Minimize other profiles' windows* on, which windows
 minimizes and brings back, which window a switch brings forward, the list of windows Side Tabs minimized
 and how it's matched after a restart, and when a click on Safari's Dock icon opens a window; what the
 sidebar shows while a switch's window comes back from the Dock, and when Safari's report ends it;
+what Check for Updates… shows in each of the updater's states, in the menu and in Settings;
 what a command that doesn't reach the extension puts back, and when the extension Safari runs is another
 copy's and the app registers its own), a check that no log line carries a window or tab title or a page's
 URL, that commands only go to the extension one way, and a compile check of the app's sources. It doesn't touch the
@@ -230,7 +231,8 @@ separate window that the app keeps attached to Safari's window:
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
   - `AppLocation` offers to move the app into Applications.
   - `Updater` checks GitHub for new releases, verifies the download's code signature
-    against the app's own team, and swaps it in at a quiet moment.
+    against the app's own team, and swaps it in at a quiet moment. `UpdateControl` is what
+    Check for Updates… shows for each of its states, in the menu bar menu and in Settings.
   - `Views/` is the SwiftUI sidebar, setup window and settings. `SidebarDrag` handles
     reordering with its own drag gesture rather than system drag and drop.
 - `scripts/`: `install.sh` builds and installs, `package.sh` makes the release disk

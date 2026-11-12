@@ -255,7 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func showSettings() {
         if settingsWindow == nil {
-            settingsWindow = makeWindow(title: "Side Tabs Settings", content: SettingsView().environment(settings))
+            settingsWindow = makeWindow(title: "Side Tabs Settings", content: SettingsView(updater: updater).environment(settings))
         }
         present(settingsWindow)
     }
