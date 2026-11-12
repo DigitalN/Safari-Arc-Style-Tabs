@@ -53,6 +53,8 @@ the gear at the bottom of the sidebar, and in the menu bar icon.
 - **Side Tabs asks to move itself to Applications.** Click **Move to Applications**.
   Side Tabs has to run from your Applications folder: opened from the disk image or
   Downloads, Safari can't find its extension.
+- **The sidebar says Safari is using another copy of Side Tabs.** Click **Show in
+  Finder** and move that copy to the Trash. Keep only the one in Applications.
 - **The sidebar doesn't appear.** Open System Settings → Privacy & Security → *Device
   Control and Data Access* (*Accessibility* on macOS 26). If Side Tabs is listed, select
   it and click **−**, then click **+** and choose Side Tabs from Applications. macOS
