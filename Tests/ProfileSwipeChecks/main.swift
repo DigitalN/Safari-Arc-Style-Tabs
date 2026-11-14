@@ -151,6 +151,62 @@ do {
     check(long.isDone, "a long frame can't throw it past its place")
 }
 
+// MARK: - The page slots
+
+do {
+    // Pages are profile names here; a switch's target is "to <profile>".
+    typealias Slots = SwipeSlots<String, String>
+    func neighbor(_ id: UUID, _ name: String) -> Slots.Neighbor { .init(profileID: id, target: "to \(name)") }
+    func slot(at place: Int, in slots: Slots) -> Int? { (0..<3).first { slots.place(of: $0) == place } }
+
+    // On B, swiping toward C: C's page is drawn only once the page moves its way.
+    var slots = Slots()
+    let inPlace = slot(at: 0, in: slots)!
+    slots.begin(previous: neighbor(a, "A"), next: neighbor(c, "C"))
+    check(slots.target(on: .next) == nil && slot(at: 1, in: slots) == nil, "a side's page isn't drawn until the page moves its way")
+    var made = 0
+    slots.reveal(.next) { target in made += 1; return "page " + target }
+    slots.reveal(.next) { target in made += 1; return "page " + target }
+    check(made == 1 && slots.target(on: .next) == "to C" && slot(at: 1, in: slots) != nil, "then once")
+    let incoming = slot(at: 1, in: slots)!
+
+    // The fingers lift: the switch to C starts.
+    slots.switched(to: .next, outgoing: "B's page", outgoingProfile: b)
+    check(slots.place(of: incoming) == 0, "the page that came in is in place, in the same slot, so it keeps its scroll position")
+    check(slots.place(of: inPlace) == -1 && slots.content(of: inPlace) == "B's page", "B's page slides out to the left as it was, in its slot")
+    check(slots.target(on: .previous) == nil, "and nothing switches to it while no swipe is going on")
+
+    // A quick swipe back toward B, before B's page has finished sliding out (#72's review).
+    slots.begin(previous: neighbor(b, "B"), next: neighbor(d, "D"))
+    check(slots.place(of: inPlace) == -1 && slots.content(of: inPlace) == "B's page",
+          "B's page, still sliding out, stays where it is, scrolled where it was")
+    check(slots.target(on: .previous) == "to B", "and lifting toward it switches to B, as quick swipes in a row do")
+    slots.reveal(.previous) { _ in "a new page" }
+    check(slots.content(of: inPlace) == "B's page", "with no second page drawn over it")
+    slots.switched(to: .previous, outgoing: "C's page", outgoingProfile: c)
+    check(slots.place(of: inPlace) == 0 && slots.place(of: incoming) == 1 && slots.content(of: incoming) == "C's page",
+          "B is in place again, and C's page slides out to the right")
+
+    // A swipe on to another profile while a page slides out: the page of the profile left goes.
+    slots.begin(previous: neighbor(a, "A"), next: neighbor(c, "C"))
+    check(slots.target(on: .next) == "to C", "C's page, sliding out on the right, is C's: it stays, and can be swiped back to")
+    var other = Slots()
+    other.begin(previous: nil, next: neighbor(b, "B"))
+    other.reveal(.next) { _ in "B's page" }
+    other.switched(to: .next, outgoing: "A's page", outgoingProfile: a)
+    other.begin(previous: neighbor(c, "C"), next: nil)
+    check((0..<3).filter { other.place(of: $0) != nil } == [slot(at: 0, in: other)!],
+          "a page sliding out that isn't the side's profile any more goes")
+    check(other.target(on: .previous) == nil, "and the side's own page is drawn fresh once the page moves its way")
+    other.reveal(.previous) { _ in "C's page" }
+    check(other.target(on: .previous) == "to C", "and switches to C")
+
+    // The page comes to rest.
+    slots.settled()
+    check((0..<3).compactMap { slots.place(of: $0) } == [0], "once the page is at rest, only it is drawn")
+    check(slots.target(on: .previous) == nil && slots.target(on: .next) == nil, "and nothing beside it")
+}
+
 if failures > 0 {
     print("\(failures) swipe check(s) failed")
     exit(1)

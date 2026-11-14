@@ -63,9 +63,9 @@ private struct SidebarSlot: View {
     @State private var drag = SidebarDrag()
 
     var body: some View {
-        if let place = swipe.places[slot] {
+        if let place = swipe.slots.place(of: slot) {
             let inPlace = place == 0
-            SidebarPage(content: inPlace ? store.displayedContent : swipe.pages[slot]?.content, inPlace: inPlace)
+            SidebarPage(content: inPlace ? store.displayedContent : swipe.slots.content(of: slot), inPlace: inPlace)
                 .environment(drag)
                 .modifier(SlotOffset(place: place))
                 // Only the page in place takes clicks.

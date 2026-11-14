@@ -211,3 +211,86 @@ nonisolated struct SwipeSettle: Equatable, Sendable {
         }
     }
 }
+
+/// The sidebar's three page slots during swipes (#72): which page each holds, and where. Place 0 is the page in place
+/// (the sidebar's own contents), -1 the one on its left (the previous profile's), +1 the one on its right, nil none. A
+/// slot keeps its identity as its place changes, so a page keeps its scroll position as it goes from sliding in to in
+/// place, or from in place to sliding out. Generic over what a page shows and what a switch to it starts with, so the
+/// checks can run it without the store.
+nonisolated struct SwipeSlots<Content: Equatable, Target: Equatable>: Equatable {
+    struct Slot: Equatable {
+        var place: Int?
+        /// Its profile: a side keeps the page it has while it's the same profile's.
+        var profileID: UUID?
+        /// What it shows, for a slot not in place (the one in place shows the sidebar's own contents).
+        var content: Content?
+        /// What a switch to its profile starts with: set for every page beside the one in place while a swipe goes on.
+        var target: Target?
+    }
+
+    /// A profile's page that a swipe can bring in.
+    struct Neighbor: Equatable {
+        let profileID: UUID
+        let target: Target
+    }
+
+    private(set) var slots: [Slot] = [Slot(place: 0), Slot(), Slot()]
+    /// The pages the current swipe can bring in, drawn when the page first moves their way.
+    private var neighbors: [Int: Neighbor] = [:]
+
+    init() {}
+
+    func place(of slot: Int) -> Int? { slots[slot].place }
+    func content(of slot: Int) -> Content? { slots[slot].content }
+
+    /// A swipe starts, with the pages either side of the profile highlighted. A page still sliding out on a side,
+    /// from the swipe before, stays there, scrolled where it was, if it's that side's profile's: it becomes the page
+    /// that side brings in, with the target just built, so a quick swipe back to the profile just left switches. Any
+    /// other page beside the one in place goes.
+    mutating func begin(previous: Neighbor?, next: Neighbor?) {
+        neighbors = [:]
+        if let previous { neighbors[ProfileSwipe.Side.previous.rawValue] = previous }
+        if let next { neighbors[ProfileSwipe.Side.next.rawValue] = next }
+        for index in slots.indices {
+            guard let place = slots[index].place, place != 0 else { continue }
+            if let neighbor = neighbors[place], slots[index].profileID == neighbor.profileID {
+                slots[index].target = neighbor.target
+            } else {
+                slots[index] = Slot()
+            }
+        }
+    }
+
+    /// The page moved toward `side`: draws that side's page, made by `content`, unless it's there already.
+    mutating func reveal(_ side: ProfileSwipe.Side, content: (Target) -> Content) {
+        let place = side.rawValue
+        guard !slots.contains(where: { $0.place == place }), let neighbor = neighbors[place],
+              let free = slots.firstIndex(where: { $0.place == nil }) else { return }
+        slots[free] = Slot(place: place, profileID: neighbor.profileID, content: content(neighbor.target), target: neighbor.target)
+    }
+
+    /// What a switch to the page on `side` starts with, if a page is drawn there.
+    func target(on side: ProfileSwipe.Side) -> Target? {
+        slots.first { $0.place == side.rawValue }?.target
+    }
+
+    /// The switch to the page on `side` started: that page is in place from now on, and the one that was goes out to
+    /// the other side as it is (`outgoing`, of profile `outgoingProfile`), where any page that was there goes.
+    mutating func switched(to side: ProfileSwipe.Side, outgoing: Content?, outgoingProfile: UUID?) {
+        guard let incoming = slots.firstIndex(where: { $0.place == side.rawValue }),
+              let live = slots.firstIndex(where: { $0.place == 0 }) else { return }
+        for index in slots.indices where slots[index].place == -side.rawValue {
+            slots[index] = Slot()
+        }
+        slots[incoming] = Slot(place: 0)
+        slots[live] = Slot(place: -side.rawValue, profileID: outgoingProfile, content: outgoing)
+        neighbors = [:]
+    }
+
+    /// The page has come to rest in place: the pages beside it go.
+    mutating func settled() {
+        for index in slots.indices where slots[index].place != 0 {
+            slots[index] = Slot()
+        }
+    }
+}

@@ -19,21 +19,8 @@ import os.log
 /// the extension.
 @Observable
 final class SidebarSwipe {
-    /// A page sliding in or out beside the one in place.
-    struct Page: Equatable {
-        /// Its profile: a side keeps the page it has while it's the same profile's.
-        let profileID: UUID?
-        let content: TabStore.ShownContent?
-        /// What a switch to it starts with; nil for a page going out.
-        let swipe: SwipePage?
-    }
-
-    /// The three slots' places: 0 is the page in place (the sidebar's own contents), -1 the one on its left, +1 the
-    /// one on its right, nil none. A slot keeps its identity as its place changes, so a page keeps its scroll
-    /// position as it goes from sliding in to in place, or from in place to sliding out.
-    private(set) var places: [Int?] = [0, nil, nil]
-    /// What each slot not in place shows.
-    private(set) var pages: [Page?] = [nil, nil, nil]
+    /// The three page slots: which page each holds, and where (SwipeSlots).
+    private(set) var slots = SwipeSlots<TabStore.ShownContent, SwipePage>()
     /// Where the page in place is, in points to the right; its neighbours are a page's width either side.
     private(set) var offset: CGFloat = 0
     /// The page's width, from the view.
@@ -58,8 +45,6 @@ final class SidebarSwipe {
     }
     @ObservationIgnored private var tracking = Tracking.passing
     @ObservationIgnored private var swipe: ProfileSwipe?
-    /// The pages built when the swipe started, drawn when the page first moves their way.
-    @ObservationIgnored private var built: (previous: SwipePage?, next: SwipePage?)
     @ObservationIgnored private var settle: SwipeSettle?
     @ObservationIgnored private var displayLink: CADisplayLink?
     @ObservationIgnored private var lastFrame: CFTimeInterval?
@@ -74,9 +59,6 @@ final class SidebarSwipe {
     func attach(to view: NSView) {
         hostView = view
     }
-
-    /// Whether slot `slot` is the page in place.
-    func isInPlace(_ slot: Int) -> Bool { places[slot] == 0 }
 
     // MARK: - Scroll events
 
@@ -154,17 +136,10 @@ final class SidebarSwipe {
             return
         }
         stopSettling()
-        built = found
-        // The sides' pages are drawn only when the page moves their way; one already sliding out that's the same
-        // profile's stays, scrolled where it was.
-        for slot in places.indices {
-            guard let place = places[slot], place != 0 else { continue }
-            let side = place < 0 ? found.previous : found.next
-            if pages[slot]?.profileID != side?.profileID {
-                places[slot] = nil
-                pages[slot] = nil
-            }
-        }
+        // The sides' pages are drawn only when the page moves their way; one still sliding out that's the same
+        // profile's stays, scrolled where it was, and a quick swipe back to it switches.
+        slots.begin(previous: found.previous.map { .init(profileID: $0.profileID, target: $0) },
+                    next: found.next.map { .init(profileID: $0.profileID, target: $0) })
         var model = ProfileSwipe(width: pageWidth, hasPrevious: found.previous != nil, hasNext: found.next != nil, offset: offset)
         model.move(by: travel, at: time)
         swipe = model
@@ -180,15 +155,9 @@ final class SidebarSwipe {
 
     /// Puts the page at `offset`, with the neighbour it reveals drawn beside it.
     private func show(_ offset: CGFloat) {
-        if let side = swipe?.incoming {
-            let place = side.rawValue
-            if !places.contains(place), let page = side == .previous ? built.previous : built.next,
-               let slot = places.firstIndex(where: { $0 == nil }) {
-                pages[slot] = Page(profileID: page.profileID,
-                                   content: store.content(for: page.guess, profile: page.profile, profileID: page.profileID),
-                                   swipe: page)
-                places[slot] = place
-            }
+        if let side = swipe?.incoming, slots.target(on: side) == nil {
+            let store = store
+            slots.reveal(side) { page in store.content(for: page.guess, profile: page.profile, profileID: page.profileID) }
         }
         if self.offset != offset {
             self.offset = offset
@@ -199,28 +168,19 @@ final class SidebarSwipe {
         guard let model = swipe else { return }
         swipe = nil
         let speed = model.speed(at: time)
-        guard case .switchTo(let side) = model.end(at: time, cancelled: cancelled),
-              let incoming = places.firstIndex(where: { $0 == side.rawValue }),
-              let page = pages[incoming]?.swipe,
-              let live = places.firstIndex(of: 0) else {
+        guard case .switchTo(let side) = model.end(at: time, cancelled: cancelled), let page = slots.target(on: side) else {
             settle(from: offset, speed: speed)
             return
         }
         // What's on screen now goes out as it is; then the switch starts, and the page coming in is the sidebar's own.
-        let outgoing = Page(profileID: profiles.highlightedID, content: store.displayedContent, swipe: nil)
+        let outgoing = store.displayedContent
+        let outgoingProfile = profiles.highlightedID
         guard profiles.swipe(to: page) else {
             log.notice("a swipe's switch didn't start: the page springs back")
             settle(from: offset, speed: speed)
             return
         }
-        for slot in places.indices where places[slot] == -side.rawValue {
-            places[slot] = nil
-            pages[slot] = nil
-        }
-        places[incoming] = 0
-        pages[incoming] = nil
-        places[live] = -side.rawValue
-        pages[live] = outgoing
+        slots.switched(to: side, outgoing: outgoing, outgoingProfile: outgoingProfile)
         let moved = offset + CGFloat(side.rawValue) * pageWidth
         offset = moved
         settle(from: moved, speed: speed)
@@ -273,10 +233,7 @@ final class SidebarSwipe {
     private func finishSettling() {
         stopSettling()
         offset = 0
-        for slot in places.indices where places[slot] != 0 {
-            places[slot] = nil
-            pages[slot] = nil
-        }
+        slots.settled()
     }
 }
 

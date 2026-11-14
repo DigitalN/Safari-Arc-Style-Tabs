@@ -113,8 +113,8 @@ swiftc -o "$WORK/switch-preview-checks" \
 "$WORK/switch-preview-checks"
 
 # Swiping left or right on the sidebar to switch profiles (#72): which way a gesture goes from its first movement, where
-# the page is under the fingers, the halfway-or-flick rule, the ends, and the profiles a swipe goes to, counted from
-# the one highlighted. Which window a swipe's switch brings forward is among the minimize checks, what its page shows
+# the page is under the fingers, the halfway-or-flick rule, the ends, the profiles a swipe goes to, counted from
+# the one highlighted, and the page slots, so a quick swipe back to the profile just left switches. Which window a swipe's switch brings forward is among the minimize checks, what its page shows
 # among the checks above, and how the store shows it among the store checks.
 echo "== swiping between profiles"
 swiftc -o "$WORK/swipe-checks" Tests/ProfileSwipeChecks/main.swift SideTabs/ProfileSwipeRules.swift
