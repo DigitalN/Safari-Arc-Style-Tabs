@@ -320,6 +320,66 @@ do {
     check(fade.fire(stale, now: origin).isEmpty && fade.phase == phase, "a timer of an earlier fade changes nothing")
 }
 
+// MARK: - A swipe's incoming page (#72)
+
+do {
+    func page(_ key: ProfileKey?, knownOff: Bool = false, _ copies: [Snapshot] = copies) -> SwitchGuess {
+        SwitchPreviewRules.incomingPage(profile: key, knownOff: knownOff, copies: copies)
+    }
+    check(page(work) == .window(instance: "W", windowId: 22),
+          "a profile's page shows its copy's last focused window: its lists, that window's tabs, and its site in the address bar")
+    check(page(home) == .window(instance: "H", windowId: 1), "the default profile's the same way")
+    check(page(work, [homeCopy]) == .placeholder, "no live copy of the profile: its lists and a placeholder for Tabs")
+    let noWindows = snapshot("W", profile: work, focused: -1, lastFocused: nil, [])
+    check(page(work, [homeCopy, noWindows]) == .placeholder, "a profile with no window: the same")
+    let onlyPrivate = snapshot("H", profile: home, focused: -1, lastFocused: 24, [window(24, page: "Mail", incognito: true)])
+    check(page(home, [onlyPrivate]) == .placeholder, "a private window is no profile's page")
+    check(page(work, knownOff: true, [homeCopy]) == .turnOn, "Side Tabs found off in the profile, and still no live copy: the row to turn it on")
+    check(page(work, knownOff: true) == .window(instance: "W", windowId: 22), "found off once, but its copy is live now: it's on again")
+    check(page(nil) == .placeholder, "a profile whose copy isn't known: a placeholder, never a window")
+    check(page(nil, knownOff: true) == .turnOn, "unless it was found off")
+    for key in [work, home] {
+        if case .window(let instance, _) = page(key) {
+            check(instance == (key == work ? "W" : "H"), "never another profile's tabs")
+        }
+    }
+}
+
+// MARK: - Another window coming to the front during a switch (#58)
+
+do {
+    let b = UUID(), c = UUID()
+    func verdict(profile: UUID?, number: Int?, isFinal: Bool = true, preview: UUID? = c, recorded: Int? = 1,
+                 inFlight: UUID?) -> SwitchPreviewRules.DockedVerdict {
+        SwitchPreviewRules.docked(profile: profile, number: number, isFinal: isFinal, previewProfile: preview,
+                                  previewDockedNumber: recorded, switchInFlight: inFlight)
+    }
+    // The user clicks B, then C before B's window has landed; B's window lands anyway and docks.
+    check(verdict(profile: b, number: 2, inFlight: c) == .keep,
+          "an older switch's window landing first doesn't end the newest switch's preview while it's on its way")
+    check(verdict(profile: b, number: 2, recorded: nil, inFlight: c) == .keep,
+          "nor when the preview began while the docked window's toolbar was being read")
+    check(verdict(profile: c, number: 3, inFlight: c) == .confirm, "the switch's own profile coming to the front confirms it")
+    check(verdict(profile: c, number: 3, inFlight: nil) == .confirm, "however it got there")
+    check(verdict(profile: b, number: 2, inFlight: nil) == .end,
+          "once nothing is on its way to the preview's profile, another window coming to the front ends it")
+    check(verdict(profile: b, number: 2, preview: c, inFlight: b) == .end, "and a switch to another profile doesn't hold it")
+    check(verdict(profile: b, number: 2, preview: nil, inFlight: nil) == .end, "a preview with no switch (a Dock tile) ends as before")
+    check(verdict(profile: nil, number: 1, inFlight: nil) == .keep, "the window it began on, read again, ends nothing")
+    check(verdict(profile: b, number: 2, isFinal: false, inFlight: nil) == .keep, "nor a toolbar that's still being read")
+}
+
+// MARK: - A fade a swipe's page slid in over
+
+do {
+    var fade = SidebarFade()
+    let origin = Date()
+    let timers = fade.begin(arrivesAt: origin.addingTimeInterval(0.8), now: origin).timers
+    fade.cancel()
+    check(fade.isOver && fade.opacity == 1 && !fade.showsOldContents, "a swipe ends a fade at once, at full opacity")
+    check(timers.allSatisfy { fade.fire($0, now: origin).isEmpty } && fade.isOver, "and its timers do nothing after")
+}
+
 if failures > 0 {
     print("\(failures) switch preview check(s) failed")
     exit(1)

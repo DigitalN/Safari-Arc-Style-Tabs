@@ -8,6 +8,7 @@ struct BookmarkRow: View {
     @Environment(AppSettings.self) private var settings
     @Environment(SidebarDrag.self) private var drag
     @Environment(SidebarRows.self) private var rows
+    @Environment(\.sidebarPageWindow) private var pageWindow
     @State private var hovering = false
     @State private var rowTop: CGFloat = 0
     /// Whether the press in progress opens the bookmark when the button goes up, because it didn't
@@ -26,7 +27,7 @@ struct BookmarkRow: View {
     private func pressBegan(at point: CGPoint) -> Bool {
         opensOnRelease = false
         guard !isRenaming else { return false }
-        if store.openTab(for: bookmark) != nil && closeFrame.containsCircle(point) {
+        if store.openTab(for: bookmark, inPage: pageWindow) != nil && closeFrame.containsCircle(point) {
             return false
         }
         opensOnRelease = store.pressBookmark(bookmark, command: NSEvent.modifierFlags.contains(.command))
@@ -46,7 +47,7 @@ struct BookmarkRow: View {
     }
 
     var body: some View {
-        let openTab = store.openTab(for: bookmark)
+        let openTab = store.openTab(for: bookmark, inPage: pageWindow)
 
         HStack(spacing: 8) {
             FaviconView(iconURL: bookmark.faviconURL, pageURL: bookmark.url)

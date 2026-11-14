@@ -142,6 +142,43 @@ do {
           "with the setting off (an empty list), as before: the frontmost open window, else a minimized one")
 }
 
+// MARK: - Which window a swipe's switch brings forward (#72)
+
+do {
+    // The page decides: the window Safari titles "<profile> — <page title>", found by its title.
+    func titled(_ number: Int, _ profile: ProfileResolution, _ title: String?, minimized: Bool = false) -> WindowFacts {
+        WindowFacts(number: number, profile: profile, isMinimized: minimized, title: title)
+    }
+    let windows = [
+        titled(1, .profile(work), "Work — Mail"),
+        titled(2, .profile(home), "Personal — News"),                    // the frontmost of the profile's
+        titled(3, .profile(home), "Personal — Mail", minimized: true),   // on the list, used last
+        titled(4, .profile(home), "Personal — Docs", minimized: true),
+    ]
+    func target(_ page: String?, among list: [WindowFacts] = windows, usedLast: Int? = 3, listed: Set<Int> = [3, 4]) -> Int? {
+        ProfileRules.switchTarget(for: home, among: list, pageTitle: page, profileName: "Personal", usedLast: usedLast, listed: listed)?.number
+    }
+    check(target("Docs") == 4, "the window whose title is the page's, though it's neither the frontmost nor the one used last")
+    check(target("Mail") == 3, "never another profile's window on the same page")
+    check(target("News") == 2, "with minimizing off too: an open window is found the same way")
+    check(target("Docs", listed: []) == 4 && target("Mail", usedLast: nil, listed: []) == 3, "and with no list of minimized windows")
+
+    // Two of the profile's windows with the page's title: the frontmost of them, today's rule.
+    let twins = windows + [titled(5, .profile(home), "Personal — Docs")]
+    check(target("Docs", among: twins) == 5, "when titles tie, the frontmost of the windows that have it")
+    let minimizedTwins = windows + [titled(6, .profile(home), "Personal — Docs", minimized: true)]
+    check(target("Docs", among: minimizedTwins, usedLast: 6, listed: [3, 4, 6]) == 6, "of tied minimized ones, the one used last")
+    check(target("Docs", among: minimizedTwins, usedLast: 3, listed: [3, 4, 6]) == 4,
+          "and never one without the title, even the one used last")
+
+    // Nothing to go by: today's rule.
+    check(target(nil) == 2, "a page that showed no window (a placeholder): the frontmost window, as a button click picks")
+    check(target("Calendar") == 2, "a page whose title no window has any more: the same")
+    check(target("") == 2, "an empty title says nothing")
+    check(ProfileRules.switchTarget(for: school, among: windows, pageTitle: "Docs", profileName: "School") == nil,
+          "a profile with no window: a new one is opened, as today")
+}
+
 // MARK: - The list
 
 do {

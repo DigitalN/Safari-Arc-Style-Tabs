@@ -5,68 +5,17 @@ import UniformTypeIdentifiers
 struct SidebarView: View {
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
-    @Environment(SidebarRows.self) private var rows
-    @State private var drag = SidebarDrag()
+    @Environment(SidebarSwipe.self) private var swipe
     @State private var showsClosedTabs = false
-    @Environment(SafariProfiles.self) private var profiles
 
     var body: some View {
+        let closedTabsShown = showsClosedTabs && settings.closesUnviewedTabs
         VStack(spacing: 0) {
-            if profiles.profileToTurnOn != nil {
-                if let copy = store.otherExtensionCopy {
-                    OtherCopyBanner(copy: copy)
-                        .padding(.horizontal, 8)
-                        .padding(.top, 12)
-                }
-                // Side Tabs is off in the front window's profile (#33): one row to turn it on, in place
-                // of the sections, which would list another window's tabs.
-                TurnOnSideTabsRow()
-                    .replaced(by: ClosedTabsList(isShown: $showsClosedTabs), when: showsClosedTabs && settings.closesUnviewedTabs)
-                BottomBar(showsClosedTabs: $showsClosedTabs)
-            } else if store.shownContent != nil || store.displayedContent != nil {
-                // Centered on the same line as Safari's toolbar when docked.
-                AddressBar()
-                    .padding(.horizontal, 8)
-                    .padding(.top, 12)
-                    .padding(.bottom, 4)
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        if let copy = store.otherExtensionCopy {
-                            OtherCopyBanner(copy: copy)
-                                .padding(.bottom, 8)
-                        }
-                        if store.lacksWebsiteAccess {
-                            WebsiteAccessBanner()
-                                .padding(.bottom, 8)
-                        }
-                        // While a switch's window comes back from the Dock, the sections fade over to its
-                        // profile (#44, SidebarFade): one set of sections, never two, faded out over what was
-                        // shown, swapped while nothing shows, and faded back in. The animation is scoped to the
-                        // opacity alone, so a change of contents is never animated: no row is ever kept on
-                        // screen for a removal transition, and Safari's report, right or not, swaps in place.
-                        if let content = store.displayedContent {
-                            SidebarSections(content: content)
-                                .animation(store.sidebarFade.animation) { sections in
-                                    sections.opacity(store.sidebarFade.opacity)
-                                }
-                        }
-                    }
-                    .coordinateSpace(.named(SidebarDrag.coordinateSpace))
-                    .overlay(alignment: .topLeading) {
-                        if let item = drag.item {
-                            DragGhost(item: item, tileSize: drag.ghostIsTile ? max(drag.favoritesMetrics.tile, 40) : nil)
-                                .offset(x: drag.ghostOrigin.x, y: drag.ghostOrigin.y)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.top, 6)
-                    .padding(.bottom, 10)
-                }
-                .scrollIndicators(.automatic)
-                .onWindowFrame { rows.viewport = $0 }
-                // The tabs cleanup closed, listed in place of the sections while that's open.
-                .replaced(by: ClosedTabsList(isShown: $showsClosedTabs), when: showsClosedTabs && settings.closesUnviewedTabs)
+            if store.shownContent != nil || store.displayedContent != nil {
+                // Everything above the bottom bar is one page, which a swipe slides aside for the next profile's
+                // (#72). The tabs cleanup closed are listed in place of it while that's open.
+                SidebarPages()
+                    .replaced(by: ClosedTabsList(isShown: $showsClosedTabs), when: closedTabsShown)
                 BottomBar(showsClosedTabs: $showsClosedTabs)
             } else {
                 if let copy = store.otherExtensionCopy {
@@ -77,8 +26,155 @@ struct SidebarView: View {
                 EmptySidebar()
             }
         }
-        .environment(drag)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onChange(of: closedTabsShown, initial: true) { swipe.isBlocked = closedTabsShown }
+    }
+}
+
+extension EnvironmentValues {
+    /// The window the page around a view shows (#72): its rows' state is that window's, which during a swipe isn't
+    /// the one commands act on. Nil for a page that shows no window.
+    @Entry var sidebarPageWindow: TabStore.SidebarPageWindow? = nil
+}
+
+/// The page in place, and during a swipe the pages beside it (SidebarSwipe), each in a slot of its own, so a page
+/// keeps its scroll position as it goes from sliding in to in place, or from in place to sliding out.
+private struct SidebarPages: View {
+    @Environment(SidebarSwipe.self) private var swipe
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            ForEach(0..<3, id: \.self) { slot in
+                SidebarSlot(slot: slot)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .clipped()
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { swipe.pageWidth = $0 }
+    }
+}
+
+/// One of the three slots: the page in place (the sidebar's own contents), a page sliding in or out beside it, or
+/// nothing. Each has its own reorder state, so a page beside the one in place can't disturb a drag on it.
+private struct SidebarSlot: View {
+    let slot: Int
+    @Environment(TabStore.self) private var store
+    @Environment(SidebarSwipe.self) private var swipe
+    @State private var drag = SidebarDrag()
+
+    var body: some View {
+        if let place = swipe.slots.place(of: slot) {
+            let inPlace = place == 0
+            SidebarPage(content: inPlace ? store.displayedContent : swipe.slots.content(of: slot), inPlace: inPlace)
+                .environment(drag)
+                .modifier(SlotOffset(place: place))
+                // Only the page in place takes clicks.
+                .allowsHitTesting(inPlace)
+                .accessibilityHidden(!inPlace)
+        }
+    }
+}
+
+/// Where a slot's page is: with the swipe, and a page's width either side for one beside the page in place. Read
+/// here, so the page itself isn't drawn again as it moves.
+private struct SlotOffset: ViewModifier {
+    let place: Int
+    @Environment(SidebarSwipe.self) private var swipe
+
+    func body(content: Content) -> some View {
+        content.offset(x: swipe.offset + CGFloat(place) * swipe.pageWidth)
+    }
+}
+
+/// A page: the address bar, Favorites, Pinned and Tabs, or the row to turn Side Tabs on where it's off.
+private struct SidebarPage: View {
+    let content: TabStore.ShownContent?
+    /// The page in place, as opposed to one sliding in or out during a swipe.
+    let inPlace: Bool
+    @Environment(TabStore.self) private var store
+    @Environment(SidebarRows.self) private var rows
+    @Environment(SidebarDrag.self) private var drag
+
+    var body: some View {
+        Group {
+            if case .turnOn(let profileID)? = content {
+                VStack(spacing: 0) {
+                    if let copy = store.otherExtensionCopy {
+                        OtherCopyBanner(copy: copy)
+                            .padding(.horizontal, 8)
+                            .padding(.top, 12)
+                    }
+                    // Side Tabs is off in this profile (#33): one row to turn it on, in place of the sections,
+                    // which would list another window's tabs.
+                    TurnOnSideTabsRow(profileID: profileID)
+                        .fading(inPlace)
+                }
+            } else {
+                VStack(spacing: 0) {
+                    // Centered on the same line as Safari's toolbar when docked.
+                    AddressBar(content: content)
+                        .padding(.horizontal, 8)
+                        .padding(.top, 12)
+                        .padding(.bottom, 4)
+                    ScrollView(.vertical) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            if let copy = store.otherExtensionCopy {
+                                OtherCopyBanner(copy: copy)
+                                    .padding(.bottom, 8)
+                            }
+                            if store.lacksWebsiteAccess {
+                                WebsiteAccessBanner()
+                                    .padding(.bottom, 8)
+                            }
+                            if let content {
+                                SidebarSections(content: content)
+                                    .fading(inPlace)
+                            }
+                        }
+                        .coordinateSpace(.named(SidebarDrag.coordinateSpace))
+                        .overlay(alignment: .topLeading) {
+                            if let item = drag.item {
+                                DragGhost(item: item, tileSize: drag.ghostIsTile ? max(drag.favoritesMetrics.tile, 40) : nil)
+                                    .offset(x: drag.ghostOrigin.x, y: drag.ghostOrigin.y)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.top, 6)
+                        .padding(.bottom, 10)
+                    }
+                    .scrollIndicators(.automatic)
+                    // A middle click looks rows up in the list in place only.
+                    .onWindowFrame { frame in
+                        if inPlace { rows.viewport = frame }
+                    }
+                }
+            }
+        }
+        .environment(\.sidebarPageWindow, TabStore.SidebarPageWindow(content))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+private extension View {
+    /// While a switch's window comes back from the Dock, the page in place fades over to its profile (#44,
+    /// SidebarFade): one set of sections, never two, faded out over what was shown, swapped while nothing shows, and
+    /// faded back in. The animation is scoped to the opacity alone, so a change of contents is never animated: no
+    /// row is ever kept on screen for a removal transition, and Safari's report, right or not, swaps in place. A page
+    /// sliding in or out during a swipe doesn't fade.
+    func fading(_ inPlace: Bool) -> some View {
+        modifier(SidebarFadeOpacity(inPlace: inPlace))
+    }
+}
+
+private struct SidebarFadeOpacity: ViewModifier {
+    let inPlace: Bool
+    @Environment(TabStore.self) private var store
+
+    func body(content: Content) -> some View {
+        content.animation(inPlace ? store.sidebarFade.animation : nil) { view in
+            view.opacity(inPlace ? store.sidebarFade.opacity : 1)
+        }
     }
 }
 
@@ -120,9 +216,15 @@ private struct SidebarSections: View {
             }
             UnseenWindowTabsSection(isPrivate: profile == nil)
         case .placeholder(let profile):
-            // A switch's profile whose window isn't known yet (#44): its lists, and no other window's tabs.
-            ProfileLists(profile: profile)
+            // A switch's profile whose window isn't known yet (#44): its lists, and no other window's tabs. None for
+            // a profile whose copy isn't known yet (#72).
+            if let profile {
+                ProfileLists(profile: profile)
+            }
             TabsPlaceholder()
+        case .turnOn:
+            // Drawn by SidebarPage in place of the sections.
+            EmptyView()
         }
     }
 }

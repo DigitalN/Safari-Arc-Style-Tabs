@@ -247,7 +247,7 @@ extension TabStore {
     /// a row or tile, and a tile's Close Tab do. Says whether there was a tab to close.
     @discardableResult
     func closeBookmarkTab(_ id: UUID) -> Bool {
-        guard let selection = currentWindow,
+        guard let selection = shownWindow,
               let bookmark = bookmarkLists.bookmark(id),
               let tab = openTab(for: bookmark) else { return false }
         close([tab], instance: selection.instance)
