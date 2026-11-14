@@ -47,7 +47,10 @@ brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, 
 and where they reopen; with *Minimize other profiles' windows* on, which windows a change of profile
 minimizes and brings back, which window a switch brings forward, the list of windows Side Tabs minimized
 and how it's matched after a restart, and when a click on Safari's Dock icon opens a window; what the
-sidebar shows while a switch's window comes back from the Dock, and when Safari's report ends it;
+sidebar shows while a switch's window comes back from the Dock, and when Safari's report ends it, or another window
+coming to the front does, and what clicks act on meanwhile; swiping between profiles (which way a gesture goes, the
+halfway-or-flick rule, the ends, what the incoming page shows, which window comes forward, and what the sidebar shows
+after the fingers lift);
 what Check for Updates… shows in each of the updater's states, in the menu and in Settings;
 what a command that doesn't reach the extension puts back, and when the extension Safari runs is another
 copy's and the app registers its own), a check that no log line carries a window or tab title or a page's
@@ -228,6 +231,13 @@ separate window that the app keeps attached to Safari's window:
     (`TabStore.switchPreview`): one set of sections fades out over the old contents, then back in with
     the target profile's, ending as the window lands (`SidebarFade`), never both at once. It shows the window `SwitchPreviewRules` guesses from the
     store, or the profile's lists and a placeholder for Tabs, until Safari reports.
+    Commands from the sidebar act on the window it shows, never on the old profile's still in front; while it shows
+    no window yet, they wait for Safari's report.
+  - `SidebarSwipe` turns a horizontal two-finger swipe (or a Magic Mouse's one-finger one) over the sidebar into a
+    switch to the previous or next profile, with the page following the fingers. `SidebarPanel` hands it every scroll
+    event before the vertical list sees one; `ProfileSwipeRules` decides the direction, where the page is, and whether
+    lifting switches. The incoming page is built from the store, and the switch brings forward the window it showed,
+    matched by title (`ProfileRules.switchTarget`); the sidebar keeps showing it until Safari reports, with no fade.
   - `AccessibilityWatcher` restarts the app once Accessibility access is granted.
   - `AppLocation` offers to move the app into Applications.
   - `Updater` checks GitHub for new releases, verifies the download's code signature

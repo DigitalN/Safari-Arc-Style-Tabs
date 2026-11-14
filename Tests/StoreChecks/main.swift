@@ -1705,9 +1705,12 @@ do {
     store.addBookmarkForCurrentTab()
     check(store.bookmarkLists.all.count == 2 && spaces.commands.count == sent, "Add Bookmark does nothing there")
     check(listedIds(store) == [30], "its tab stays under Tabs")
-    // What a click would do, if anything there offered one: the favorite's page opens, but the tab isn't its.
-    spaces.openAndCreate(home, tabId: 31)
-    check(store.bookmarkTabs.owners.isEmpty && listedIds(store) == [30, 31], "a favorite never owns a tab in a private window")
+    // What a click would do, if anything there offered one: nothing, since the window's profile (none) doesn't list
+    // the favorite (#48), so it never opens with the wrong logins or owns a tab there.
+    let createsBefore = creates(spaces.commands).count
+    store.open(home)
+    check(creates(spaces.commands).count == createsBefore && store.bookmarkTabs.owners.isEmpty && listedIds(store) == [30],
+          "a favorite never opens or owns a tab in a private window")
 }
 
 do {
@@ -1753,8 +1756,12 @@ do {
     spaces.show(.work)
     check(store.openTab(for: home) == nil, "a default-profile favorite open in its own window is nothing in Work's")
     // Neither of these can be done from the sidebar, which shows Work's lists here; the store refuses them anyway.
-    spaces.openAndCreate(home, tabId: 52)
-    check(store.bookmarkTabs.owners == [spaces.key(10): home.id], "opening it from a Work window doesn't give it a tab there")
+    let createsBefore = creates(spaces.commands).count
+    store.open(home)
+    check(creates(spaces.commands).count == createsBefore && store.bookmarkTabs.owners == [spaces.key(10): home.id],
+          "opening it from a Work window does nothing there: no tab opens with Work's logins, nor becomes its (#48)")
+    spaces.workTabs.append((52, "https://other.example/"))
+    spaces.show(.work)
     store.addBookmark(from: spaces.tab(50), instance: workCopy, to: .favorites(.defaultProfile))
     check(store.bookmarkTabs.owners.count == 1 && listedIds(store) == [50, 51, 52],
           "nor does making a default-profile favorite of a Work tab: the tab stays under Tabs")
@@ -2618,6 +2625,190 @@ do {
     // #41: a target its copy can't see shows its profile's lists and the tab bar list.
     store.beginSwitchPreview(id: 3, profile: switchedWork, guess: .unseen, arrivesAt: Date())
     check(store.shownContent == .unseen(profile: switchedWork) && store.shownProfile == switchedWork, "a window its copy can't see: its profile's lists, and the tab bar list")
+}
+
+// MARK: - Commands during a switch act on the window the sidebar shows (#48)
+
+/// Personal's window 1 (copy A) is in front; Work's windows 7 and 8 (copy B) are behind, 8 used last. Each window's
+/// one tab, id window × 100, is on https://example.com/<window>.
+func switchingStore() -> (TabStore, commands: () -> [[String: Any]]) {
+    let store = storeWithoutCopies()
+    var commands: [[String: Any]] = []
+    store.sendCommand = { command, _ in commands.append(command) }
+    send(store, copySnapshot("A", profile: nil, seq: 1, window: 1, title: "Mail", focused: true, at: 100))
+    send(store, copyWindows("B", profile: workProfile, seq: 1, [(7, "Docs"), (8, "News")], lastFocused: 8, at: 50))
+    store.dockedWindowProfile = "default"
+    store.dockedWindowTitle = "Personal — Mail"
+    return (store, { commands })
+}
+
+func sentTo(_ command: [String: Any]?) -> (instance: String?, window: Int?) {
+    (command?["instance"] as? String, command?["windowId"] as? Int)
+}
+
+/// Safari reports Work's window `window` in front, as SafariProfiles tells the store.
+func workInFront(_ store: TabStore, page: String, profileID: UUID? = nil) {
+    store.dockedWindowProfile = workProfile
+    store.dockedWindowTitle = "Work — \(page)"
+    store.confirmSwitchPreview(profile: switchedWork, profileID: profileID)
+}
+
+let window8 = { (store: TabStore) in TabStore.WindowSelection(instance: "B", window: store.liveSnapshots["B"]!.windows[1]) }
+let window7 = { (store: TabStore) in TabStore.WindowSelection(instance: "B", window: store.liveSnapshots["B"]!.windows[0]) }
+
+do {
+    // A click on Work's button fades the sidebar over to Work's window 8 while Personal's is still in front.
+    let (store, commands) = switchingStore()
+    let mail = bookmark(store, "https://mail.example/", to: .favorites(switchedWork))
+    let workPage1 = bookmark(store, "https://example.com/1", to: .favorites(switchedWork))
+    let docs = bookmark(store, "https://example.com/8", to: .pinned(switchedWork))
+    let personal = bookmark(store, "https://example.com/1")
+    store.beginSwitchPreview(id: 1, profile: switchedWork, profileID: UUID(), guess: .window(instance: "B", windowId: 8),
+                             arrivesAt: Date().addingTimeInterval(0.4))
+    check(store.currentWindow?.instance == "A" && store.shownWindow == window8(store), "Safari's front window is still Personal's")
+
+    store.open(mail)
+    check(sentTo(creates(commands()).last) == ("B", 8),
+          "a favorite of the profile switched to opens in the window the sidebar shows, through its copy: never with the old profile's logins")
+    store.open(workPage1)
+    check(sentTo(creates(commands()).last) == ("B", 8) && store.bookmarkTabs.bookmark(owning: TabKey(instance: "A", tabId: 100)) == nil,
+          "the old window's tab on the same page isn't taken over")
+    let sent = commands().count
+    store.open(docs)
+    check(store.openTab(for: docs)?.id == 800 && store.bookmarkTabs.bookmark(owning: TabKey(instance: "B", tabId: 800)) == docs.id,
+          "a tab on its page in the window shown becomes its tab, and its row shows it open")
+    check(activations(commands()).last == 800 && sentTo(commands().last).instance == "B" && commands().count == sent + 1,
+          "and the click switches to it there, through the extension: Safari's tab bar in front is the old window's")
+    let creates8 = creates(commands()).count
+    store.open(personal)
+    check(creates(commands()).count == creates8, "a click on the old profile's list, still fading out, opens nothing in the new window")
+
+    store.newTab()
+    check(sentTo(creates(commands()).last) == ("B", 8), "Tabs' + opens a tab in the window shown")
+    let pinnedBefore = store.bookmarks(in: .pinned(switchedWork)).count
+    let personalPinned = store.bookmarks(in: .pinned(.defaultProfile)).count
+    store.addBookmarkForCurrentTab()
+    check(store.bookmarks(in: .pinned(switchedWork)).count == pinnedBefore + 1 && store.bookmarks(in: .pinned(.defaultProfile)).count == personalPinned
+              && store.bookmarks(in: .pinned(switchedWork)).last?.url == "https://example.com/8",
+          "Pinned's + pins the shown window's page in its profile's list, not the old window's in the old profile's")
+    store.replaceBookmarkWithCurrentPage(mail)
+    check(store.bookmarks(in: .favorites(switchedWork)).first?.url == "https://example.com/8",
+          "Replace with Current Page takes the shown window's page")
+    check(store.closeBookmarkTab(docs.id) && closes(commands()).last == [800], "the − closes the bookmark's tab in the window shown")
+}
+
+do {
+    // The sidebar shows Work's lists and a placeholder: which window will come isn't known.
+    let (store, commands) = switchingStore()
+    var addressBarClicks = 0
+    store.onOpenAddressBar = { addressBarClicks += 1 }
+    let mail = bookmark(store, "https://mail.example/", to: .favorites(switchedWork))
+    let work = UUID()
+    store.beginSwitchPreview(id: 1, profile: switchedWork, profileID: work, guess: .placeholder, arrivesAt: Date())
+    store.open(mail)
+    store.newTab()
+    store.openAddressBar()
+    check(creates(commands()).isEmpty && addressBarClicks == 0,
+          "with no window shown, clicks wait: nothing goes to the old window, and the address bar doesn't open over it")
+    workInFront(store, page: "News", profileID: work)
+    check(store.switchPreview == nil && store.shownWindow == window8(store), "Safari reports Work's window")
+    check(creates(commands()).count == 2 && creates(commands()).allSatisfy { sentTo($0) == ("B", 8) } && addressBarClicks == 1,
+          "and the clicks held for it act on it")
+
+    store.beginSwitchPreview(id: 2, profile: .defaultProfile, profileID: UUID(), guess: .placeholder, arrivesAt: Date())
+    store.newTab()
+    store.endSwitchPreview(because: "the switch didn't work")
+    check(creates(commands()).count == 2, "a click held for a switch that didn't work is dropped: its page is gone")
+    store.beginSwitchPreview(id: 3, profile: switchedWork, profileID: work, guess: .placeholder, arrivesAt: Date())
+    store.newTab()
+    store.beginSwitchPreview(id: 4, profile: .defaultProfile, profileID: UUID(), guess: .placeholder, arrivesAt: Date())
+    store.endSwitchPreview(because: "the switch didn't work")
+    check(creates(commands()).count == 2, "and so is one held for a switch a newer one replaced")
+}
+
+// MARK: - The sidebar after a swipe (#72)
+
+do {
+    // The page swiped to is Work's window 8, and Safari brings that window forward.
+    let (store, _) = switchingStore()
+    let work = UUID()
+    store.beginSwipePreview(id: 1, page: SwipePage(profileID: work, profile: switchedWork, guess: .window(instance: "B", windowId: 8), pageTitle: "News"))
+    check(store.sidebarFade.isOver && store.displayedContent == .window(window8(store)) && store.activeTab?.instance == "B",
+          "after a swipe the sidebar keeps showing the page swiped to, with no fade: it slid in")
+    check(store.shownProfile == switchedWork && store.shownWindow == window8(store), "and commands act on its window")
+    workInFront(store, page: "News", profileID: work)
+    check(store.switchPreview == nil && store.sidebarFade.isOver && store.displayedContent == .window(window8(store)),
+          "Safari's window is the one the page showed: nothing visible happens")
+}
+
+do {
+    // Safari brings another of Work's windows forward than the one the page showed.
+    let (store, _) = switchingStore()
+    let work = UUID()
+    store.beginSwipePreview(id: 1, page: SwipePage(profileID: work, profile: switchedWork, guess: .window(instance: "B", windowId: 8), pageTitle: "News"))
+    workInFront(store, page: "Docs", profileID: work)
+    check(store.switchPreview == nil && store.shownWindow == window7(store), "a different window arrives")
+    check(store.sidebarFade.showsOldContents && store.displayedContent == .window(window8(store)), "the page swiped to fades out")
+    wait(0.5)
+    check(store.sidebarFade.isOver && store.displayedContent == .window(window7(store)), "and the window that came fades in, shortly")
+
+    // The switch picked a window it can tell is another: the same short fade.
+    store.beginSwipePreview(id: 2, page: SwipePage(profileID: UUID(), profile: .defaultProfile, guess: .window(instance: "A", windowId: 1), pageTitle: "Mail"))
+    check(store.sidebarFade.isOver, "a swipe ends nothing visible at its start")
+    store.refineSwitchPreview(id: 2, guess: .placeholder)
+    check(store.sidebarFade.showsOldContents, "a change from the page swiped to fades")
+    wait(0.5)
+
+    // The switch didn't work: back to Safari's window, with the same short fade.
+    store.beginSwipePreview(id: 3, page: SwipePage(profileID: UUID(), profile: .defaultProfile, guess: .window(instance: "A", windowId: 1), pageTitle: "Mail"))
+    store.endSwitchPreview(because: "the switch didn't work")
+    check(store.sidebarFade.showsOldContents && store.displayedContent == .window(TabStore.WindowSelection(instance: "A", window: store.liveSnapshots["A"]!.windows[0])),
+          "a switch that didn't work fades from the page swiped to")
+    wait(0.5)
+    check(store.sidebarFade.isOver && store.displayedContent == .window(window7(store)), "back to the window Safari has")
+}
+
+do {
+    // A swipe right after a click: the page slid in over the click's fade.
+    let (store, _) = switchingStore()
+    store.beginSwitchPreview(id: 1, profile: switchedWork, guess: .window(instance: "B", windowId: 8), arrivesAt: Date().addingTimeInterval(0.8))
+    check(!store.sidebarFade.isOver, "the click fades")
+    store.beginSwipePreview(id: 2, page: SwipePage(profileID: UUID(), profile: .defaultProfile, guess: .window(instance: "A", windowId: 1), pageTitle: "Mail"))
+    check(store.sidebarFade.isOver && store.fadingOutContent == nil && store.sidebarFade.opacity == 1
+              && store.displayedContent == .window(TabStore.WindowSelection(instance: "A", window: store.liveSnapshots["A"]!.windows[0])),
+          "a swipe stops it at once and shows its page at full opacity")
+    wait(1.4)
+    check(store.sidebarFade.isOver && store.sidebarFade.opacity == 1, "and none of the click fade's timers bring it back")
+}
+
+do {
+    // Side Tabs is off in the profile swiped to.
+    let (store, commands) = switchingStore()
+    let off = UUID()
+    store.beginSwipePreview(id: 1, page: SwipePage(profileID: off, profile: switchedWork, guess: .turnOn, pageTitle: nil))
+    check(store.shownContent == .turnOn(off) && store.shownWindow == nil, "the page swiped to is the row to turn Side Tabs on")
+    store.newTab()
+    check(creates(commands()).isEmpty, "nothing acts on the old window meanwhile")
+    store.profileToTurnOn = off
+    workInFront(store, page: "News", profileID: off)
+    check(store.switchPreview == nil && store.shownContent == .turnOn(off) && store.sidebarFade.isOver,
+          "Safari reports the window, Side Tabs is off there: the row stays, with no fade")
+
+    store.profileToTurnOn = nil
+    check(store.shownContent == .window(window8(store)), "without a switch, the row shows only while Side Tabs is off in the front window's profile")
+    store.profileToTurnOn = off
+    check(store.shownContent == .turnOn(off), "in place of another window's tabs")
+}
+
+do {
+    // A profile whose copy Side Tabs hasn't learned yet.
+    let (store, _) = switchingStore()
+    let unknown = UUID()
+    store.beginSwipePreview(id: 1, page: SwipePage(profileID: unknown, profile: nil, guess: .placeholder, pageTitle: nil))
+    check(store.shownContent == .placeholder(nil) && store.shownProfile == nil && store.currentFavoritesList == nil,
+          "its page has a placeholder for Tabs, and no other profile's lists")
+    workInFront(store, page: "News", profileID: unknown)
+    check(store.switchPreview == nil && store.shownWindow == window8(store), "Safari's report, once its copy is known, ends it")
 }
 
 // MARK: - Commands that don't reach the extension (#67)

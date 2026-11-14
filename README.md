@@ -26,7 +26,8 @@ Apple, so Apple hasn't checked it; all of its code is on this page.
 
 - **Tabs**: click to switch, ✕ or middle-click to close, right-click for more.
 - **Spaces**: a button for each Safari profile at the bottom of the sidebar. Click one to
-  switch to that profile's window in the same spot.
+  switch to that profile's window in the same spot. Swipe left or right on the sidebar to
+  switch profiles.
 - **Favorites and Pinned**: your sites as tiles at the top, and a Pinned list below, for
   each profile. An opened one keeps its tab; − closes it, back to the saved page.
 - **Drag to reorder** tabs, favorites and pinned sites. Drag a tab up to keep it.

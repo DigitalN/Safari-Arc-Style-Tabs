@@ -54,6 +54,8 @@ nonisolated struct WindowFacts: Equatable, Sendable {
     let number: Int
     let profile: ProfileResolution
     let isMinimized: Bool
+    /// Safari's title for it ("<profile> — <page>"), for a swipe's switch (#72). Never logged.
+    var title: String? = nil
 }
 
 nonisolated enum ProfileRules {
@@ -187,5 +189,26 @@ nonisolated enum ProfileRules {
             ?? own.first(where: { $0.isMinimized && $0.number == usedLast && listed.contains($0.number) })
             ?? own.first(where: { $0.isMinimized && listed.contains($0.number) })
             ?? own.first
+    }
+
+    /// The window a swipe's switch brings forward (#72): the page decides. Of `profile`'s windows, the one Safari
+    /// titles after the page's active tab (`pageTitle`, with `profileName` before it), so the window that arrives is
+    /// the one the sidebar already shows. Only when two or more of them have that title, the frontmost of those by
+    /// the rule above; and when none has it (the page has changed since, or it showed no window), the rule above
+    /// as it is.
+    static func switchTarget(for profile: UUID, among windows: [WindowFacts], pageTitle: String?, profileName: String,
+                             usedLast: Int? = nil, listed: Set<Int> = []) -> WindowFacts? {
+        if let pageTitle, !pageTitle.isEmpty {
+            let titled = windows.filter {
+                $0.profile == .profile(profile) && fits(windowTitle: $0.title, profileName: profileName, activeTitle: pageTitle)
+            }
+            if titled.count == 1 {
+                return titled[0]
+            }
+            if !titled.isEmpty {
+                return switchTarget(for: profile, among: titled, usedLast: usedLast, listed: listed)
+            }
+        }
+        return switchTarget(for: profile, among: windows, usedLast: usedLast, listed: listed)
     }
 }

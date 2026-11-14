@@ -39,6 +39,20 @@ nonisolated enum SwitchGuess: Equatable, Sendable {
     case placeholder
     /// A window the profile's copy can't see (#41): the profile's lists, and the window's tabs from its tab bar.
     case unseen
+    /// Side Tabs is off in the profile: the row to turn it on, as the sidebar shows there (#33). Only a swipe's page
+    /// shows it before Safari reports (#72).
+    case turnOn
+}
+
+/// A profile's page as a swipe brings it in (#72): built from what the store has when the swipe starts.
+nonisolated struct SwipePage: Equatable, Sendable {
+    let profileID: UUID
+    /// Its copy's profile, as snapshots name it. Nil while Side Tabs hasn't learned which copy is the profile's.
+    let profile: ProfileKey?
+    let guess: SwitchGuess
+    /// The active tab's title of the window the page shows: the switch brings forward the window Safari titles
+    /// after it ("<profile> — <title>"). Nil when the page shows no window. Never logged.
+    let pageTitle: String?
 }
 
 nonisolated enum SwitchPreviewRules {
@@ -101,6 +115,47 @@ nonisolated enum SwitchPreviewRules {
             return .window(instance: windows[0].instance, windowId: windows[0].window.id)
         }
         return .placeholder
+    }
+
+    /// What a swipe's incoming page shows for a profile (#72), from what the store already has, never waiting on
+    /// Safari: the row to turn Side Tabs on where it was found off the last time the profile's window was in front
+    /// and still has no live copy; otherwise its copy's last focused window (`guess`), or its lists and a placeholder
+    /// when it has no window or no live copy. Never another profile's tabs. `copies`: the live copies' snapshots.
+    static func incomingPage(profile key: ProfileKey?, knownOff: Bool, copies: [Snapshot]) -> SwitchGuess {
+        let hasLiveCopy = key.map { key in copies.contains { ProfileKey(snapshotProfile: $0.profile) == key } } ?? false
+        if knownOff && !hasLiveCopy {
+            return .turnOn
+        }
+        guard let key else { return .placeholder }
+        return guess(SwitchTarget(profile: key), copies: copies)
+    }
+
+    /// What the docked window, once its profile is read, does to a preview (#44, #58).
+    enum DockedVerdict: Equatable, Sendable {
+        /// It's the preview's profile: the sidebar's own choice takes over once it's that profile's.
+        case confirm
+        /// Another window came to the front: the sidebar follows Safari again.
+        case end
+        /// Nothing yet.
+        case keep
+    }
+
+    /// The docked window's profile against a preview's. Another window coming to the front ends a preview, but not
+    /// while the switch to the preview's own profile is still on its way (`switchInFlight`): during rapid switches,
+    /// an older switch's window can land first, and must not end the newest one's preview (#58). That preview ends
+    /// on its switch's outcome, on Safari showing its profile, or after its lifetime. A preview with no switch (a
+    /// window coming back from a Dock tile) still ends as before. `isFinal`: the docked window's toolbar has been
+    /// read for good.
+    static func docked(profile: UUID?, number: Int?, isFinal: Bool, previewProfile: UUID?, previewDockedNumber: Int?,
+                       switchInFlight: UUID?) -> DockedVerdict {
+        if let profile, profile == previewProfile {
+            return .confirm
+        }
+        guard isFinal, number != previewDockedNumber else { return .keep }
+        if let previewProfile, switchInFlight == previewProfile {
+            return .keep
+        }
+        return .end
     }
 
     /// Whether the sidebar shows its guess at once, cross-fading to it: only when the window comes back from
@@ -231,6 +286,12 @@ nonisolated struct SidebarFade: Equatable, Sendable {
             Timer(kind: .outEnded, step: step, after: SwitchPreviewRules.fadeOut + Self.margin),
             Timer(kind: .watchdog, step: step, after: watchdogAfter),
         ])
+    }
+
+    /// Ends the fade at once, at full opacity: a swipe's page slid in over it (#72). Its timers do nothing after this.
+    mutating func cancel() {
+        step += 1
+        phase = .none
     }
 
     /// A timer has fired: the next step, and the timers it needs.

@@ -4,11 +4,19 @@ import SwiftUI
 /// site opens Safari's own address bar (like ⌘L), which has Safari's full autocomplete;
 /// extensions can't read Safari's history or suggestions to recreate it.
 struct AddressBar: View {
+    /// What the page it tops shows: its window's active tab is the site shown. During a swipe each page has its
+    /// own (#72).
+    let content: TabStore.ShownContent?
     @Environment(TabStore.self) private var store
     @State private var hovering = false
 
+    private var active: (tab: BrowserTab, instance: String)? {
+        guard case .window(let selection)? = content, let tab = selection.window.tabs.first(where: \.active) else { return nil }
+        return (tab, selection.instance)
+    }
+
     var body: some View {
-        let active = store.activeTab
+        let active = active
         let url = active?.tab.url.flatMap(URL.init(string:))
         let shown = displayText(for: url)
 
@@ -40,7 +48,7 @@ struct AddressBar: View {
             .accessibilityHint("Opens Safari's address bar")
 
             SidebarIconButton(systemImage: "arrow.clockwise", help: "Reload Page", size: 12) {
-                store.reloadActiveTab()
+                if let active { store.reload(active.tab, instance: active.instance) }
             }
             .disabled(active == nil)
         }

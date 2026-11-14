@@ -53,6 +53,9 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
         /// Told which window the switch picked, before it's brought forward, so the sidebar can show that
         /// window while it comes back from the Dock (#44). Runs on the reader's queue.
         var onTarget: (@Sendable (TargetChoice) -> Void)? = nil
+        /// A swipe's switch (#72): the active tab's title of the window its page showed. The switch brings forward
+        /// the profile's window Safari titles after it (ProfileRules.switchTarget). Nil for every other switch.
+        var pageTitle: String? = nil
     }
 
     /// The window a switch picked, before it's brought forward (#44).
@@ -101,10 +104,11 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
             }
             let windows = reader.windows(application: request.application)
             let facts = windows.map {
-                WindowFacts(number: $0.number, profile: request.resolve($0.toolbar, $0.title), isMinimized: $0.isMinimized)
+                WindowFacts(number: $0.number, profile: request.resolve($0.toolbar, $0.title), isMinimized: $0.isMinimized, title: $0.title)
             }
             let list = minimizer.list
-            let target = ProfileRules.switchTarget(for: request.profile.id, among: facts,
+            let target = ProfileRules.switchTarget(for: request.profile.id, among: facts, pageTitle: request.pageTitle,
+                                                   profileName: request.profile.name,
                                                    usedLast: list.usedLast(in: request.profile.id), listed: list.numbers)
             let chosen = target.flatMap { target in windows.first { $0.number == target.number } }
             request.onTarget?(TargetChoice(
@@ -139,6 +143,9 @@ nonisolated final class ProfileSwitcher: @unchecked Sendable {
     }
 
     private func bringForward(_ window: SafariWindowInfo, request: Request, clickAt: Date, isStale: () -> Bool) -> Outcome {
+        // A newer switch was asked for while the windows were read: don't bring this one's window back from the Dock
+        // only for the newer sweep to minimize it again, or for it to land in front first (#58).
+        guard !isStale() else { return .superseded }
         query.clearTimedOut()
         let frame = window.isFullScreen ? nil : request.frame
         if window.isMinimized {

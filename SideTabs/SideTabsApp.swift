@@ -38,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var dock: DockController?
     /// The profile buttons in the bottom bar, and switching between profiles (#33).
     private lazy var safariProfiles = SafariProfiles(tracker: tracker, store: store, settings: settings)
+    /// Swiping left or right on the sidebar to switch profiles (#72).
+    private lazy var sidebarSwipe = SidebarSwipe(profiles: safariProfiles, store: store)
     private var welcomeWindow: NSWindow?
     private var settingsWindow: NSWindow?
     /// Set while Side Tabs activates itself to show one of its own windows.
@@ -58,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .environment(favicons)
             .environment(rows)
             .environment(safariProfiles)
+            .environment(sidebarSwipe)
             // The gear in the sidebar's bottom bar (#43).
             .environment(\.showSideTabsSettings, ShowSettingsAction { [weak self] in self?.showSettings() }))
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
@@ -108,6 +111,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // bookmark's tab, like its "−" (a closed bookmark has nothing to close). Neither switches to
         // the tab first: only a left press does that. (Safari has already been brought forward by
         // then, like for any click.)
+        panel.onScroll = { [sidebarSwipe] event in sidebarSwipe.handle(event) }
+        if let view = panel.contentView {
+            sidebarSwipe.attach(to: view)
+        }
         panel.onMiddleClick = { [weak self] point in
             guard let self else { return false }
             if let key = rows.tab(at: point), let tab = store.tab(for: key) {

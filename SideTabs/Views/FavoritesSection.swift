@@ -131,6 +131,7 @@ struct FavoriteTile: View {
     @Environment(AppSettings.self) private var settings
     @Environment(SidebarDrag.self) private var drag
     @Environment(SidebarRows.self) private var rows
+    @Environment(\.sidebarPageWindow) private var pageWindow
     @State private var hovering = false
     @State private var frame = CGRect.zero
     /// Whether the press in progress opens the favorite when the button goes up (see
@@ -164,7 +165,7 @@ struct FavoriteTile: View {
     }
 
     var body: some View {
-        let openTab = store.openTab(for: favorite)
+        let openTab = store.openTab(for: favorite, inPage: pageWindow)
         let isActive = openTab?.active == true
         let shape = RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
 

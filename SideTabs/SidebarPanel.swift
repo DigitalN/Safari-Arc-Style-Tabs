@@ -63,11 +63,22 @@ final class SidebarPanel: NSPanel {
     /// gets an internal container, not the row (#21), so the panel finds the row itself.
     var onMiddleClick: ((CGPoint) -> Bool)?
 
+    /// Called with every scroll event over the panel before its views get it, like the middle click: swiping left or
+    /// right switches profiles (#72, SidebarSwipe). Returns the events to pass on, in order: none while a swipe has
+    /// them, and held ones once a gesture turns out to scroll the lists.
+    var onScroll: ((NSEvent) -> [NSEvent])?
+
     /// When the last left or middle mouse-down reached the panel, taken from the event itself
     /// so it doesn't include time spent before the event was handled.
     private(set) var lastMouseDown = Date.distantPast
 
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .scrollWheel, let onScroll {
+            for passed in onScroll(event) {
+                super.sendEvent(passed)
+            }
+            return
+        }
         var keepingSafariBehind = false
         if event.type == .leftMouseDown || event.type == .otherMouseDown {
             lastMouseDown = Date(timeIntervalSinceNow: event.timestamp - ProcessInfo.processInfo.systemUptime)

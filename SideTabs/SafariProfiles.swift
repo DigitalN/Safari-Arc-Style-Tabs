@@ -26,7 +26,14 @@ final class SafariProfiles {
     /// The docked window's profile. Nil for a private window, and while it isn't known.
     private(set) var dockedProfileID: UUID?
     /// The front window's profile while Side Tabs is off in it: the sidebar shows a row to turn it on.
-    private(set) var profileToTurnOn: SafariProfile?
+    private(set) var profileToTurnOn: SafariProfile? {
+        didSet {
+            if store.profileToTurnOn != profileToTurnOn?.id { store.profileToTurnOn = profileToTurnOn?.id }
+        }
+    }
+    /// The profiles Side Tabs was found off in the last time their window was in front, since launch: a swipe's page
+    /// for one shows the row to turn it on while it still has no live copy (#72).
+    @ObservationIgnored private var knownOff: Set<UUID> = []
     /// A switch that Safari hasn't shown yet. Its button is highlighted meanwhile.
     private var pendingSwitch: PendingSwitch?
 
@@ -587,13 +594,23 @@ final class SafariProfiles {
 
     /// What the docked window says about the sidebar's guess during a switch (#44): Safari shows the switch's
     /// profile, so the sidebar's own choice takes over once it's that profile's; or another window came to the
-    /// front, and the sidebar follows Safari again.
+    /// front, and the sidebar follows Safari again, but not while the switch to the preview's profile is still on
+    /// its way: an older switch's window landing first mustn't end the newest one's preview (#58).
     private func settlePreview(_ id: UUID?, isFinal: Bool) {
         guard let preview = store.switchPreview else { return }
-        if let id, let key = profiles.first(where: { $0.id == id })?.key, key == preview.profile {
-            store.confirmSwitchPreview(profile: key)
-        } else if isFinal, dockedNumber != previewDockedNumber {
+        let key = id.flatMap { id in profiles.first(where: { $0.id == id })?.key }
+        // A preview from before its profile's id was passed (none now) is matched by its key.
+        let previewProfile = preview.profileID ?? preview.profile.flatMap { key in profiles.first(where: { $0.key == key })?.id }
+        switch SwitchPreviewRules.docked(profile: id, number: dockedNumber, isFinal: isFinal, previewProfile: previewProfile,
+                                         previewDockedNumber: previewDockedNumber, switchInFlight: pendingSwitch?.id) {
+        case .confirm:
+            store.confirmSwitchPreview(profile: key, profileID: id)
+        case .end:
             store.endSwitchPreview(because: "another window came to the front")
+        case .keep:
+            if isFinal, dockedNumber != previewDockedNumber {
+                log.notice("another window came to the front while the switch to the sidebar's profile is still on its way: the sidebar keeps showing it")
+            }
         }
     }
 
@@ -688,7 +705,11 @@ final class SafariProfiles {
             let hadChance = store.copiesHaveHadTheirChance
             if ProfileRules.isOff(profile, profiles: profiles, windowOpenFor: openFor, copiesHadTheirChance: hadChance, copies: copies) {
                 off = profile
-            } else if openFor < ProfileRules.offAfter {
+                knownOff.insert(profile.id)
+            } else if openFor >= ProfileRules.offAfter, hadChance {
+                knownOff.remove(profile.id)
+            }
+            if off == nil, openFor < ProfileRules.offAfter {
                 // Look again when the window has been open long enough.
                 let work = DispatchWorkItem { [weak self] in self?.evaluateOff() }
                 offCheck = work
@@ -729,17 +750,19 @@ final class SafariProfiles {
     /// icon); otherwise a press on the sidebar just now, or else the switch's own start, is what it's timed
     /// from. `then` runs on the main thread when it's done, with whether the profile's window came to the
     /// front. Says whether a switch started.
+    /// `swipe`: the page a swipe brought in (#72). The switch brings forward the window it showed, and the sidebar
+    /// keeps showing it, with no fade, until Safari reports; the switch is timed from the fingers lifting.
     @discardableResult
     func beginSwitch(to profile: SafariProfile, reason: MinimizeReason = .switched, frame override: CGRect? = nil,
-                     clickAt click: Date? = nil, then: ((Bool) -> Void)? = nil) -> Bool {
+                     clickAt click: Date? = nil, swipe: SwipePage? = nil, then: ((Bool) -> Void)? = nil) -> Bool {
         guard let app = application,
               let position = profiles.firstIndex(where: { $0.id == profile.id }) else { return false }
         // Not an older press: a switch nobody clicked for in the sidebar (the Dock icon, say) would otherwise be
         // timed from whenever the sidebar was last pressed.
         let now = Date()
-        let press = (store.lastPointerDown?()).flatMap { now.timeIntervalSince($0) < Self.clickStartsSwitch ? $0 : nil }
+        let press = swipe != nil ? nil : (store.lastPointerDown?()).flatMap { now.timeIntervalSince($0) < Self.clickStartsSwitch ? $0 : nil }
         let clickAt = click ?? press ?? now
-        let since = click != nil ? "the click on the Dock icon" : press != nil ? "the click" : "the switch began"
+        let since = click != nil ? "the click on the Dock icon" : swipe != nil ? "the swipe" : press != nil ? "the click" : "the switch began"
         let pending = PendingSwitch(id: profile.id, at: Date())
         pendingSwitch = pending
         DispatchQueue.main.asyncAfter(deadline: .now() + PendingSwitch.lifetime) { [weak self] in
@@ -758,6 +781,7 @@ final class SafariProfiles {
             frame: frame,
             resolve: makeResolver()
         )
+        request.pageTitle = swipe?.pageTitle
         let sweepStart = minimizing.switchStarting(to: profile.id, reason: reason)
         request.sweep = sweepStart.sweep
         request.sweepGeneration = sweepStart.generation
@@ -766,14 +790,19 @@ final class SafariProfiles {
         latestPreview += 1
         let previewID = latestPreview
         if reason == .switched {
-            previewAtClick(id: previewID, profile: profile, clickAt: clickAt)
+            if let swipe {
+                previewDockedNumber = dockedNumber
+                store.beginSwipePreview(id: previewID, page: swipe)
+            } else {
+                previewAtClick(id: previewID, profile: profile, clickAt: clickAt)
+            }
             request.onTarget = { [weak self] choice in
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated { self?.switchPicked(choice, preview: previewID, profile: profile, clickAt: clickAt) }
                 }
             }
         }
-        log.notice("switching to profile \(position)\(reason == .switched ? "" : " (\(reason.rawValue))", privacy: .public)")
+        log.notice("switching to profile \(position)\(reason == .switched ? (swipe != nil ? " (a swipe)" : "") : " (\(reason.rawValue))", privacy: .public)")
         let profileID = profile.id
         switcher.switchTo(request, clickAt: clickAt) { [weak self] outcome in
             DispatchQueue.main.async {
@@ -794,6 +823,38 @@ final class SafariProfiles {
                     then?(succeeded)
                 }
             }
+        }
+        return true
+    }
+
+    // MARK: - Swiping (#72)
+
+    /// The pages a swipe can bring in, before and after the profile highlighted (the one a switch is already on its
+    /// way to, else the front window's), in the bar's order, built from what the store has now: nothing here waits on
+    /// Safari. Nil when no profile is current (a private window): the swipe does nothing.
+    func swipePages() -> (previous: SwipePage?, next: SwipePage?)? {
+        guard let neighbors = ProfileSwipeRules.neighbors(of: highlightedID, in: profiles.map(\.id)) else { return nil }
+        let copies = Array(store.liveSnapshots.values)
+        func page(_ id: UUID?) -> SwipePage? {
+            guard let id, let profile = profiles.first(where: { $0.id == id }) else { return nil }
+            let guess = SwitchPreviewRules.incomingPage(profile: profile.key, knownOff: knownOff.contains(id), copies: copies)
+            var title: String?
+            if case .window(let instance, let windowId) = guess {
+                title = store.liveSnapshots[instance]?.windows.first { $0.id == windowId }?.tabs.first(where: \.active)?.title
+            }
+            return SwipePage(profileID: id, profile: profile.key, guess: guess, pageTitle: title)
+        }
+        return (page(neighbors.previous), page(neighbors.next))
+    }
+
+    /// A swipe's fingers lifted past halfway or with a flick: switches to the page's profile at once, while the page
+    /// finishes sliding, and brings Safari forward as a profile button does. Says whether a switch started; if not,
+    /// the page springs back.
+    func swipe(to page: SwipePage) -> Bool {
+        guard let profile = profiles.first(where: { $0.id == page.profileID }), profile.id != highlightedID else { return false }
+        guard beginSwitch(to: profile, swipe: page) else { return false }
+        if !tracker.isSafariFrontmost {
+            tracker.focusSafari()
         }
         return true
     }
@@ -830,7 +891,7 @@ final class SafariProfiles {
         guard let key = profile.key,
               SwitchPreviewRules.fades(targetIsMinimized: nil, minimizesOtherProfiles: settings.minimizesOtherProfiles) else { return }
         let guess = SwitchPreviewRules.guess(SwitchTarget(profile: key), copies: Array(store.liveSnapshots.values))
-        beginPreview(id: id, profile: key, guess: guess, arrivesAt: clickAt.addingTimeInterval(arrivalEstimate))
+        beginPreview(id: id, profile: key, profileID: profile.id, guess: guess, arrivesAt: clickAt.addingTimeInterval(arrivalEstimate))
     }
 
     /// The switch has picked its window, through Accessibility, before bringing it forward: a better guess from
@@ -840,20 +901,27 @@ final class SafariProfiles {
         guard id == latestPreview, let key = profiles.first(where: { $0.id == profile.id })?.key ?? profile.key else { return }
         let target = SwitchTarget(profile: key, title: choice.title, isNewWindow: choice.window == nil, profileWindowCount: choice.profileWindowCount)
         let guess = SwitchPreviewRules.guess(target, copies: Array(store.liveSnapshots.values))
-        if store.switchPreview?.id == id {
+        if let preview = store.switchPreview, preview.id == id, preview.swiped {
+            // A swipe's page stays until Safari reports, unless the switch picked a window it can tell is another
+            // (#72): the turn-on row, or a window it can't place, isn't replaced by a guess.
+            switch (preview.guess, guess) {
+            case (.turnOn, _), (_, .placeholder): break
+            default: store.refineSwitchPreview(id: id, guess: guess)
+            }
+        } else if store.switchPreview?.id == id {
             store.refineSwitchPreview(id: id, guess: guess)
         } else if choice.window != nil,
                   SwitchPreviewRules.fades(targetIsMinimized: choice.isMinimized, minimizesOtherProfiles: settings.minimizesOtherProfiles) {
-            beginPreview(id: id, profile: key, guess: guess, arrivesAt: clickAt.addingTimeInterval(arrivalEstimate))
+            beginPreview(id: id, profile: key, profileID: profile.id, guess: guess, arrivesAt: clickAt.addingTimeInterval(arrivalEstimate))
         }
         if guess == .unseen, let window = choice.window, store.switchPreview?.id == id {
             unseenTabs.preview(window)
         }
     }
 
-    private func beginPreview(id: Int, profile key: ProfileKey, guess: SwitchGuess, arrivesAt: Date) {
+    private func beginPreview(id: Int, profile key: ProfileKey, profileID: UUID?, guess: SwitchGuess, arrivesAt: Date) {
         previewDockedNumber = dockedNumber
-        store.beginSwitchPreview(id: id, profile: key, guess: guess, arrivesAt: arrivesAt)
+        store.beginSwitchPreview(id: id, profile: key, profileID: profileID, guess: guess, arrivesAt: arrivesAt)
         refreshArrivalEstimate()
     }
 
@@ -889,7 +957,7 @@ final class SafariProfiles {
         let guess = SwitchPreviewRules.guess(SwitchTarget(profile: key, title: title), copies: Array(store.liveSnapshots.values))
         log.notice("a minimized window of profile \(position) is coming back: the sidebar fades over to it")
         // Its animation has begun already.
-        beginPreview(id: latestPreview, profile: key, guess: guess, arrivesAt: Date().addingTimeInterval(SwitchPreviewRules.alreadyOnItsWay))
+        beginPreview(id: latestPreview, profile: key, profileID: id, guess: guess, arrivesAt: Date().addingTimeInterval(SwitchPreviewRules.alreadyOnItsWay))
     }
 
     /// The Dock's minimize effect sets how long a window takes to come back from the Dock, until switches have
@@ -926,9 +994,11 @@ final class SafariProfiles {
         }
     }
 
-    /// The "Turn on Side Tabs for this profile" row: takes the user to where they tick the box.
-    func turnOnSideTabs() {
-        guard let profile = profileToTurnOn, let position = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+    /// The "Turn on Side Tabs for this profile" row of profile `id`: takes the user to where they tick the box. The
+    /// row's own profile, which during a swipe's switch isn't yet the front window's (#72).
+    func turnOnSideTabs(_ id: UUID) {
+        guard let position = profiles.firstIndex(where: { $0.id == id }) else { return }
+        let profile = profiles[position]
         if profile.isDefault {
             // The default profile has no Extensions tab under Profiles; Settings → Extensions is its.
             log.notice("opening Safari's extension settings for the default profile")

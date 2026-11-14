@@ -5,12 +5,14 @@ import SwiftUI
 /// another window's tabs. The user ticks the box; Side Tabs never does (a scripted tick makes Safari
 /// ask for Touch ID). Once that profile's copy starts, the row goes away by itself.
 struct TurnOnSideTabsRow: View {
+    /// The profile it's for: the front window's, or during a swipe's switch the one swiped to (#72).
+    let profileID: UUID
     @Environment(SafariProfiles.self) private var profiles
     @State private var hovering = false
 
     var body: some View {
         Button {
-            profiles.turnOnSideTabs()
+            profiles.turnOnSideTabs(profileID)
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "puzzlepiece.extension")

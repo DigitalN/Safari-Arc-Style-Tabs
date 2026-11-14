@@ -140,17 +140,29 @@ final class TabStore {
     var dockedWindowSettled = false {
         didSet { settleSwitchPreview() }
     }
+    /// The front window's profile while Side Tabs is off in it (SafariProfiles' id): the sidebar shows the row to turn
+    /// it on in place of the sections (#33).
+    var profileToTurnOn: UUID? {
+        didSet {
+            if profileToTurnOn != oldValue { settleSwitchPreview() }
+        }
+    }
 
     /// What the sidebar shows while a profile switch's window comes back from the Dock (#44): its guess at
     /// the switch's profile and window, in place of `currentWindow`, until Safari reports.
     struct SwitchPreview: Equatable {
         /// The switch's: a newer click supersedes it.
         let id: Int
-        let profile: ProfileKey
+        /// Nil only for a swipe to a profile whose copy Side Tabs hasn't learned yet (#72).
+        var profile: ProfileKey?
+        /// The profile's id in SafariProfiles, when it began the preview.
+        var profileID: UUID? = nil
         var guess: SwitchGuess
         /// Safari has shown the switch's profile in front: the preview ends as soon as the sidebar's own choice
         /// is a window of that profile.
         var reported = false
+        /// A swipe brought the page in (#72): it shows with no fade, and changes from it fade briefly.
+        var swiped = false
     }
     /// Nil when the sidebar follows Safari, as it does but for a switch's window coming back from the Dock.
     private(set) var switchPreview: SwitchPreview?
@@ -1274,8 +1286,15 @@ final class TabStore {
         reload(active.tab, instance: active.instance)
     }
 
-    /// Opens Safari's own address bar, which has its full autocomplete.
+    /// Opens Safari's own address bar, which has its full autocomplete. During a switch, Safari's key window is
+    /// still the old profile's, while the bar shows the new one's page: the click waits until Safari reports the
+    /// switch's window (#48).
     func openAddressBar() {
+        guard switchPreview == nil else {
+            heldCommands.append(("a click on the address bar", { [weak self] in self?.onOpenAddressBar?() }))
+            log.notice("holding a click on the address bar until Safari reports the switch's window")
+            return
+        }
         onOpenAddressBar?()
     }
 
@@ -1472,9 +1491,10 @@ final class TabStore {
         close(Array(listed[(index + 1)...]), instance: instance)
     }
 
-    /// Opens a new tab in the window the sidebar shows. `ifFailed` runs if the command can't reach the extension.
+    /// Opens a new tab in the window the sidebar shows (#48). `ifFailed` runs if the command can't reach the extension.
     func newTab(url: String? = nil, ifFailed: (() -> Void)? = nil) {
-        guard let selection = currentWindow else {
+        if heldForSwitch("a new tab", { [weak self] in self?.newTab(url: url, ifFailed: ifFailed) }) { return }
+        guard let selection = shownWindow else {
             openInSafari(url ?? "")
             return
         }
@@ -1526,7 +1546,7 @@ final class TabStore {
         send(["action": "move", "tabId": tab.id, "index": destination], to: instance, window: tab.windowId)
     }
 
-    private func window(instance: String, id: Int) -> BrowserWindow? {
+    func window(instance: String, id: Int) -> BrowserWindow? {
         snapshots[instance]?.windows.first { $0.id == id }
     }
 
@@ -1613,33 +1633,72 @@ final class TabStore {
 
     // MARK: - A switch's window on its way in (#44)
 
-    /// What the sidebar's sections show.
+    /// The window a page of the sidebar shows, for its rows' state: during a swipe (#72), the pages sliding in and out
+    /// show other windows than the one commands act on.
+    struct SidebarPageWindow: Equatable, Hashable {
+        let instance: String
+        let windowId: Int
+
+        init(instance: String, windowId: Int) {
+            self.instance = instance
+            self.windowId = windowId
+        }
+
+        /// The window `content` shows, if it shows one.
+        init?(_ content: ShownContent?) {
+            guard case .window(let selection)? = content else { return nil }
+            self.init(instance: selection.instance, windowId: selection.window.id)
+        }
+    }
+
+    /// What a page of the sidebar shows (the one in place, or one sliding in or out during a swipe, #72).
     enum ShownContent: Equatable {
         case window(WindowSelection)
         /// A window its profile's copy can't see (#41): its profile's lists (none for a private window), and its
         /// tabs from the tab bar.
         case unseen(profile: ProfileKey?)
-        /// A switch's profile whose window isn't known yet: its lists, and a placeholder for Tabs.
-        case placeholder(ProfileKey)
+        /// A switch's profile whose window isn't known yet: its lists, and a placeholder for Tabs. No lists for a
+        /// profile whose copy Side Tabs hasn't learned yet (a swipe's page, #72).
+        case placeholder(ProfileKey?)
+        /// Side Tabs is off in this profile (`SafariProfiles`' id): the row to turn it on, in place of the sections
+        /// (#33), which would list another window's tabs.
+        case turnOn(UUID)
     }
 
     /// The window whose tabs the sidebar shows: a switch's guessed window while there is one, otherwise
-    /// `currentWindow`. Commands that act on the window Safari has in front go by `currentWindow`.
+    /// `currentWindow`. Commands from the sidebar act on this window, never on one it doesn't show (#48): during a
+    /// switch, Safari's front window is still the old profile's.
     var shownWindow: WindowSelection? {
         guard let preview = switchPreview else { return currentWindow }
-        guard case .window(let instance, let windowId) = preview.guess,
-              let window = liveSnapshots[instance]?.windows.first(where: { $0.id == windowId }) else { return nil }
-        return WindowSelection(instance: instance, window: window)
+        guard case .window(let selection) = content(for: preview.guess, profile: preview.profile, profileID: preview.profileID) else { return nil }
+        return selection
+    }
+
+    /// What a guess shows for a profile: a swipe's incoming page (#72), and a switch's preview.
+    func content(for guess: SwitchGuess, profile: ProfileKey?, profileID: UUID?) -> ShownContent {
+        switch guess {
+        case .window(let instance, let windowId):
+            guard let window = liveSnapshots[instance]?.windows.first(where: { $0.id == windowId }) else { return .placeholder(profile) }
+            return .window(WindowSelection(instance: instance, window: window))
+        case .unseen: return .unseen(profile: profile)
+        case .placeholder: return .placeholder(profile)
+        case .turnOn: return profileID.map(ShownContent.turnOn) ?? .placeholder(profile)
+        }
     }
 
     /// What the sidebar's sections show, or nil for none.
     var shownContent: ShownContent? {
         if let preview = switchPreview {
-            switch preview.guess {
-            case .window: return shownWindow.map(ShownContent.window) ?? .placeholder(preview.profile)
-            case .unseen: return .unseen(profile: preview.profile)
-            case .placeholder: return .placeholder(preview.profile)
-            }
+            return content(for: preview.guess, profile: preview.profile, profileID: preview.profileID)
+        }
+        return ownContent
+    }
+
+    /// What the sidebar shows without a preview: the row to turn Side Tabs on where it's off, else the window Safari
+    /// has in front.
+    private var ownContent: ShownContent? {
+        if let id = profileToTurnOn {
+            return .turnOn(id)
         }
         if let window = currentWindow {
             return .window(window)
@@ -1654,11 +1713,15 @@ final class TabStore {
 
     /// The profile whose Favorites and Pinned the sidebar shows.
     var shownProfile: ProfileKey? {
-        switchPreview?.profile ?? currentWindowProfile
+        if let preview = switchPreview { return preview.profile }
+        return currentWindowProfile
     }
 
     /// What the sidebar would show without a preview, in a guess's terms.
     private var reportedContent: SwitchGuess? {
+        if profileToTurnOn != nil {
+            return .turnOn
+        }
         if let window = currentWindow {
             return .window(instance: window.instance, windowId: window.window.id)
         }
@@ -1668,10 +1731,11 @@ final class TabStore {
     /// A switch's window is coming back from the Dock, and should land at `arrivesAt`: the sidebar fades over to
     /// `guess` for `profile`, the old contents fully out and then the new in, ending as the window lands.
     /// Replaces an older switch's preview: while the old contents are still fading out, the newest guess comes
-    /// in once they're out.
-    func beginSwitchPreview(id: Int, profile: ProfileKey, guess: SwitchGuess, arrivesAt: Date) {
+    /// in once they're out. `profileID`: the profile's id in SafariProfiles, which confirms the preview by it.
+    func beginSwitchPreview(id: Int, profile: ProfileKey, profileID: UUID? = nil, guess: SwitchGuess, arrivesAt: Date) {
         let onScreen = displayedContent
-        switchPreview = SwitchPreview(id: id, profile: profile, guess: guess)
+        dropHeldCommands(because: "a newer switch began")
+        switchPreview = SwitchPreview(id: id, profile: profile, profileID: profileID, guess: guess)
         var fade = sidebarFade
         let begun = fade.begin(arrivesAt: arrivesAt, now: clock())
         if begun.keepsOnScreen {
@@ -1680,7 +1744,27 @@ final class TabStore {
         sidebarFade = fade
         scheduleFade(begun.timers)
         let landsIn = Int(arrivesAt.timeIntervalSince(clock()) * 1000)
-        log.notice("the sidebar shows \(Self.describe(profile.isDefault ? nil : profile.rawValue), privacy: .public) at the switch: \(Self.describe(guess), privacy: .public); fading out, then in, for the window to land in \(landsIn) ms")
+        log.notice("the sidebar shows \(Self.describe(profile), privacy: .public) at the switch: \(Self.describe(guess), privacy: .public); fading out, then in, for the window to land in \(landsIn) ms")
+        endPreviewAfterLifetime(id)
+    }
+
+    /// A swipe has brought `page` in with the fingers (#72): the sidebar keeps showing it until Safari reports the
+    /// switch's window, with no fade, since the page is already there. Replaces any older preview, and stops a fade
+    /// that was still going: the page slid in over it.
+    func beginSwipePreview(id: Int, page: SwipePage) {
+        dropHeldCommands(because: "a newer switch began")
+        switchPreview = SwitchPreview(id: id, profile: page.profile, profileID: page.profileID, guess: page.guess, swiped: true)
+        if !sidebarFade.isOver {
+            var fade = sidebarFade
+            fade.cancel()
+            sidebarFade = fade
+        }
+        fadingOutContent = nil
+        log.notice("the sidebar shows \(Self.describe(page.profile), privacy: .public) after a swipe: \(Self.describe(page.guess), privacy: .public)")
+        endPreviewAfterLifetime(id)
+    }
+
+    private func endPreviewAfterLifetime(_ id: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + SwitchPreviewRules.lifetime) { [weak self] in
             guard let self, self.switchPreview?.id == id else { return }
             self.endSwitchPreview(because: "Safari didn't report the switch's window in time")
@@ -1708,43 +1792,85 @@ final class TabStore {
         }
     }
 
-    /// The switch has picked its window: a better guess replaces the first, with no second fade.
+    /// After a swipe, the page is the one swiped to; when what the sidebar shows changes from it anyway (a different
+    /// window arrived, or the switch didn't work), a short fade, out and back in (#72). `onScreen`: what was on
+    /// screen before the change.
+    private func fadeAfterSwipe(from onScreen: ShownContent?) {
+        guard onScreen != shownContent else { return }
+        var fade = sidebarFade
+        let now = clock()
+        let begun = fade.begin(arrivesAt: now, now: now)
+        if begun.keepsOnScreen {
+            fadingOutContent = onScreen
+        }
+        sidebarFade = fade
+        scheduleFade(begun.timers)
+    }
+
+    /// The switch has picked its window: a better guess replaces the first, with no second fade after a click, and
+    /// with a short one after a swipe, whose page was already in place.
     func refineSwitchPreview(id: Int, guess: SwitchGuess) {
         guard var preview = switchPreview, preview.id == id, preview.guess != guess else { return }
+        let onScreen = displayedContent
         preview.guess = guess
         switchPreview = preview
         log.notice("the switch picked its window: the sidebar now shows \(Self.describe(guess), privacy: .public)")
+        if preview.swiped {
+            fadeAfterSwipe(from: onScreen)
+        }
     }
 
-    /// Safari shows a window of `profile` in front. The preview ends once the sidebar's own choice is that
-    /// profile's window: right away, or when the copy reports it.
-    func confirmSwitchPreview(profile: ProfileKey) {
-        guard var preview = switchPreview, preview.profile == profile, !preview.reported else { return }
+    /// Safari shows a window of `profile` in front, or of the profile SafariProfiles knows as `profileID`. The
+    /// preview ends once the sidebar's own choice is that profile's: right away, or when the copy reports it.
+    /// `profile` fills in the key of a swipe's profile whose copy wasn't known when the swipe started.
+    func confirmSwitchPreview(profile: ProfileKey?, profileID: UUID? = nil) {
+        guard var preview = switchPreview, !preview.reported else { return }
+        let byID = profileID != nil && preview.profileID == profileID
+        let byKey = profile != nil && preview.profile == profile
+        guard byID || byKey else { return }
         preview.reported = true
+        if preview.profile == nil, let profile {
+            preview.profile = profile
+        }
         switchPreview = preview
         settleSwitchPreview()
     }
 
-    /// The sidebar goes back to following Safari, with no fade: the switch failed, or another window came to
-    /// the front.
+    /// The sidebar goes back to following Safari: the switch failed, or another window came to the front. With no
+    /// fade after a click; after a swipe, a short one if that changes what it shows.
     func endSwitchPreview(because reason: String) {
-        guard switchPreview != nil else { return }
+        guard let preview = switchPreview else { return }
+        let onScreen = displayedContent
         switchPreview = nil
         log.notice("the sidebar follows Safari again: \(reason, privacy: .public)")
+        dropHeldCommands(because: "the switch's profile didn't come to the front")
+        if preview.swiped {
+            fadeAfterSwipe(from: onScreen)
+        }
     }
 
-    /// Ends a reported preview once the sidebar's own choice is a window of its profile: it keeps what it showed
-    /// if the guess was right, and otherwise changes to that window without a fade.
+    /// Ends a reported preview once the sidebar's own choice is its profile's: it keeps what it showed if the guess
+    /// was right, and otherwise changes to that, without a fade after a click and with a short one after a swipe.
     private func settleSwitchPreview() {
-        guard let preview = switchPreview, preview.reported, currentWindowProfile == preview.profile,
-              let shown = reportedContent else { return }
+        guard let preview = switchPreview, preview.reported, let own = ownContent, let shown = reportedContent else { return }
+        switch own {
+        case .turnOn(let id):
+            guard id == preview.profileID else { return }
+        case .window, .unseen, .placeholder:
+            guard let profile = preview.profile, currentWindowProfile == profile else { return }
+        }
+        let onScreen = displayedContent
         switchPreview = nil
         switch SwitchPreviewRules.report(preview.guess, shown: shown) {
         case .kept:
             log.notice("Safari reported the switch's window: the sidebar's guess was right")
         case .corrected:
             log.notice("Safari reported the switch's window: the sidebar changes from \(Self.describe(preview.guess), privacy: .public) to \(Self.describe(shown), privacy: .public)")
+            if preview.swiped {
+                fadeAfterSwipe(from: onScreen)
+            }
         }
+        runHeldCommands()
     }
 
     /// A guess for the log: never a title.
@@ -1753,7 +1879,50 @@ final class TabStore {
         case .window(let instance, let windowId): "window \(windowId) of copy \(instance.prefix(8))"
         case .placeholder: "its lists, with Tabs to come"
         case .unseen: "a window its copy can't see, from the tab bar"
+        case .turnOn: "the row to turn Side Tabs on"
         }
+    }
+
+    /// A profile for the log: never its name.
+    private static func describe(_ profile: ProfileKey?) -> String {
+        guard let profile else { return "a profile whose copy isn't known yet" }
+        return describe(profile.isDefault ? nil : profile.rawValue)
+    }
+
+    // MARK: - Commands during a switch (#48)
+
+    /// Commands from the sidebar made while a switch's preview shows no window yet (its lists and a placeholder,
+    /// a window its copy can't see, or the row to turn Side Tabs on), for the profile the preview shows. They run
+    /// once Safari has reported that profile's window and the sidebar shows it; if the preview ends any other way,
+    /// or a newer switch begins, they're dropped: they were meant for a page no longer shown.
+    @ObservationIgnored private var heldCommands: [(what: String, run: () -> Void)] = []
+
+    /// While a switch's preview is up and shows no window to act on, holds `command` (the same call again) until
+    /// Safari reports the switch's window, and says it did; the caller then does nothing now.
+    private func heldForSwitch(_ what: String, _ command: @escaping () -> Void) -> Bool {
+        guard switchPreview != nil, shownWindow == nil else { return false }
+        heldCommands.append((what, command))
+        if heldCommands.count > 8 {
+            heldCommands.removeFirst(heldCommands.count - 8)
+        }
+        log.notice("holding \(what, privacy: .public) until Safari reports the switch's window: the sidebar shows no window to act on yet")
+        return true
+    }
+
+    private func runHeldCommands() {
+        guard !heldCommands.isEmpty else { return }
+        let held = heldCommands
+        heldCommands = []
+        log.notice("Safari reported the switch's window: running \(held.count) command(s) held for it")
+        for command in held {
+            command.run()
+        }
+    }
+
+    private func dropHeldCommands(because reason: String) {
+        guard !heldCommands.isEmpty else { return }
+        log.notice("dropping \(self.heldCommands.count) command(s) held for a switch: \(reason, privacy: .public)")
+        heldCommands = []
     }
 
     /// The profile last named in the log by `logShownSpace`.
@@ -1791,8 +1960,15 @@ final class TabStore {
     /// The bookmark's own tab in the window the sidebar shows, if it has one there. Wherever the
     /// tab has browsed to since, it's the bookmark's until it closes.
     func openTab(for bookmark: Bookmark) -> BrowserTab? {
-        guard let selection = currentWindow else { return nil }
+        guard let selection = shownWindow else { return nil }
         return bookmarkTabs.tab(of: bookmark.id, in: selection.window, instance: selection.instance)
+    }
+
+    /// The bookmark's own tab in the window a page of the sidebar shows (`SidebarPageWindow`): during a swipe, a
+    /// page that's sliding in or out isn't the window commands act on (#72). Nil for a page with no window.
+    func openTab(for bookmark: Bookmark, inPage page: SidebarPageWindow?) -> BrowserTab? {
+        guard let page, let window = window(instance: page.instance, id: page.windowId) else { return nil }
+        return bookmarkTabs.tab(of: bookmark.id, in: window, instance: page.instance)
     }
 
     /// What a press on a favorite's tile or a pinned row does on mouse-down. One whose tab is open in
@@ -1811,12 +1987,19 @@ final class TabStore {
     /// Opens a favorite or pinned item in the window the sidebar shows: switches to its tab there, or
     /// opens its saved page in a new tab of that window, which becomes its tab.
     func open(_ bookmark: Bookmark, inNewTab: Bool = false) {
-        guard let selection = currentWindow else {
+        if heldForSwitch("opening a bookmark", { [weak self] in self?.open(bookmark, inNewTab: inNewTab) }) { return }
+        guard let selection = shownWindow else {
             if let unseen = unseenDockedWindow, unseen.profile != nil {
                 openOutside(unseen, bookmark)
             } else {
                 openInSafari(bookmark.url)
             }
+            return
+        }
+        // Only in a window of its own profile (#48): never with another profile's logins, and a tab is never linked
+        // across profiles. A click on a list still fading out during a switch is such a click.
+        guard bookmarkIds(shownIn: selection.window, instance: selection.instance).contains(bookmark.id) else {
+            log.notice("not opening a bookmark in a window whose profile doesn't list it")
             return
         }
         if !inNewTab, let tab = openTab(for: bookmark) {
@@ -1896,7 +2079,8 @@ final class TabStore {
     /// window's profile's Pinned list. A private window has no lists, so there it does nothing (and the
     /// sidebar shows no + there).
     func addBookmarkForCurrentTab() {
-        guard let selection = currentWindow, let tab = selection.window.tabs.first(where: \.active),
+        if heldForSwitch("pinning the current tab", { [weak self] in self?.addBookmarkForCurrentTab() }) { return }
+        guard let selection = shownWindow, let tab = selection.window.tabs.first(where: \.active),
               let profile = profile(of: selection.window, instance: selection.instance) else { return }
         addBookmark(from: tab, instance: selection.instance, to: .pinned(profile))
     }
@@ -1923,10 +2107,13 @@ final class TabStore {
     }
 
     func replaceBookmarkWithCurrentPage(_ bookmark: Bookmark) {
-        guard let selection = currentWindow,
+        if heldForSwitch("replacing a bookmark with the current page", { [weak self] in self?.replaceBookmarkWithCurrentPage(bookmark) }) { return }
+        guard let selection = shownWindow,
               let tab = selection.window.tabs.first(where: \.active),
               let url = tab.url,
-              bookmarkLists.bookmark(bookmark.id) != nil else { return }
+              bookmarkLists.bookmark(bookmark.id) != nil,
+              // Only with a page of its own profile's window (#48).
+              bookmarkIds(shownIn: selection.window, instance: selection.instance).contains(bookmark.id) else { return }
         bookmarkLists.update(bookmark.id) { saved in
             saved.url = url
             saved.faviconURL = tab.favIconUrl
