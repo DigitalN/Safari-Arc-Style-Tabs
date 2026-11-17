@@ -102,6 +102,17 @@ struct BookmarkLists: Equatable {
         return pinned.first { $0.value.contains { $0.id == id } }.map { .pinned($0.key) }
     }
 
+    /// Where a bookmark is: its list and its position there.
+    struct Location: Equatable {
+        let list: BookmarkList
+        let index: Int
+    }
+
+    func location(of id: UUID) -> Location? {
+        guard let list = list(containing: id), let index = items(in: list).firstIndex(where: { $0.id == id }) else { return nil }
+        return Location(list: list, index: index)
+    }
+
     /// What a window shows: its profile's favorites, then its Pinned list. `profile` is nil for a private
     /// window, which shows neither.
     func shown(in profile: ProfileKey?) -> [Bookmark] {
@@ -119,6 +130,11 @@ struct BookmarkLists: Equatable {
             let position = index.map { min(max($0, 0), items.count) } ?? items.count
             items.insert(bookmark, at: position)
         }
+    }
+
+    /// Puts a bookmark back where `location(of:)` said it was.
+    mutating func insert(_ bookmark: Bookmark, at location: Location) {
+        insert(bookmark, into: location.list, at: location.index)
     }
 
     /// Takes the bookmark out of whichever list holds it.

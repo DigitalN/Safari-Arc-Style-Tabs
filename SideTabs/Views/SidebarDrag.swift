@@ -41,6 +41,9 @@ final class SidebarDrag {
         var tabs: Int
         /// Whether Favorites and Pinned show (Settings). Without them every tab is in the Tabs list.
         var sectionsShown: Bool
+        /// Whether the sidebar shows a window's Tabs list, which a favorite or pinned item can be dropped on to unpin
+        /// it (#75). Not while it shows a window its copy can't see, or a placeholder.
+        var tabsListShown = true
     }
 
     private(set) var item: Item?
@@ -132,7 +135,8 @@ final class SidebarDrag {
         case (.tab, .favorites), (.pinned, .favorites):
             newTarget = .favorites(gridSlot(at: pointer, others: counts.favorites ?? 0))
         case (.favorite, .tabs), (.pinned, .tabs):
-            newTarget = .none
+            // Dropped there, it's unpinned and its tab lands in the slot (#75). None of the tabs listed is its own.
+            newTarget = counts.tabsListShown ? .tabs(slot(rowTop: rowTop, rowsTop: tabRowsTop, others: counts.tabs)) : .none
         }
 
         let asTile: Bool
@@ -179,6 +183,8 @@ final class SidebarDrag {
                 }
             case (.tab(let tab, let instance), .tabs(let index)):
                 store.moveTab(tab, instance: instance, toListedSlot: index, bookmarksShown: sectionsVisible)
+            case (.favorite(let bookmark), .tabs(let index)), (.pinned(let bookmark), .tabs(let index)):
+                store.unpin(bookmark.id, toListedSlot: index)
             case (.tab(let tab, let instance), .favorites(let index)):
                 if let list = store.currentFavoritesList {
                     store.addBookmark(from: tab, instance: instance, to: list, at: index)
@@ -345,7 +351,8 @@ private struct SidebarRowGesture: ViewModifier {
             tabs: selection.map {
                 store.tabsListed(in: $0.window, instance: $0.instance, bookmarksShown: settings.showBookmarks).count
             } ?? 0,
-            sectionsShown: settings.showBookmarks
+            sectionsShown: settings.showBookmarks,
+            tabsListShown: selection != nil
         )
     }
 

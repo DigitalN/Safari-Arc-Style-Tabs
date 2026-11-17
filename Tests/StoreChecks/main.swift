@@ -3107,6 +3107,105 @@ do {
     check(waits == [60, 120, 240, 480, 960, 1800, 1800, 1800], "repairs that don't work wait 1, 2, 4, 8, 16 minutes, then half an hour")
 }
 
+// MARK: - Dragging a pinned item or favorite onto Tabs unpins it (#75)
+
+func moves(_ commands: [[String: Any]]) -> [(tabId: Int, index: Int)] {
+    commands.filter { $0["action"] as? String == "move" }.compactMap { command in
+        guard let tabId = command["tabId"] as? Int, let index = command["index"] as? Int else { return nil }
+        return (tabId, index)
+    }
+}
+
+do {
+    // A pinned item whose tab is open here, with a name the tab had before it was pinned.
+    let (store, commands) = makeStore()
+    store.beginRename(.tab(TabKey(instance: instance, tabId: 4)))
+    store.commitRename("Mine")
+    store.addBookmark(from: storeTab(store, 4), instance: instance, to: .pinned(.defaultProfile))
+    let pin = pinned(store)[0]
+    check(pin.title == "Mine" && listedIds(store) == [1, 2, 3], "pinning the tab takes it out of Tabs, under its name")
+    store.unpin(pin.id, toListedSlot: 1)
+    check(pinned(store).isEmpty, "dropped on Tabs, it's no longer pinned")
+    check(store.openTab(for: pin) == nil && store.bookmarkTabs.owners.isEmpty, "and its tab belongs to no bookmark")
+    check(moves(commands()).last.map { $0.tabId == 4 && $0.index == 1 } == true, "Safari moves the tab to the slot it was dropped on")
+    check(tabIds(store) == [1, 4, 2, 3] && listedIds(store) == [1, 4, 2, 3], "and it's listed there at once")
+    check(store.displayTitle(for: storeTab(store, 4), instance: instance) == "Tab 4", "with its page's own title, not the pinned name")
+    check(creates(commands()).isEmpty, "nothing new opens")
+}
+
+do {
+    // A pinned item with no tab here opens its page at the slot.
+    let (store, commands) = makeStore()
+    let pin = bookmark(store, news, to: .pinned(.defaultProfile))
+    store.unpin(pin.id, toListedSlot: 2)
+    check(pinned(store).isEmpty, "a closed pinned item dropped on Tabs is unpinned")
+    let create = creates(commands()).last
+    check(create?["url"] as? String == news && create?["index"] as? Int == 2 && create?["windowId"] as? Int == 1,
+          "and its saved page opens as a new tab at that slot")
+    check(create?["requestId"] == nil, "as an ordinary tab, not one of a bookmark's")
+
+    let later = bookmark(store, elsewhere, to: .pinned(.defaultProfile))
+    store.unpin(later.id, toListedSlot: 9)
+    check(creates(commands()).last?["index"] as? Int == 4, "a slot past the last tab listed is just after it")
+}
+
+do {
+    // A favorite's tile does the same, and the slot counts only the tabs listed under Tabs.
+    let (store, commands) = makeStore()
+    let favorite = bookmark(store, news)
+    let pin = bookmark(store, elsewhere, to: .pinned(.defaultProfile))
+    openAndCreate(store, favorite, commands: commands, tabId: 10)
+    openAndCreate(store, pin, commands: commands, tabId: 11)
+    send(store, pagesSnapshot(seq: 2, [(1, [(10, news), (1, "https://example.com/1"), (11, elsewhere), (2, "https://example.com/2")])], active: [1]))
+    check(listedIds(store) == [1, 2], "both bookmarks' tabs are out of Tabs")
+    store.unpin(favorite.id, toListedSlot: 1)
+    check(favorites(store).isEmpty && pinned(store).map(\.id) == [pin.id], "dropped on Tabs, the favorite is removed, and only it")
+    check(moves(commands()).last.map { $0.tabId == 10 && $0.index == 2 } == true,
+          "its tab goes just before the tab listed in that slot, past the pinned item's tab")
+    check(listedIds(store) == [1, 10, 2], "and is listed in the slot")
+    let favoriteTab = storeTab(store, 10)
+    check(store.displayTitle(for: favoriteTab, instance: instance) == "Page 10", "with its page's title")
+}
+
+do {
+    // Its tabs in the profile's other windows stay open, back under Tabs there.
+    let (store, commands) = makeStore()
+    let pin = bookmark(store, news, to: .pinned(.defaultProfile))
+    send(store, pagesSnapshot(seq: 2, focused: 2, [(1, [(1, "https://example.com/1")]), (2, [(2, "https://example.com/2")])], active: [1, 2]))
+    openAndCreate(store, pin, commands: commands, tabId: 20)
+    send(store, pagesSnapshot(seq: 3, focused: 1, [(1, [(1, "https://example.com/1")]), (2, [(2, "https://example.com/2"), (20, news)])], active: [1, 20]))
+    openAndCreate(store, pin, commands: commands, tabId: 10)
+    send(store, pagesSnapshot(seq: 4, focused: 1, [(1, [(1, "https://example.com/1"), (10, news)]), (2, [(2, "https://example.com/2"), (20, news)])], active: [10, 20]))
+    check(store.bookmarkTabs.owners.count == 2, "the pinned item has a tab in each window")
+    store.unpin(pin.id, toListedSlot: 0)
+    check(store.bookmarkTabs.owners.isEmpty, "unpinned, neither tab is a bookmark's")
+    let other = store.snapshots[instance]!.windows.first { $0.id == 2 }!
+    check(store.tabsListed(in: other, instance: instance).map(\.id) == [2, 20], "the other window's tab is listed under Tabs there")
+    check(closes(commands()).isEmpty, "and nothing closes")
+}
+
+do {
+    // A page that doesn't open leaves the bookmark where it was.
+    let (store, sent, failures) = makeFailingStore()
+    let first = bookmark(store, news, to: .pinned(.defaultProfile))
+    let second = bookmark(store, elsewhere, to: .pinned(.defaultProfile))
+    store.unpin(first.id, toListedSlot: 0)
+    check(pinned(store).map(\.id) == [second.id], "it leaves Pinned at once")
+    check(creates(sent()).count == 1, "while its page opens")
+    failures().last?()
+    check(pinned(store).map(\.id) == [first.id, second.id], "if the page can't open, it comes back where it was")
+}
+
+do {
+    // Only from a window of its own profile.
+    let spaces = Spaces()
+    let store = spaces.store
+    let pin = bookmark(store, news, to: .pinned(.defaultProfile))
+    spaces.show(.work)
+    store.unpin(pin.id, toListedSlot: 0)
+    check(pinned(store).map(\.id) == [pin.id] && creates(spaces.commands).isEmpty, "another profile's window can't unpin it")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

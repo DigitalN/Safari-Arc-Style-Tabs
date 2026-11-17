@@ -2106,6 +2106,57 @@ final class TabStore {
         scheduleSave()
     }
 
+    /// A favorite or pinned item dragged onto Tabs (#75): it's removed from its list, as Remove from Pinned
+    /// does, and its tab in the window the sidebar shows lands at `slot` in the Tabs list, in Safari's tab bar
+    /// too. One with no tab in that window opens its saved page there as a new tab. Either way the tab shows its
+    /// page's own title: neither the bookmark's name nor a name the tab had before it was pinned carries over.
+    /// Its tabs in the profile's other windows stay open, back under Tabs there.
+    func unpin(_ id: UUID, toListedSlot slot: Int) {
+        if heldForSwitch("unpinning a bookmark", { [weak self] in self?.unpin(id, toListedSlot: slot) }) { return }
+        guard let selection = shownWindow, let bookmark = bookmarkLists.bookmark(id),
+              let location = bookmarkLists.location(of: id),
+              // Only from a window of its own profile, the only one whose lists the sidebar shows (#48).
+              bookmarkIds(shownIn: selection.window, instance: selection.instance).contains(id) else { return }
+        let tab = bookmarkTabs.tab(of: id, in: selection.window, instance: selection.instance)
+        // Where in Safari's tab order the slot is, worked out while the bookmark's tab (if any) is still left
+        // out of the Tabs list, as it is in the slot the drag showed.
+        let index = Self.tabIndex(forListedSlot: slot, listed: tabsListed(in: selection.window, instance: selection.instance), in: selection.window)
+        removeBookmark(bookmark)
+        if let tab {
+            let key = TabKey(instance: selection.instance, tabId: tab.id)
+            if customNames[key] != nil {
+                customNames[key] = nil
+                scheduleSave()
+            }
+            moveTab(tab, instance: selection.instance, toListedSlot: slot)
+        } else {
+            var command: [String: Any] = ["action": "create", "windowId": selection.window.id, "url": bookmark.url]
+            if let index {
+                command["index"] = index
+            }
+            send(command, to: selection.instance) { [weak self] in
+                // No tab opened, so the bookmark comes back where it was rather than being lost.
+                guard let self, bookmarkLists.bookmark(id) == nil else { return }
+                bookmarkLists.insert(bookmark, at: location)
+                log.notice("the extension didn't open an unpinned bookmark's page; it's back in \(location.list, privacy: .public)")
+                scheduleSave()
+            }
+        }
+    }
+
+    /// Where a tab put at `slot` in the Tabs list (`listed`, which leaves out bookmarks' tabs) goes among all the
+    /// window's tabs: just before the tab listed there now, or just after the last one listed. Nil when nothing is
+    /// listed, which leaves the place to Safari.
+    static func tabIndex(forListedSlot slot: Int, listed: [BrowserTab], in window: BrowserWindow) -> Int? {
+        if listed.indices.contains(slot), let position = window.tabs.firstIndex(where: { $0.id == listed[slot].id }) {
+            return position
+        }
+        if let last = listed.last, let position = window.tabs.firstIndex(where: { $0.id == last.id }) {
+            return position + 1
+        }
+        return nil
+    }
+
     func replaceBookmarkWithCurrentPage(_ bookmark: Bookmark) {
         if heldForSwitch("replacing a bookmark with the current page", { [weak self] in self?.replaceBookmarkWithCurrentPage(bookmark) }) { return }
         guard let selection = shownWindow,

@@ -360,15 +360,36 @@ private struct TabsSection: View {
         store.tabsListed(in: selection.window, instance: selection.instance, bookmarksShown: settings.showBookmarks)
     }
 
-    /// Tabs in display order; a tab dragged within the list moves to the target slot.
-    private var tabs: [BrowserTab] {
-        var tabs = listed
-        if case .tab(let dragged, _)? = drag.item, case .tabs(let index) = drag.target,
-           let from = tabs.firstIndex(where: { $0.id == dragged.id }) {
-            let moved = tabs.remove(at: from)
-            tabs.insert(moved, at: min(index, tabs.count))
+    private enum Slot: Identifiable {
+        case tab(BrowserTab)
+        case dropSlot
+
+        var id: String {
+            switch self {
+            case .tab(let tab): "tab-\(tab.id)"
+            case .dropSlot: "drop-slot"
+            }
         }
-        return tabs
+    }
+
+    /// Tabs in display order. A tab dragged within the list moves to the target slot (and draws itself as the
+    /// slot); a favorite or pinned item dragged here to be unpinned gets a slot of its own (#75).
+    private var slots: [Slot] {
+        var tabs = listed
+        switch (drag.item, drag.target) {
+        case (.tab(let dragged, _)?, .tabs(let index)):
+            if let from = tabs.firstIndex(where: { $0.id == dragged.id }) {
+                let moved = tabs.remove(at: from)
+                tabs.insert(moved, at: min(index, tabs.count))
+            }
+            return tabs.map(Slot.tab)
+        case (.favorite?, .tabs(let index)), (.pinned?, .tabs(let index)):
+            var slots = tabs.map(Slot.tab)
+            slots.insert(.dropSlot, at: min(index, slots.count))
+            return slots
+        default:
+            return tabs.map(Slot.tab)
+        }
     }
 
     var body: some View {
@@ -380,8 +401,13 @@ private struct TabsSection: View {
             }
 
             VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-                ForEach(tabs) { tab in
-                    TabRow(tab: tab, instance: selection.instance)
+                ForEach(slots) { slot in
+                    switch slot {
+                    case .tab(let tab):
+                        TabRow(tab: tab, instance: selection.instance)
+                    case .dropSlot:
+                        DropSlot()
+                    }
                 }
             }
             .onSidebarTop { drag.tabRowsTop = $0 }
