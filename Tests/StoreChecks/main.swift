@@ -3488,6 +3488,15 @@ do {
         resting.move(top: 2 * pitch - grab + 15)
         check(resting.drop == .into(f) && resting.spacer == room, "while it's over F the room stays where it was (\(Int(grab)) pt)")
     }
+
+    // The item of a collapsed folder whose tab is active, reached from below: when the folder springs open, the
+    // room goes just inside it, above what it shows.
+    let x = item("x"), y = item("y")
+    let springTree: [PinnedNode] = [.bookmark(item("s")), folderNode("G", open: false, [.bookmark(x), .bookmark(y)]), .bookmark(item("t"))]
+    let closed = outline(springTree, active: x.id) // s G+ .*x t
+    let opened = PinnedOutline(tree: springTree, isExpanded: { _ in true }, isOpen: { _ in false }, active: x.id) // s G/ .x .y t
+    check(describe(closed) == "s G+ .*x t" && PinnedOutline.spacer(3, from: closed, to: opened) == 2,
+          "the room below a collapsed folder's active item goes just inside the folder when it springs open")
 }
 
 do {

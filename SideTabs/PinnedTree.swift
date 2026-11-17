@@ -449,8 +449,14 @@ struct PinnedOutline: Equatable {
     /// room below it gets the room just inside it, above what it shows.
     static func spacer(_ spacer: Int?, from before: PinnedOutline, to after: PinnedOutline) -> Int? {
         guard let spacer else { return nil }
-        let remaining = Set(after.rows.map(\.id))
-        return before.rows.prefix(min(spacer, before.rows.count)).filter { remaining.contains($0.id) }.count
+        // The item shown under a collapsed folder has its own row's id, but it isn't the same row once the folder
+        // opens: it's then among what the folder shows, below the room.
+        func key(_ row: Row) -> String {
+            if case .activeUnder = row.kind { return "under-" + row.id }
+            return row.id
+        }
+        let remaining = Set(after.rows.map(key))
+        return before.rows.prefix(min(spacer, before.rows.count)).filter { remaining.contains(key($0)) }.count
     }
 
     /// The row of the pinned item or folder with this id, which is the gap its room is in before it moves.
