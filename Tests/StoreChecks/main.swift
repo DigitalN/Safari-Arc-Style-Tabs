@@ -3310,10 +3310,142 @@ do {
     check(outline(tree, hiding: f).rows.last?.steps == [PinnedPlace(parent: nil, index: 1)], "and places are those of the tree without it")
 }
 
+/// A drag over Pinned as SidebarDrag runs it: what's dragged is left out of the rows, the room it takes up starts where
+/// it was (nowhere for something from outside Pinned), and each move is worked out from where that room is drawn
+/// after the move before. `move(top:)` takes the floating row's top, in points below the top of the rows.
+struct PinnedDragRun {
+    static let pitch: CGFloat = 31
+    static let rowHeight: CGFloat = 30
+    let rows: PinnedOutline
+    var spacer: Int?
+    private(set) var drop: PinnedDrop?
+    /// Every drop it changed to, in order.
+    private(set) var drops: [PinnedDrop] = []
+    /// Moves after which working it out again from where it had got to gave something else: a flip-flop.
+    private(set) var unsettled = 0
+
+    init(_ tree: [PinnedNode], dragging dragged: UUID? = nil, active: UUID? = nil) {
+        rows = outline(tree, active: active, hiding: dragged)
+        spacer = dragged.flatMap { outline(tree, active: active, collapsed: dragged).index(of: $0) }
+    }
+
+    @discardableResult
+    mutating func move(top: CGFloat, x: CGFloat = 200) -> PinnedDrop {
+        let middle = top + Self.rowHeight / 2
+        let step = rows.dragStep(spacer: spacer, centerY: middle, x: x, pitch: Self.pitch)
+        let again = rows.dragStep(spacer: step.spacer, centerY: middle, x: x, pitch: Self.pitch)
+        if again.drop != step.drop || again.spacer != step.spacer { unsettled += 1 }
+        spacer = step.spacer
+        if step.drop != drop { drops.append(step.drop) }
+        drop = step.drop
+        return step.drop
+    }
+
+    /// Moves a point at a time from `from` to `to`.
+    mutating func sweep(from: CGFloat, to: CGFloat, x: CGFloat = 200) {
+        for top in stride(from: from, through: to, by: from < to ? 1 : -1) {
+            move(top: top, x: x)
+        }
+    }
+
+    var gap: Int? {
+        if case .slot(let gap, _, _)? = drop { return gap }
+        return nil
+    }
+}
+
+func slotGap(_ drop: PinnedDrop?) -> Int? {
+    if case .slot(let gap, _, _)? = drop { return gap }
+    return nil
+}
+
 do {
-    // Where a drop lands, by the middle of what's dropped (y) and the pointer (x).
-    let pitch: CGFloat = 31
-    func row(_ index: Int, at fraction: CGFloat) -> CGFloat { (CGFloat(index) + fraction) * pitch }
+    // Reordering plain rows works as before there were folders: the slot stays under the floating row, and moving it
+    // past a row takes about half a row either way. RowPress starts a drag after 4 pt.
+    let a = item("A"), b = item("B"), c = item("C")
+    let tree: [PinnedNode] = [.bookmark(a), .bookmark(b), .bookmark(c)]
+    func gap(dragging dragged: Bookmark, from start: CGFloat, by distance: CGFloat) -> Int? {
+        var run = PinnedDragRun(tree, dragging: dragged.id)
+        run.sweep(from: start, to: start + distance)
+        return run.gap
+    }
+    let pitch = PinnedDragRun.pitch
+    check([0, 2, 4, 8, 12, 15].allSatisfy { gap(dragging: a, from: 0, by: $0) == 0 }, "the first of three rows dragged down less than half a row stays in its slot")
+    check([16, 20, 31].allSatisfy { gap(dragging: a, from: 0, by: $0) == 1 }, "past half a row it moves below the next row")
+    check([4, 15].allSatisfy { gap(dragging: c, from: 2 * pitch, by: -$0) == 2 }, "the last row dragged up less than half a row stays in its slot")
+    check([16, 20, 31].allSatisfy { gap(dragging: c, from: 2 * pitch, by: -$0) == 1 }, "past half a row it moves above the row before")
+
+    var back = PinnedDragRun(tree, dragging: a.id)
+    back.sweep(from: 0, to: 20)
+    back.sweep(from: 20, to: 16)
+    check(back.gap == 1, "coming back, it stays below the row it passed while it's still half over it")
+    back.sweep(from: 16, to: 14)
+    check(back.gap == 0, "and goes back above it within half a row")
+    check(back.unsettled == 0 && back.drops.count == 3, "never flipping back and forth on the way")
+
+    // A tab from Tabs (nothing dragged out of Pinned) gets its slot where the floating row is, not half a row lower.
+    var tab = PinnedDragRun(tree)
+    tab.move(top: pitch + 4)
+    check(tab.gap == 1, "a tab dragged in over the second row opens a slot just above it, under the floating row")
+    tab.sweep(from: pitch + 4, to: pitch + 15)
+    check(tab.gap == 1, "while the floating row is less than half past that row's top, it keeps it")
+    tab.sweep(from: pitch + 15, to: pitch + 20)
+    check(tab.gap == 2 && tab.unsettled == 0, "past half a row it moves below that row")
+}
+
+do {
+    // A folder can be dropped into from above and from below, moving a point at a time, with no flip-flop, and it
+    // stays where it is while it's the target: the room the slot was in stays open.
+    let a = item("a"), b = item("b"), c = item("c")
+    let tree: [PinnedNode] = [.bookmark(a), .bookmark(b), folderNode("F", open: false, [.bookmark(item("x"))]), .bookmark(c)]
+    let f = id(tree, "F")
+    let pitch = PinnedDragRun.pitch
+    var down = PinnedDragRun(tree, dragging: a.id) // others: b F c
+    down.sweep(from: 0, to: 3 * pitch)
+    check(down.drops.map { slotGap($0) ?? -1 } == [0, 1, -1, 2, 3] && down.drops[2] == .into(f),
+          "from above: above b, above F, into F, below F, below c, in order")
+    check(down.unsettled == 0, "with no flip-flop")
+    var over = PinnedDragRun(tree, dragging: a.id)
+    over.sweep(from: 0, to: 2 * pitch)
+    check(over.drop == .into(f) && over.spacer == 1, "while it's over F, the room stays above F, so F doesn't move up under the pointer")
+
+    var up = PinnedDragRun(tree, dragging: c.id) // others: a b F
+    up.sweep(from: 3 * pitch, to: 0)
+    check(up.drops.map { slotGap($0) ?? -1 } == [3, -1, 2, 1, 0] && up.drops[1] == .into(f),
+          "from below: below F, into F, above F, above b, above a, in order")
+    check(up.unsettled == 0, "with no flip-flop")
+
+    // Stepping back and forth across each edge of the folder never flickers.
+    var jitter = PinnedDragRun(tree, dragging: a.id)
+    jitter.sweep(from: 0, to: 2 * pitch)
+    for _ in 0..<5 {
+        jitter.sweep(from: 2 * pitch, to: 2 * pitch + 12)
+        jitter.sweep(from: 2 * pitch + 12, to: 2 * pitch)
+        jitter.sweep(from: 2 * pitch, to: 2 * pitch - 12)
+        jitter.sweep(from: 2 * pitch - 12, to: 2 * pitch)
+    }
+    check(jitter.unsettled == 0, "going back and forth over a folder's edges never flip-flops")
+
+    // Whatever the room and wherever the floating row, working it out again gives the same answer.
+    let rows = outline(tree, hiding: a.id)
+    var settled = true
+    for spacer in [nil] + (0...rows.rows.count).map(Optional.some) {
+        for tenth in -10...50 {
+            let middle = CGFloat(tenth) / 10 * pitch
+            let first = rows.dragStep(spacer: spacer, centerY: middle, x: 200, pitch: pitch)
+            let second = rows.dragStep(spacer: first.spacer, centerY: middle, x: 200, pitch: pitch)
+            settled = settled && first.drop == second.drop && first.spacer == second.spacer
+        }
+    }
+    check(settled, "every position settles in one step")
+}
+
+do {
+    // Where a drop lands, with the rows drawn as they are: levels, collapsed folders' items, Empty.
+    let pitch = PinnedDragRun.pitch
+    func at(_ rows: PinnedOutline, room: Int? = nil, row: CGFloat, x: CGFloat = 200) -> PinnedDrop {
+        rows.dragStep(spacer: room, centerY: row * pitch, x: x, pitch: pitch).drop
+    }
     let a = item("a"), b = item("b"), c = item("c"), z = item("z")
     let tree: [PinnedNode] = [
         .bookmark(a),
@@ -3324,43 +3456,43 @@ do {
     let f = id(tree, "F"), g = id(tree, "G"), e = id(tree, "E")
     let rows = outline(tree, active: z.id) // a F/ .b .c G+ .*z E/ .(empty)
     check(describe(rows) == "a F/ .b .c G+ .*z E/ .(empty)", "the rows the drops below are on")
-    let wide: CGFloat = 200
-    check(rows.drop(atY: row(0, at: 0.2), x: wide, pitch: pitch) == .slot(gap: 0, depth: 0, place: PinnedPlace(parent: nil, index: 0)),
-          "the top half of an item is just above it")
-    check(rows.drop(atY: row(0, at: 0.6), x: wide, pitch: pitch) == .slot(gap: 1, depth: 0, place: PinnedPlace(parent: nil, index: 1)),
-          "the bottom half just below it")
-    check(rows.drop(atY: row(1, at: 0.5), x: wide, pitch: pitch) == .into(f), "the middle of a folder's row puts it in the folder")
-    check(rows.drop(atY: row(1, at: 0.9), x: wide, pitch: pitch) == .slot(gap: 2, depth: 1, place: PinnedPlace(parent: f, index: 0)),
+    check(at(rows, row: 0.2) == .slot(gap: 0, depth: 0, place: PinnedPlace(parent: nil, index: 0))
+          && at(rows, row: 0.7) == .slot(gap: 0, depth: 0, place: PinnedPlace(parent: nil, index: 0)),
+          "arriving over an item opens the slot there, under the floating row")
+    check(at(rows, row: 1.5) == .into(f), "the middle of a folder's row puts it in the folder")
+    check(at(rows, row: 1.9) == .slot(gap: 2, depth: 1, place: PinnedPlace(parent: f, index: 0)),
           "the bottom edge of an open folder is the slot before its first item")
-    check(rows.drop(atY: row(3, at: 0.6), x: wide, pitch: pitch) == .slot(gap: 4, depth: 1, place: PinnedPlace(parent: f, index: 2)),
+    check(at(rows, row: 1.1) == .slot(gap: 1, depth: 0, place: PinnedPlace(parent: nil, index: 1)), "its top edge the slot above it")
+    check(at(rows, room: 4, row: 4.5) == .slot(gap: 4, depth: 1, place: PinnedPlace(parent: f, index: 2)),
           "at the bottom of an open folder, a pointer over its items puts it last in the folder")
-    check(rows.drop(atY: row(3, at: 0.6), x: 10, pitch: pitch) == .slot(gap: 4, depth: 0, place: PinnedPlace(parent: nil, index: 2)),
+    check(at(rows, room: 4, row: 4.5, x: 10) == .slot(gap: 4, depth: 0, place: PinnedPlace(parent: nil, index: 2)),
           "and one further left puts it after the folder: the pointer's horizontal position picks the level")
-    check(rows.drop(atY: row(4, at: 0.1), x: 10, pitch: pitch) == .slot(gap: 4, depth: 0, place: PinnedPlace(parent: nil, index: 2)),
-          "the top edge of the next row is the same spot")
-    check(rows.drop(atY: row(4, at: 0.9), x: wide, pitch: pitch) == .into(g),
+    check(at(rows, row: 4.9) == .into(g) && at(rows, row: 5.5) == .into(g),
           "the item shown under a collapsed folder isn't a slot of its own: the folder's row runs on over it")
-    check(rows.drop(atY: row(5, at: 0.5), x: wide, pitch: pitch) == .into(g), "including its middle")
-    check(rows.drop(atY: row(5, at: 0.9), x: wide, pitch: pitch) == .slot(gap: 6, depth: 0, place: PinnedPlace(parent: nil, index: 3)),
-          "its bottom edge is after the collapsed folder")
-    check(rows.drop(atY: row(7, at: 0.4), x: wide, pitch: pitch) == .into(e), "dropping on Empty puts it in that folder")
-    check(rows.drop(atY: row(7, at: 0.9), x: wide, pitch: pitch) == .slot(gap: 8, depth: 1, place: PinnedPlace(parent: e, index: 0)),
+    check(at(rows, row: 5.9) == .slot(gap: 6, depth: 0, place: PinnedPlace(parent: nil, index: 3)), "its bottom edge is after the collapsed folder")
+    check(at(rows, row: 7.4) == .into(e), "dropping on Empty puts it in that folder")
+    check(at(rows, row: 7.9) == .slot(gap: 8, depth: 1, place: PinnedPlace(parent: e, index: 0)),
           "below Empty, the pointer picks inside the empty folder")
-    check(rows.drop(atY: row(7, at: 0.9), x: 10, pitch: pitch) == .slot(gap: 8, depth: 0, place: PinnedPlace(parent: nil, index: 4)),
-          "or after it")
-    check(rows.drop(atY: row(20, at: 0), x: wide, pitch: pitch).place == PinnedPlace(parent: e, index: 0)
-          && rows.drop(atY: -40, x: wide, pitch: pitch) == .slot(gap: 0, depth: 0, place: PinnedPlace(parent: nil, index: 0)),
+    check(at(rows, row: 7.9, x: 10) == .slot(gap: 8, depth: 0, place: PinnedPlace(parent: nil, index: 4)), "or after it")
+    check(at(rows, row: 20).place == PinnedPlace(parent: e, index: 0) && at(rows, row: -1) == .slot(gap: 0, depth: 0, place: PinnedPlace(parent: nil, index: 0)),
           "past the ends it's the first or last slot")
-    check(outline([]).drop(atY: 50, x: wide, pitch: pitch) == .slot(gap: 0, depth: 0, place: PinnedPlace(parent: nil, index: 0)),
-          "an empty list has one slot")
+    check(at(outline([]), row: 2) == .slot(gap: 0, depth: 0, place: PinnedPlace(parent: nil, index: 0)), "an empty list has one slot")
 
     // Dragging F itself: it's left out, so it can't land in itself or anything inside it.
-    let withoutF = outline(tree, active: z.id, hiding: f) // a G+ .*z E/ .(empty)
-    let targets = stride(from: CGFloat(-10), through: 200, by: 3).flatMap { y in
-        [CGFloat(0), 30, 200].map { withoutF.drop(atY: y, x: $0, pitch: pitch) }
+    let withoutF = outline(tree, active: z.id, hiding: f)
+    let targets = stride(from: CGFloat(-1), through: 7, by: 0.1).flatMap { row in
+        [nil, 0, 2, 4].flatMap { room in [CGFloat(0), 30, 200].map { at(withoutF, room: room, row: row, x: $0) } }
     }
-    check(!targets.contains { $0.folder == f },
-          "a dragged folder is never a drop target for itself")
+    check(!targets.contains { $0.folder == f }, "a dragged folder is never a drop target for itself")
+
+    // A folder springing open keeps the room after the same rows: below the folder's row, above what it shows.
+    let h = folderNode("H", open: false, [.bookmark(item("p")), .bookmark(item("q"))])
+    let springTree: [PinnedNode] = [.bookmark(item("s")), h, .bookmark(item("t"))]
+    let closed = outline(springTree)
+    let opened = PinnedOutline(tree: springTree, isExpanded: { _ in true }, isOpen: { _ in false }, active: nil)
+    check(PinnedOutline.spacer(2, from: closed, to: opened) == 2, "the room below a folder that springs open goes just inside it")
+    check(PinnedOutline.spacer(1, from: closed, to: opened) == 1, "the room above it stays above it")
+    check(PinnedOutline.spacer(4, from: opened, to: closed) == 2, "and when it closes again, the room comes back up after it")
 }
 
 do {

@@ -185,11 +185,9 @@ private struct OpenFolderShape: Shape {
 }
 
 extension View {
-    /// Keeps a row in the list but takes up no room: the pinned item or folder being dragged, while it's over a
-    /// folder it would go into (`SidebarDrag.isTucked`). Its view has to stay, or its drag gesture would end.
+    /// The pinned item or folder being dragged, while it's over a folder it would go into (`SidebarDrag.isTucked`):
+    /// not drawn, but its view stays where its room is, or its drag gesture would end.
     func tucked(_ isTucked: Bool) -> some View {
-        frame(height: isTucked ? 0 : nil, alignment: .top)
-            .clipped()
-            .accessibilityHidden(isTucked)
+        accessibilityHidden(isTucked)
     }
 }

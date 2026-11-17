@@ -350,31 +350,73 @@ struct PinnedOutline: Equatable {
         self.rows = rows
     }
 
-    /// Where a drop lands with the middle of what's dropped `y` points below the top of the rows, and the pointer `x`
-    /// points from their left edge. `pitch` is a row's height with the spacing after it.
+    /// Where something dragged over the rows lands, and where the room it takes up is drawn, from where that room is
+    /// drawn now (`spacer`: the gap the open slot is in, or where it stays while a folder is the target; nil when
+    /// nothing has opened yet) and from the middle of what's dragged, `y` points below the top of the rows. `x` is the
+    /// pointer, from the rows' left edge, and `pitch` a row's height with the spacing after it.
     ///
-    /// The middle of a folder's row (and of the item shown under it while it's collapsed, and of "Empty") puts it in
-    /// the folder; its top or bottom quarter, and either half of any other row, puts it between rows. Where rows at
-    /// different levels meet, as at the bottom of an open folder, the pointer's horizontal position picks the level,
-    /// as in Finder's list view.
-    func drop(atY y: CGFloat, x: CGFloat, pitch: CGFloat) -> PinnedDrop {
-        let position = y / pitch
-        guard position.isFinite, position >= 0, !rows.isEmpty else { return slot(gap: 0, x: x) }
-        let index = Int(position.rounded(.down))
-        guard index < rows.count else { return slot(gap: rows.count, x: x) }
-        let fraction = position - CGFloat(index)
+    /// It's decided against the rows where they're drawn, with the room open at `spacer`, so the slot stays under
+    /// what's dragged, as it did before there were folders: moving it past a row takes about half a row either way.
+    /// The middle half of a folder's row (and the item shown under it while it's collapsed, and "Empty") puts it in
+    /// the folder, and the room stays where it was, so the folder doesn't move out from under the pointer; its top
+    /// and bottom quarters put it just above or below the folder. Where rows at different levels meet, as at the
+    /// bottom of an open folder, the pointer's horizontal position picks the level, as in Finder's list view.
+    ///
+    /// The result is the same when it's worked out again from its own `spacer` at the same position, so nothing
+    /// flips back and forth while the pointer rests or moves.
+    func dragStep(spacer: Int?, centerY y: CGFloat, x: CGFloat, pitch: CGFloat) -> (drop: PinnedDrop, spacer: Int?) {
+        let count = rows.count
+        let room = spacer.map { min(max($0, 0), count) }
+        func opened(_ gap: Int) -> (drop: PinnedDrop, spacer: Int?) { (slot(gap: gap, x: x), gap) }
+        let middle = y / pitch
+        guard middle.isFinite, count > 0 else { return opened(0) }
+        // Where a row is drawn: one row lower from the open room down.
+        func top(_ index: Int) -> CGFloat { CGFloat(index) + (room.map { index >= $0 } == true ? 1 : 0) }
+        if let room, middle >= CGFloat(room), middle < CGFloat(room) + 1 {
+            return opened(room)
+        }
+        guard let index = rows.indices.first(where: { middle >= top($0) && middle < top($0) + 1 }) else {
+            return opened(middle < top(0) ? 0 : count)
+        }
+        // A pinned item: the room moves to where it's drawn, so it's under what's dragged again.
+        guard let (folder, first, last, isEmpty) = folderBlock(at: index, room: room) else {
+            return opened(top(index) == CGFloat(index) ? index : index + 1)
+        }
+        let blockTop = top(first), blockBottom = top(last) + 1
+        if middle >= (isEmpty ? blockTop : blockTop + 0.25), middle <= blockBottom - 0.25 {
+            return (.into(folder), room)
+        }
+        return opened(middle < blockTop + 0.25 ? first : last + 1)
+    }
+
+    /// The rows a drop on row `index` counts as a folder's: a folder's row and the item shown under it while it's
+    /// collapsed (or "Empty", which is one of its own). Nil for a pinned item's row. `room` is never inside one.
+    private func folderBlock(at index: Int, room: Int?) -> (folder: UUID, first: Int, last: Int, isEmpty: Bool)? {
         switch rows[index].kind {
         case .bookmark:
-            return slot(gap: fraction < 0.5 ? index : index + 1, x: x)
+            return nil
+        case .empty(let folder):
+            return (folder, index, index, true)
+        case .activeUnder(_, let folder):
+            return room == index ? (folder, index, index, false) : (folder, index - 1, index, false)
         case .folder(let folder, _, _):
-            if fraction < 0.25 {
-                return slot(gap: index, x: x)
-            }
-            let hasItemUnder = index + 1 < rows.count && rows[index + 1].kind.isActiveUnder(folder.id)
-            return hasItemUnder || fraction <= 0.75 ? .into(folder.id) : slot(gap: index + 1, x: x)
-        case .activeUnder(_, let folder), .empty(let folder):
-            return fraction <= 0.75 ? .into(folder) : slot(gap: index + 1, x: x)
+            let hasItemUnder = index + 1 < rows.count && rows[index + 1].kind.isActiveUnder(folder.id) && room != index + 1
+            return (folder.id, index, hasItemUnder ? index + 1 : index, false)
         }
+    }
+
+    /// Where the room a drag takes up goes when rows come or go above or around it (a folder springing open, or one
+    /// that sprang open closing again): after the same rows that were above it. A folder that springs open with the
+    /// room below it gets the room just inside it, above what it shows.
+    static func spacer(_ spacer: Int?, from before: PinnedOutline, to after: PinnedOutline) -> Int? {
+        guard let spacer else { return nil }
+        let remaining = Set(after.rows.map(\.id))
+        return before.rows.prefix(min(spacer, before.rows.count)).filter { remaining.contains($0.id) }.count
+    }
+
+    /// The row of the pinned item or folder with this id, which is the gap its room is in before it moves.
+    func index(of node: UUID) -> Int? {
+        rows.firstIndex { $0.kind.node == node }
     }
 
     /// The levels a drop before row `gap` can land at, shallowest first, with where each puts it.
@@ -408,8 +450,17 @@ struct PinnedOutline: Equatable {
     }
 }
 
-private extension PinnedOutline.Row.Kind {
-    func isActiveUnder(_ folder: UUID) -> Bool {
+extension PinnedOutline.Row.Kind {
+    /// The pinned item or folder the row stands for. Nil for "Empty".
+    var node: UUID? {
+        switch self {
+        case .bookmark(let bookmark), .activeUnder(let bookmark, _): bookmark.id
+        case .folder(let folder, _, _): folder.id
+        case .empty: nil
+        }
+    }
+
+    fileprivate func isActiveUnder(_ folder: UUID) -> Bool {
         if case .activeUnder(_, let owner) = self { return owner == folder }
         return false
     }

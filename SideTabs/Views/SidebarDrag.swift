@@ -61,6 +61,11 @@ final class SidebarDrag {
     /// Folders that sprang open during this drag, outermost first. They close again once the drag moves on from
     /// them, and stay open if it ends in them (#76).
     private(set) var springOpen: [UUID] = []
+    /// Where the room the dragged row or link takes up in Pinned is drawn: the gap of the open slot, and while a
+    /// folder is the target, the gap the slot was in, left open but empty so the folder doesn't move (#76). For a
+    /// pinned item or folder that hasn't reached a target in Pinned yet, it's where the item was. Nil while
+    /// nothing has opened.
+    private(set) var pinnedSpacer: Int?
     /// Top left of the floating copy, in sidebar coordinates. A row's copy spans the width, so only
     /// its top moves.
     private(set) var ghostOrigin: CGPoint = .zero
@@ -77,6 +82,9 @@ final class SidebarDrag {
     /// The closed folder being held over, and the timer that springs it open.
     @ObservationIgnored private var springCandidate: UUID?
     @ObservationIgnored private var springWork: DispatchWorkItem?
+    /// The Pinned tree and its active item as the last move over Pinned saw them, to keep the room in place when
+    /// folders spring open or close.
+    @ObservationIgnored private var pinnedContext: (tree: [PinnedNode], active: UUID?)?
 
     // Layout reported by the sections, in sidebar coordinates.
     /// The favorites' grid, or the drop area that stands in for it during a drag while there are none.
@@ -147,8 +155,9 @@ final class SidebarDrag {
         return false
     }
 
-    /// The pinned item or folder being dragged takes no room while it's over a folder it would go into: it's
-    /// kept in the list, so its gesture carries on, but the folder's row highlights instead of a slot opening.
+    /// The pinned item or folder being dragged isn't drawn while it's over a folder it would go into: the folder's
+    /// row highlights instead of a slot, and the room it takes up stays open but empty (`pinnedSpacer`), so the
+    /// rows don't move. Its view stays in the list, so its gesture carries on.
     func isTucked(_ id: UUID) -> Bool {
         if draggedNode == id, case .pinned(.into) = target {
             return true
@@ -187,6 +196,7 @@ final class SidebarDrag {
         }
 
         let newTarget: Target
+        var newSpacer: Int?
         switch (item, region) {
         case (.tab, .tabs):
             newTarget = .tabs(slot(rowTop: rowTop, rowsTop: tabRowsTop, others: counts.tabs - 1))
@@ -201,9 +211,18 @@ final class SidebarDrag {
         case (.tab, .favorites), (.pinned, .favorites):
             newTarget = .favorites(gridSlot(at: pointer, others: counts.favorites ?? 0))
         case (_, .pinned):
-            // The middle of the floating row, among the rows without it.
-            let outline = pinnedOutline(tree: counts.pinned ?? [], active: counts.pinnedActive, hidingDragged: true)
-            newTarget = .pinned(outline.drop(atY: rowTop + Self.rowHeight / 2 - pinnedRowsTop, x: pointer.x, pitch: Self.pitch))
+            // The middle of the floating row, among the rows without it, drawn with the room open where it is now.
+            let tree = counts.pinned ?? []
+            pinnedContext = (tree, counts.pinnedActive)
+            let outline = pinnedOutline(tree: tree, active: counts.pinnedActive, hidingDragged: true)
+            var room = pinnedSpacer
+            if case .pinned = target {} else {
+                // Arriving in Pinned: a pinned item or folder still takes up room where it was.
+                room = draggedNode.flatMap { pinnedOutline(tree: tree, active: counts.pinnedActive, hidingDragged: false).index(of: $0) }
+            }
+            let step = outline.dragStep(spacer: room, centerY: rowTop + Self.rowHeight / 2 - pinnedRowsTop, x: pointer.x, pitch: Self.pitch)
+            newTarget = .pinned(step.drop)
+            newSpacer = step.spacer
         }
 
         let asTile: Bool
@@ -214,9 +233,10 @@ final class SidebarDrag {
         }
         ghostIsTile = asTile
         ghostOrigin = asTile ? tileOrigin : CGPoint(x: 0, y: rowTop)
-        if newTarget != target {
+        if newTarget != target || newSpacer != pinnedSpacer {
             withAnimation(.snappy(duration: 0.18)) {
                 target = newTarget
+                pinnedSpacer = newSpacer
             }
         }
         updateSpring(tree: counts.pinned ?? [])
@@ -224,11 +244,16 @@ final class SidebarDrag {
 
     /// A link dragged in from outside the sidebar is over Pinned, at `location` in the section's coordinates.
     func updateLink(at location: CGPoint, tree: [PinnedNode], active: UUID?) {
+        pinnedContext = (tree, active)
         let outline = pinnedOutline(tree: tree, active: active, hidingDragged: false)
-        let drop = outline.drop(atY: location.y - (pinnedRowsTop - pinnedSectionTop), x: location.x, pitch: Self.pitch)
-        if drop != linkTarget {
+        let step = outline.dragStep(
+            spacer: linkTarget == nil ? nil : pinnedSpacer,
+            centerY: location.y - (pinnedRowsTop - pinnedSectionTop), x: location.x, pitch: Self.pitch
+        )
+        if step.drop != linkTarget || step.spacer != pinnedSpacer {
             withAnimation(.snappy(duration: 0.18)) {
-                linkTarget = drop
+                linkTarget = step.drop
+                pinnedSpacer = step.spacer
             }
         }
         updateSpring(tree: tree)
@@ -243,7 +268,9 @@ final class SidebarDrag {
         withAnimation(.snappy(duration: 0.18)) {
             linkTarget = nil
             springOpen = []
+            pinnedSpacer = nil
         }
+        pinnedContext = nil
         stopSpringTimer()
     }
 
@@ -265,12 +292,7 @@ final class SidebarDrag {
         let drop = pinnedDrop
         // The folders the drop is in, at any depth.
         let containing = drop?.folder.map { Set(tree.ancestors(of: $0) + [$0]) } ?? []
-        let staying = springOpen.filter(containing.contains)
-        if staying != springOpen {
-            withAnimation(.snappy(duration: 0.18)) {
-                springOpen = staying
-            }
-        }
+        setSpringOpen(springOpen.filter(containing.contains))
         guard case .into(let folder)? = drop, let closed = tree.folder(folder), !closed.isOpen, !springOpen.contains(folder) else {
             stopSpringTimer()
             return
@@ -281,12 +303,25 @@ final class SidebarDrag {
         let work = DispatchWorkItem { [weak self] in
             guard let self, pinnedDrop == .into(folder) else { return }
             springCandidate = nil
-            withAnimation(.snappy(duration: 0.18)) {
-                self.springOpen.append(folder)
-            }
+            setSpringOpen(springOpen + [folder])
         }
         springWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.springDelay, execute: work)
+    }
+
+    /// Changes which folders sprang open, keeping the room the drag takes up after the same rows (see
+    /// `PinnedOutline.spacer(_:from:to:)`), so a folder springing open with the room below it shows its contents
+    /// below the room rather than moving the room away from the pointer.
+    private func setSpringOpen(_ folders: [UUID]) {
+        guard folders != springOpen else { return }
+        let before = pinnedContext.map { pinnedOutline(tree: $0.tree, active: $0.active, hidingDragged: true) }
+        withAnimation(.snappy(duration: 0.18)) {
+            springOpen = folders
+            if let before, let context = pinnedContext {
+                let after = pinnedOutline(tree: context.tree, active: context.active, hidingDragged: true)
+                pinnedSpacer = PinnedOutline.spacer(pinnedSpacer, from: before, to: after)
+            }
+        }
     }
 
     private func stopSpringTimer() {
@@ -350,7 +385,9 @@ final class SidebarDrag {
             self.item = nil
             self.target = .none
             springOpen = []
+            pinnedSpacer = nil
         }
+        pinnedContext = nil
         stopSpringTimer()
     }
 
@@ -362,7 +399,9 @@ final class SidebarDrag {
             item = nil
             target = .none
             springOpen = []
+            pinnedSpacer = nil
         }
+        pinnedContext = nil
         stopSpringTimer()
     }
 }

@@ -279,11 +279,14 @@ private struct PinnedSection: View {
         case row(PinnedOutline.Row)
         /// The open slot for a tab, a favorite's tile or a link, at its level.
         case dropSlot(depth: Int)
+        /// The room the slot was in, kept open but empty while a folder is the target, so the rows don't move.
+        case room
 
         var id: String {
             switch self {
             case .row(let row): row.id
-            case .dropSlot: "drop-slot"
+            // One id for both, so the slot fades into the empty room and back.
+            case .dropSlot, .room: "drop-slot"
             }
         }
     }
@@ -295,20 +298,28 @@ private struct PinnedSection: View {
         store.bookmarks(in: list).first { store.openTab(for: $0, inPage: pageWindow)?.active == true }?.id
     }
 
-    /// The rows in display order (see PinnedOutline). While a pinned item or folder is dragged over a slot it moves
-    /// there (and draws itself as the slot), and while it's over a folder it would go into it stays in the list
-    /// taking no room, so the rows are laid out as the drag works them out: without it. A dragged tab, tile or link
-    /// gets a separate slot.
+    /// The rows in display order (see PinnedOutline), laid out as the drag works them out: without what's dragged,
+    /// with its room open at `SidebarDrag.pinnedSpacer`. A pinned item or folder dragged over a slot moves there and
+    /// draws itself as the slot; over a folder it would go into, it stays in that room without being drawn. A
+    /// dragged tab, tile or link gets a separate slot, or an empty room.
     private var slots: [Slot] {
         let tree = tree
         let active = active
         let isOpen = { (bookmark: Bookmark) in store.openTab(for: bookmark, inPage: pageWindow) != nil }
         let shown = drag.pinnedOutline(tree: tree, active: active, isOpen: isOpen, hidingDragged: false)
         let drop = drag.pinnedDrop
+        let room = drag.pinnedSpacer
         guard let dragged = drag.draggedNode, let drop else {
             var slots = shown.rows.map(Slot.row)
-            if case .slot(let gap, let depth, _)? = drop {
+            switch drop {
+            case .slot(let gap, let depth, _)?:
                 slots.insert(.dropSlot(depth: depth), at: min(gap, slots.count))
+            case .into?:
+                if let room {
+                    slots.insert(.room, at: min(room, slots.count))
+                }
+            case nil:
+                break
             }
             return slots
         }
@@ -319,7 +330,7 @@ private struct PinnedSection: View {
         case .slot(let gap, let depth, _):
             slots.insert(.row(PinnedOutline.Row(kind: row.kind, depth: depth, steps: row.steps)), at: min(gap, slots.count))
         case .into:
-            slots.append(.row(row))
+            slots.insert(.row(row), at: min(room ?? slots.count, slots.count))
         }
         return slots
     }
@@ -340,6 +351,9 @@ private struct PinnedSection: View {
                     case .dropSlot(let depth):
                         DropSlot()
                             .padding(.leading, CGFloat(depth) * PinnedOutline.indent)
+                    case .room:
+                        Color.clear
+                            .frame(height: SidebarDrag.rowHeight)
                     }
                 }
             }
@@ -417,17 +431,6 @@ private struct PinnedLinkDrop: DropDelegate {
         }
         return loadDroppedURL(from: info.itemProviders(for: [.url])) { [store, list] url in
             store.addBookmark(url: url, to: list, in: place)
-        }
-    }
-}
-
-private extension PinnedOutline.Row.Kind {
-    /// The pinned item or folder the row stands for.
-    var node: UUID? {
-        switch self {
-        case .bookmark(let bookmark), .activeUnder(let bookmark, _): bookmark.id
-        case .folder(let folder, _, _): folder.id
-        case .empty: nil
         }
     }
 }
