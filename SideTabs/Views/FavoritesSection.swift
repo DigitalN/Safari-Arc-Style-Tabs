@@ -249,7 +249,7 @@ private struct FavoriteRenameRow: View {
     var body: some View {
         HStack(spacing: 8) {
             FaviconView(iconURL: favorite.faviconURL, pageURL: favorite.url)
-            RenameField(text: favorite.title, onCommit: store.commitRename, onCancel: store.cancelRename)
+            RenameField(target: .bookmark(favorite.id), text: favorite.title)
         }
         .font(.system(size: 13))
         .padding(.horizontal, 8)

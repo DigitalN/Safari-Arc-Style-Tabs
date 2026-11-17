@@ -1196,13 +1196,74 @@ final class TabStore {
         scheduleSave()
     }
 
+    /// How a rename ended, for the log.
+    enum RenameEnd: String {
+        case returnKey = "Return"
+        case escape = "Escape"
+        case clickOutside = "a click outside the field"
+        case resignKey = "the sidebar resigning key"
+        case lostFocus = "the field losing focus"
+        case anotherRename = "another rename starting"
+        case gone = "what was renamed going away"
+    }
+
+    /// What's in the rename field now, and where the field is in the sidebar's window (top left origin, as SwiftUI's
+    /// `.global`). RenameField keeps them, so a click outside the field can end the rename keeping what's typed.
+    @ObservationIgnored private(set) var renameDraft: String?
+    @ObservationIgnored private(set) var renameFieldFrame: CGRect?
+
+    /// For the log: what's being renamed, never its name.
+    private static func describe(_ target: RenameTarget) -> String {
+        switch target {
+        case .tab: "a tab"
+        case .bookmark: "a favorite or pinned item"
+        case .folder: "a folder"
+        }
+    }
+
     func beginRename(_ target: RenameTarget) {
+        if renaming != nil {
+            if let renameDraft {
+                commitRename(renameDraft, how: .anotherRename)
+            } else {
+                cancelRename(how: .anotherRename)
+            }
+        }
         renaming = target
+        renameDraft = nil
+        renameFieldFrame = nil
+        log.notice("renaming \(Self.describe(target), privacy: .public) began")
         onRenameStateChanged?(true)
     }
 
-    func commitRename(_ text: String) {
-        guard let target = renaming else { return }
+    /// The rename field for `target` changed: what's typed in it, and where it is.
+    func renameFieldChanged(_ target: RenameTarget, text: String? = nil, frame: CGRect? = nil) {
+        guard renaming == target else { return }
+        if let text { renameDraft = text }
+        if let frame { renameFieldFrame = frame }
+    }
+
+    /// A mouse-down while something is being renamed (#76 hand test): `point` is where it landed in the sidebar's window
+    /// (top left origin), nil for anywhere else (Safari's window, another app, another of Side Tabs' windows). One
+    /// outside the field ends the rename and keeps what's in the field. The click then goes on to do what it does.
+    /// Says whether it ended a rename.
+    @discardableResult
+    func renameClick(at point: CGPoint?) -> Bool {
+        guard renaming != nil else { return false }
+        if let point, let frame = renameFieldFrame, frame.contains(point) { return false }
+        if let renameDraft {
+            commitRename(renameDraft, how: .clickOutside)
+        } else {
+            cancelRename(how: .clickOutside)
+        }
+        return true
+    }
+
+    /// Ends the rename, keeping `text`. With `target`, only if that's still what's being renamed: a field that's going
+    /// away can report losing focus after another rename began.
+    func commitRename(_ text: String, how: RenameEnd = .returnKey, of target: RenameTarget? = nil) {
+        guard let renamed = renaming, target == nil || target == renamed else { return }
+        let target = renamed
         let name = text.trimmingCharacters(in: .whitespacesAndNewlines)
         switch target {
         case .tab(let key):
@@ -1222,13 +1283,20 @@ final class TabStore {
             }
         }
         renaming = nil
+        renameDraft = nil
+        renameFieldFrame = nil
+        log.notice("renaming \(Self.describe(target), privacy: .public) ended by \(how.rawValue, privacy: .public)")
         scheduleSave()
         onRenameStateChanged?(false)
     }
 
-    func cancelRename() {
-        guard renaming != nil else { return }
+    /// Ends the rename, keeping the old name. With `target`, only if that's still what's being renamed.
+    func cancelRename(how: RenameEnd = .escape, of target: RenameTarget? = nil) {
+        guard let renamed = renaming, target == nil || target == renamed else { return }
         renaming = nil
+        renameDraft = nil
+        renameFieldFrame = nil
+        log.notice("renaming \(Self.describe(renamed), privacy: .public) ended by \(how.rawValue, privacy: .public), keeping the old name")
         onRenameStateChanged?(false)
     }
 
@@ -2336,9 +2404,9 @@ final class TabStore {
         }
         switch renaming {
         case .folder(let renamed)? where folder(renamed) == nil:
-            cancelRename()
+            cancelRename(how: .gone)
         case .bookmark(let renamed)? where bookmarkLists.bookmark(renamed) == nil:
-            cancelRename()
+            cancelRename(how: .gone)
         default:
             break
         }

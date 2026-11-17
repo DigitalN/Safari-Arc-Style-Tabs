@@ -57,7 +57,7 @@ struct BookmarkRow: View {
             FaviconView(iconURL: bookmark.faviconURL, pageURL: bookmark.url)
 
             if isRenaming {
-                RenameField(text: bookmark.title, onCommit: store.commitRename, onCancel: store.cancelRename)
+                RenameField(target: .bookmark(bookmark.id), text: bookmark.title)
             } else {
                 Text(bookmark.title)
                     .lineLimit(1)

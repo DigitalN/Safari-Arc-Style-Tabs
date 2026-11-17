@@ -35,7 +35,7 @@ struct FolderRow: View {
             FolderIcon(isOpen: expanded)
 
             if isRenaming {
-                RenameField(text: folder.name, onCommit: store.commitRename, onCancel: store.cancelRename)
+                RenameField(target: .folder(folder.id), text: folder.name)
             } else {
                 Text(folder.name)
                     .lineLimit(1)

@@ -3680,6 +3680,48 @@ do {
     check(TabStore.folderDeletionQuestion == "Deleting this folder will also delete all bookmarks inside. Are you sure?", "the question is word for word")
 }
 
+// MARK: - A rename ends on a click outside its field (#76 hand test)
+
+do {
+    let spaces = Spaces()
+    let store = spaces.store
+    var editing: [Bool] = []
+    store.onRenameStateChanged = { editing.append($0) }
+    let field = CGRect(x: 30, y: 100, width: 150, height: 20)
+
+    // A tab: what's typed is kept when the click lands anywhere but the field.
+    let key = spaces.key(2)
+    store.beginRename(.tab(key))
+    store.renameFieldChanged(.tab(key), text: store.displayTitle(for: spaces.tab(2), instance: defaultCopy), frame: field)
+    store.renameFieldChanged(.tab(key), text: "Reading list")
+    check(!store.renameClick(at: CGPoint(x: 60, y: 110)) && store.renaming == .tab(key), "a click inside the field keeps renaming")
+    check(store.renameClick(at: CGPoint(x: 60, y: 300)), "a click elsewhere in the sidebar ends it")
+    check(store.renaming == nil && store.displayTitle(for: spaces.tab(2), instance: defaultCopy) == "Reading list", "keeping what's typed")
+    check(editing == [true, false], "and gives focus back, as Return does")
+    check(!store.renameClick(at: nil), "a click with nothing being renamed does nothing")
+
+    // A new folder left as it is stays New Folder, whatever the click.
+    store.newFolder(in: .pinned(.defaultProfile), .end)
+    let folder = store.pinnedTree(in: .pinned(.defaultProfile)).last!.id
+    store.renameFieldChanged(.folder(folder), text: "New Folder", frame: field)
+    check(store.renameClick(at: nil) && store.renaming == nil, "a click in Safari's window or another app ends a folder's rename")
+    check(store.folder(folder)?.name == "New Folder", "and an untouched new folder keeps its name")
+
+    // A pinned item: a right-click elsewhere ends it the same way, typed name kept.
+    let pin = bookmark(store, news, to: .pinned(.defaultProfile))
+    store.beginRename(.bookmark(pin.id))
+    store.renameFieldChanged(.bookmark(pin.id), text: "News", frame: field)
+    store.renameClick(at: CGPoint(x: 5, y: 5))
+    check(pinned(store).first { $0.id == pin.id }?.title == "News", "a pinned item's typed name is kept")
+
+    // A field going away can't end a rename that began after it.
+    store.beginRename(.folder(folder))
+    store.commitRename("Stale", how: .lostFocus, of: .bookmark(pin.id))
+    check(store.renaming == .folder(folder), "a field reporting late for an earlier rename is ignored")
+    store.cancelRename(how: .escape, of: .folder(folder))
+    check(store.renaming == nil && store.folder(folder)?.name == "New Folder", "Escape keeps the old name")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {
