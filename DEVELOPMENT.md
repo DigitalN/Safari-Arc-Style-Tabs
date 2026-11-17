@@ -35,7 +35,8 @@ scripts/run-checks.sh
 
 Runs what can be checked without Safari: `background.js` against a stand-in `browser`
 (`Tests/ExtensionChecks`), the Swift logic compiled with small test programs (`TabStore`'s
-handling of messages, where Safari's tab bar is in a window's Accessibility tree and which
+handling of messages, its favorites and pinned items, and the folders in Pinned: the tree, the rows it shows,
+where a drop lands and how it's saved; where Safari's tab bar is in a window's Accessibility tree and which
 of its buttons a tab matches and which one Safari has selected, checked against trees kept as data in
 `Tests/TabBarFinderChecks/trees`; which of Safari's windows are browser windows the sidebar
 docks to, and never Settings, against the same trees; what a press on a row turns into; which row is under a
@@ -202,7 +203,9 @@ separate window that the app keeps attached to Safari's window:
     finds among the window's children.
   - `TabStore` holds tabs, bookmarks and custom names. A click, a close, a move or a mute
     changes the sidebar at once; if its command doesn't reach the extension, the window goes
-    back to how its copy last reported it.
+    back to how its copy last reported it. `BookmarkLists` keeps each profile's Favorites and
+    Pinned list; a Pinned list is a tree of pinned items and folders (`PinnedTree`), and
+    `PinnedOutline` is the rows it shows and where a drop among them lands.
   - `ExtensionCopyCheck` tells when Safari runs another copy's extension: a message whose
     `extensionPath` isn't inside the running app, or a command that fails with
     `SFErrorNoExtensionFound`. `ExtensionRegistration` then unregisters the other copies from
@@ -244,7 +247,8 @@ separate window that the app keeps attached to Safari's window:
     against the app's own team, and swaps it in at a quiet moment. `UpdateControl` is what
     Check for Updates… shows for each of its states, in the menu bar menu and in Settings.
   - `Views/` is the SwiftUI sidebar, setup window and settings. `SidebarDrag` handles
-    reordering with its own drag gesture rather than system drag and drop.
+    reordering with its own drag gesture rather than system drag and drop, including dragging
+    into folders and the folders that spring open on the way.
 - `scripts/`: `install.sh` builds and installs, `package.sh` makes the release disk
   image (with artwork from `make-dmg-background.swift`), `build.sh` is shared by both,
   `check-installed.sh` checks that `/Applications` has the only copy, `run-checks.sh` runs
@@ -252,7 +256,9 @@ separate window that the app keeps attached to Safari's window:
 
 Bookmarks and tab names are stored in `~/Library/Application Support/Side Tabs/state.json`,
 and so are tab cleanup's clocks (when each tab was last looked at) and its list of closed tabs.
-The list holds titles and URLs, so it stays out of the log.
+The list holds titles and URLs, so it stays out of the log. Pinned's folders are under `pinnedTree`
+key; the flat `pinned` key is still written, with every pinned item in display order, so a version
+without folders can still read the file, and a file without `pinnedTree` loads from it.
 
 To try cleanup without waiting 12 hours, leave Safari open (tab ids are only good until it
 restarts), quit Side Tabs, move times in `cleanup.lastViewed` back by a day or more (they're

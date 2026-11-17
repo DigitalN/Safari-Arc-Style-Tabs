@@ -3206,6 +3206,348 @@ do {
     check(pinned(store).map(\.id) == [pin.id] && creates(spaces.commands).isEmpty, "another profile's window can't unpin it")
 }
 
+// MARK: - Folders in Pinned (#76)
+
+func item(_ name: String) -> Bookmark {
+    Bookmark(title: name, url: "https://\(name).example/")
+}
+
+func folderNode(_ name: String, open: Bool = true, _ children: [PinnedNode] = []) -> PinnedNode {
+    .folder(PinnedFolder(name: name, isOpen: open, children: children))
+}
+
+/// What a tree holds, as a string: items by title, folders as `name[…]`.
+func describe(_ tree: [PinnedNode]) -> String {
+    tree.map { node -> String in
+        switch node {
+        case .bookmark(let bookmark): bookmark.title
+        case .folder(let folder): "\(folder.name)[\(describe(folder.children))]"
+        }
+    }.joined(separator: " ")
+}
+
+func describe(_ outline: PinnedOutline) -> String {
+    outline.rows.map { row -> String in
+        let indent = String(repeating: ".", count: row.depth)
+        switch row.kind {
+        case .bookmark(let bookmark): return indent + bookmark.title
+        case .folder(let folder, let expanded, let openTabs): return indent + folder.name + (expanded ? "/" : "+") + (!expanded && openTabs > 0 ? "\(openTabs)" : "")
+        case .activeUnder(let bookmark, _): return indent + "*" + bookmark.title
+        case .empty: return indent + "(empty)"
+        }
+    }.joined(separator: " ")
+}
+
+func outline(_ tree: [PinnedNode], active: UUID? = nil, open: Set<UUID> = [], hiding: UUID? = nil, collapsed: UUID? = nil) -> PinnedOutline {
+    PinnedOutline(tree: tree, isExpanded: \.isOpen, isOpen: { open.contains($0.id) }, active: active, hiding: hiding, drawnCollapsed: collapsed)
+}
+
+/// The id of the item or folder called `name`, at any depth.
+func id(_ tree: [PinnedNode], _ name: String) -> UUID {
+    func find(_ nodes: [PinnedNode]) -> UUID? {
+        for node in nodes {
+            switch node {
+            case .bookmark(let bookmark) where bookmark.title == name: return bookmark.id
+            case .folder(let folder) where folder.name == name: return folder.id
+            case .folder(let folder): if let found = find(folder.children) { return found }
+            case .bookmark: break
+            }
+        }
+        return nil
+    }
+    guard let found = find(tree) else { fatalError("no \(name) in the tree") }
+    return found
+}
+
+do {
+    // The tree: flattening, places, inserting, moving, removing.
+    let a = item("a"), b = item("b"), c = item("c"), d = item("d")
+    var tree: [PinnedNode] = [.bookmark(a), folderNode("F", [.bookmark(b), folderNode("G", open: false, [.bookmark(c)])]), .bookmark(d)]
+    let f = id(tree, "F"), g = id(tree, "G")
+    check(tree.flattenedBookmarks.map(\.title) == ["a", "b", "c", "d"], "pinned items flatten depth-first, inside closed folders too")
+    check(tree.place(of: c.id) == PinnedPlace(parent: g, index: 0) && tree.ancestors(of: c.id) == [f, g], "an item knows its folder and the folders above it")
+    check(tree.allFolders.map(\.name) == ["F", "G"], "every folder, at any depth")
+
+    check(tree.insert(.bookmark(item("e")), at: PinnedPlace(parent: g, index: 0)), "an item goes into a folder")
+    check(describe(tree) == "a F[b G[e c]] d", "at the place given")
+    check(!tree.insert(.bookmark(a), at: .end(of: nil)), "an id already in the tree isn't added again")
+    check(!tree.insert(.bookmark(item("x")), at: .end(of: UUID())), "nor into a folder that isn't there")
+
+    check(tree.move(id: d.id, to: .end(of: f)), "an item moves into a folder")
+    check(describe(tree) == "a F[b G[e c] d]", "at its end")
+    check(tree.move(id: a.id, to: PinnedPlace(parent: f, index: 1)), "and to a slot inside one")
+    check(describe(tree) == "F[b a G[e c] d]", "its index counted with it taken out")
+    check(!tree.move(id: f, to: .end(of: g)), "a folder can't go into a folder inside it")
+    check(!tree.move(id: g, to: .end(of: g)), "nor into itself")
+    check(describe(tree) == "F[b a G[e c] d]", "and a refused move changes nothing")
+    check(tree.move(id: g, to: PinnedPlace(parent: nil, index: 0)), "a folder moves with everything inside it")
+    check(describe(tree) == "G[e c] F[b a d]", "to the top level")
+
+    tree.updateFolder(g) { $0.name = "Renamed"; $0.isOpen = true; $0.children = [] }
+    check(tree.folder(g)?.name == "Renamed" && tree.folder(g)?.isOpen == true && tree.folder(g)?.children.count == 2,
+          "a folder's name and whether it's open change, never what's inside")
+    let removed = tree.remove(id: g)
+    check(removed.map { [$0].flattenedBookmarks.map(\.title) } == ["e", "c"] && describe(tree) == "F[b a d]",
+          "removing a folder takes everything inside it")
+}
+
+do {
+    // What the sidebar draws: indented levels, a collapsed folder's active item and count, "Empty".
+    let a = item("a"), b = item("b"), c = item("c"), d = item("d")
+    let tree: [PinnedNode] = [
+        .bookmark(a),
+        folderNode("F", [.bookmark(b), folderNode("G", open: false, [.bookmark(c), folderNode("H", open: false, [.bookmark(d)])])]),
+        folderNode("E"),
+    ]
+    check(describe(outline(tree)) == "a F/ .b .G+ E/ .(empty)", "folders nest, each level indented, an open empty one says Empty")
+    check(describe(outline(tree, active: d.id, open: [c.id, d.id])) == "a F/ .b .G+2 ..*d E/ .(empty)",
+          "a collapsed folder shows its item whose tab is active, at any depth inside it, and counts the open tabs inside")
+    check(describe(outline(tree, active: b.id, open: [b.id])) == "a F/ .b .G+ E/ .(empty)", "the active item stays where it is in an open folder")
+    let f = id(tree, "F")
+    check(describe(outline(tree, active: d.id, open: [d.id], collapsed: f)) == "a F+1 E/ .(empty)",
+          "a folder being dragged is drawn collapsed, one row tall, with nothing under it")
+    check(describe(outline(tree, hiding: f)) == "a E/ .(empty)", "what's dragged is left out when working out where it lands")
+    check(outline(tree, hiding: f).rows.last?.steps == [PinnedPlace(parent: nil, index: 1)], "and places are those of the tree without it")
+}
+
+do {
+    // Where a drop lands, by the middle of what's dropped (y) and the pointer (x).
+    let pitch: CGFloat = 31
+    func row(_ index: Int, at fraction: CGFloat) -> CGFloat { (CGFloat(index) + fraction) * pitch }
+    let a = item("a"), b = item("b"), c = item("c"), z = item("z")
+    let tree: [PinnedNode] = [
+        .bookmark(a),
+        folderNode("F", [.bookmark(b), .bookmark(c)]),
+        folderNode("G", open: false, [.bookmark(z)]),
+        folderNode("E"),
+    ]
+    let f = id(tree, "F"), g = id(tree, "G"), e = id(tree, "E")
+    let rows = outline(tree, active: z.id) // a F/ .b .c G+ .*z E/ .(empty)
+    check(describe(rows) == "a F/ .b .c G+ .*z E/ .(empty)", "the rows the drops below are on")
+    let wide: CGFloat = 200
+    check(rows.drop(atY: row(0, at: 0.2), x: wide, pitch: pitch) == .slot(gap: 0, depth: 0, place: PinnedPlace(parent: nil, index: 0)),
+          "the top half of an item is just above it")
+    check(rows.drop(atY: row(0, at: 0.6), x: wide, pitch: pitch) == .slot(gap: 1, depth: 0, place: PinnedPlace(parent: nil, index: 1)),
+          "the bottom half just below it")
+    check(rows.drop(atY: row(1, at: 0.5), x: wide, pitch: pitch) == .into(f), "the middle of a folder's row puts it in the folder")
+    check(rows.drop(atY: row(1, at: 0.9), x: wide, pitch: pitch) == .slot(gap: 2, depth: 1, place: PinnedPlace(parent: f, index: 0)),
+          "the bottom edge of an open folder is the slot before its first item")
+    check(rows.drop(atY: row(3, at: 0.6), x: wide, pitch: pitch) == .slot(gap: 4, depth: 1, place: PinnedPlace(parent: f, index: 2)),
+          "at the bottom of an open folder, a pointer over its items puts it last in the folder")
+    check(rows.drop(atY: row(3, at: 0.6), x: 10, pitch: pitch) == .slot(gap: 4, depth: 0, place: PinnedPlace(parent: nil, index: 2)),
+          "and one further left puts it after the folder: the pointer's horizontal position picks the level")
+    check(rows.drop(atY: row(4, at: 0.1), x: 10, pitch: pitch) == .slot(gap: 4, depth: 0, place: PinnedPlace(parent: nil, index: 2)),
+          "the top edge of the next row is the same spot")
+    check(rows.drop(atY: row(4, at: 0.9), x: wide, pitch: pitch) == .into(g),
+          "the item shown under a collapsed folder isn't a slot of its own: the folder's row runs on over it")
+    check(rows.drop(atY: row(5, at: 0.5), x: wide, pitch: pitch) == .into(g), "including its middle")
+    check(rows.drop(atY: row(5, at: 0.9), x: wide, pitch: pitch) == .slot(gap: 6, depth: 0, place: PinnedPlace(parent: nil, index: 3)),
+          "its bottom edge is after the collapsed folder")
+    check(rows.drop(atY: row(7, at: 0.4), x: wide, pitch: pitch) == .into(e), "dropping on Empty puts it in that folder")
+    check(rows.drop(atY: row(7, at: 0.9), x: wide, pitch: pitch) == .slot(gap: 8, depth: 1, place: PinnedPlace(parent: e, index: 0)),
+          "below Empty, the pointer picks inside the empty folder")
+    check(rows.drop(atY: row(7, at: 0.9), x: 10, pitch: pitch) == .slot(gap: 8, depth: 0, place: PinnedPlace(parent: nil, index: 4)),
+          "or after it")
+    check(rows.drop(atY: row(20, at: 0), x: wide, pitch: pitch).place == PinnedPlace(parent: e, index: 0)
+          && rows.drop(atY: -40, x: wide, pitch: pitch) == .slot(gap: 0, depth: 0, place: PinnedPlace(parent: nil, index: 0)),
+          "past the ends it's the first or last slot")
+    check(outline([]).drop(atY: 50, x: wide, pitch: pitch) == .slot(gap: 0, depth: 0, place: PinnedPlace(parent: nil, index: 0)),
+          "an empty list has one slot")
+
+    // Dragging F itself: it's left out, so it can't land in itself or anything inside it.
+    let withoutF = outline(tree, active: z.id, hiding: f) // a G+ .*z E/ .(empty)
+    let targets = stride(from: CGFloat(-10), through: 200, by: 3).flatMap { y in
+        [CGFloat(0), 30, 200].map { withoutF.drop(atY: y, x: $0, pitch: pitch) }
+    }
+    check(!targets.contains { $0.folder == f },
+          "a dragged folder is never a drop target for itself")
+}
+
+do {
+    // Saving: the tree in its own key, the flat list beside it for 1.3.3, and loading both ways.
+    let a = item("a"), b = item("b"), c = item("c")
+    let tree: [PinnedNode] = [folderNode("F", open: false, [.bookmark(a), folderNode("G", [.bookmark(b)])]), .bookmark(c), folderNode("E")]
+    var lists = BookmarkLists(favorites: [:], bookmarks: [], pinned: [:], pinnedTree: ["default": tree])
+    check(lists.savedPinned["default"]?.map(\.title) == ["a", "b", "c"], "the flat pinned key holds every pinned item, depth-first")
+    check(lists.savedPinnedTree["default"] == tree, "and the tree key the folders")
+    let data = try! JSONEncoder().encode(lists.savedPinnedTree)
+    let decoded = try! JSONDecoder().decode([String: [PinnedNode]].self, from: data)
+    check(decoded == lists.savedPinnedTree, "a tree comes back from JSON as it was, open state and all")
+    let flatOnly = BookmarkLists(favorites: [:], bookmarks: [], pinned: lists.savedPinned)
+    check(describe(flatOnly.pinnedTree(of: .defaultProfile)) == "a b c", "a file without the tree loads every pinned item from the flat list, without folders")
+    let foldersOnly = BookmarkLists(favorites: [:], bookmarks: [], pinned: [:], pinnedTree: ["default": [folderNode("Only")]])
+    check(foldersOnly.pinnedTree(of: .defaultProfile).count == 1 && foldersOnly.savedPinned.isEmpty, "a list of only empty folders keeps them")
+
+    // Ids stay unique across every list: a repeated one is given a new id.
+    let twice = BookmarkLists(favorites: ["default": [a]], bookmarks: [], pinned: [:], pinnedTree: ["default": [.bookmark(a), folderNode("F", [.bookmark(b), .bookmark(b)])]])
+    let ids = twice.all.map(\.id) + twice.pinnedTree(of: .defaultProfile).allFolders.map(\.id)
+    check(Set(ids).count == ids.count && twice.all.count == 4, "an id that turns up twice is replaced, and nothing is lost")
+    lists.insert(c, into: .favorites(.defaultProfile))
+    check(lists.items(in: .favorites(.defaultProfile)).isEmpty, "an id in a folder can't be added to another list too")
+    check(!lists.insert(.folder(PinnedFolder(id: a.id, name: "Clash", isOpen: true, children: [])), intoPinnedOf: .defaultProfile, at: .end(of: nil)),
+          "nor used for a folder")
+}
+
+do {
+    // In the store: New Folder, opening and closing, renaming, and saving it all.
+    let file = stateFolder.appending(path: "folders-\(UUID().uuidString).json")
+    let spaces = Spaces(stateURL: file)
+    let store = spaces.store
+    let list = BookmarkList.pinned(.defaultProfile)
+    let first = bookmark(store, news, to: list)
+    let second = bookmark(store, elsewhere, to: list)
+    store.newFolder(in: list, .end)
+    var tree = store.pinnedTree(in: list)
+    guard case .folder(let made)? = tree.last else { fatalError("New Folder from the header makes a folder") }
+    check(tree.count == 3 && made.name == "New Folder" && made.children.isEmpty, "from the header: an empty folder named New Folder, at the end")
+    check(store.renaming == .folder(made.id), "it starts in rename")
+    store.commitRename("Reading")
+    check(store.folder(made.id)?.name == "Reading" && store.renaming == nil, "renaming it names it")
+    store.beginRename(.folder(made.id))
+    store.commitRename("   ")
+    check(store.folder(made.id)?.name == "Reading", "an empty name keeps the old one")
+
+    store.newFolder(in: list, .below(first.id))
+    tree = store.pinnedTree(in: list)
+    check(describe(tree) == "\(first.title) New Folder[] \(second.title) Reading[]", "from a pinned row: just below it, at its level")
+    store.cancelRename()
+    store.setFolderOpen(made.id, false)
+    store.newFolder(in: list, .inside(made.id))
+    tree = store.pinnedTree(in: list)
+    check(describe(tree).hasSuffix("Reading[New Folder[]]"), "from a folder: a subfolder at the top inside it")
+    check(store.folder(made.id)?.isOpen == true, "and the folder opens, so the new one is in view")
+    store.cancelRename()
+    store.toggleFolder(made.id)
+    check(store.folder(made.id)?.isOpen == false, "a click closes an open folder")
+
+    store.moveToPinned(first.id, list: list, in: .end(of: made.id))
+    store.save()
+    let reloaded = Spaces(stateURL: file, tabsOf: spaces).store
+    check(reloaded.pinnedTree(in: list) == store.pinnedTree(in: list), "the folders, their names and whether each is open survive a restart")
+    let saved = try! JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+    let flat = (saved["pinned"] as? [String: [[String: Any]]])?["default"]?.compactMap { $0["url"] as? String }
+    check(flat == [elsewhere, news], "state.json's flat pinned list still has every pinned item, in display order")
+    check(saved["pinnedTree"] != nil, "beside the tree")
+
+    // A file 1.3.3 wrote after this version: no tree key, so the flat list is read, without folders.
+    var older = saved
+    older["pinnedTree"] = nil
+    let olderFile = stateFolder.appending(path: "older-\(UUID().uuidString).json")
+    try! JSONSerialization.data(withJSONObject: older).write(to: olderFile)
+    let fromOlder = Spaces(stateURL: olderFile, tabsOf: spaces).store
+    check(fromOlder.pinnedTree(in: list).map(\.id) == [second.id, first.id], "a file without the tree loads from the flat pinned key")
+}
+
+do {
+    // Drops into folders: tabs, favorites, pinned items and folders, never across profiles or into themselves.
+    let spaces = Spaces()
+    let store = spaces.store
+    let list = BookmarkList.pinned(.defaultProfile)
+    store.newFolder(in: list, .end)
+    store.cancelRename()
+    let folder = store.pinnedTree(in: list)[0].id
+    store.newFolder(in: list, .inside(folder))
+    store.cancelRename()
+    let inner = store.folder(folder)!.children[0].id
+
+    store.addBookmark(from: spaces.tab(2), instance: defaultCopy, to: list, in: .end(of: inner))
+    let pinnedTab = store.folder(inner)!.children.flattenedBookmarks.first
+    check(pinnedTab?.url == "https://example.com/2", "a tab dropped on a folder is pinned inside it")
+    check(pinnedTab.flatMap(store.openTab(for:))?.id == 2 && listedIds(store) == [1], "and its tab leaves Tabs, as pinning it does")
+
+    let favorite = bookmark(store, news)
+    store.moveToPinned(favorite.id, list: list, in: PinnedPlace(parent: folder, index: 0))
+    check(favorites(store).isEmpty && store.folder(folder)!.children.first?.id == favorite.id, "a favorite's tile dropped in a folder leaves Favorites")
+
+    store.moveToPinned(folder, list: list, in: .end(of: inner))
+    check(store.pinnedTree(in: list).map(\.id) == [folder] && store.bookmarkLists.pinnedPlace(of: inner)?.place.parent == folder,
+          "a folder can't be dropped into a folder inside it")
+
+    let loose = bookmark(store, elsewhere, to: list)
+    store.moveToPinned(inner, list: list, in: PinnedPlace(parent: nil, index: 0))
+    check(store.pinnedTree(in: list).map(\.id) == [inner, folder, loose.id], "a folder moves out to the top level, with what's inside")
+    check(store.bookmarks(in: list).count == 3, "and every pinned item is still there")
+
+    let workItem = bookmark(store, "https://work.example/", to: .pinned(work))
+    store.moveToPinned(workItem.id, list: list, in: .end(of: folder))
+    check(pinned(store, work).map(\.id) == [workItem.id], "lists never cross profiles")
+
+    // Pinned's +, Add to Pinned and Move to Pinned add at the end of the top level; Move to Favorites works from inside.
+    store.addBookmarkForCurrentTab()
+    check(store.pinnedTree(in: list).last.flatMap { if case .bookmark(let added) = $0 { added.url } else { nil } } == "https://example.com/1",
+          "Pinned's + adds at the end of the top level")
+    store.moveBookmark(favorite.id, to: .favorites(.defaultProfile), at: 0)
+    check(favorites(store).map(\.id) == [favorite.id] && store.folder(folder)?.children.isEmpty == true, "Move to Favorites works from inside a folder")
+    // As the tile's menu does: an index past the end is the end, however many items the folders hold.
+    store.moveBookmark(favorite.id, to: list, at: .max)
+    check(store.pinnedTree(in: list).last?.id == favorite.id, "and Move to Pinned puts it at the end of the top level")
+}
+
+do {
+    // Collapsed folders keep their items' tabs; Close Tabs; unpinning from inside a folder (#75 at any depth).
+    let spaces = Spaces()
+    let store = spaces.store
+    let list = BookmarkList.pinned(.defaultProfile)
+    store.newFolder(in: list, .end)
+    store.cancelRename()
+    let folder = store.pinnedTree(in: list)[0].id
+    store.newFolder(in: list, .inside(folder))
+    store.cancelRename()
+    let inner = store.folder(folder)!.children[0].id
+    let top = bookmark(store, news, to: list)
+    store.moveToPinned(top.id, list: list, in: .end(of: folder))
+    let deep = bookmark(store, elsewhere, to: list)
+    store.moveToPinned(deep.id, list: list, in: .end(of: inner))
+    spaces.openAndCreate(top, tabId: 10)
+    spaces.openAndCreate(deep, tabId: 11)
+    store.setFolderOpen(folder, false)
+    spaces.show(.personal)
+    check(store.openTab(for: deep)?.id == 11 && listedIds(store) == [1, 2], "items in a collapsed folder keep their tabs, out of Tabs")
+    check(store.openTabs(inFolder: folder, inPage: TabStore.SidebarPageWindow(instance: defaultCopy, windowId: 1)).count == 2,
+          "a folder knows how many tabs inside it are open in this window, at any depth")
+
+    store.unpin(deep.id, toListedSlot: 2)
+    check(store.folder(inner)?.children.isEmpty == true && store.openTab(for: deep) == nil, "an item deep in a folder unpins when dropped on Tabs")
+    check(listedIds(store) == [1, 2, 11], "and its tab lands at the slot")
+
+    store.closeTabs(inFolder: folder)
+    check(closes(spaces.commands).last == [10], "Close Tabs closes the open tabs of the items inside")
+}
+
+do {
+    // Delete Folder: asks when there's a pinned item inside, deletes empty ones at once, keeps tabs open.
+    let spaces = Spaces()
+    let store = spaces.store
+    let list = BookmarkList.pinned(.defaultProfile)
+    var asked = 0
+    var answer = false
+    store.confirmFolderDeletion = { reply in
+        asked += 1
+        reply(answer)
+    }
+    store.newFolder(in: list, .end)
+    store.cancelRename()
+    let emptyOuter = store.pinnedTree(in: list)[0].id
+    store.newFolder(in: list, .inside(emptyOuter))
+    store.cancelRename()
+    store.deleteFolder(emptyOuter)
+    check(asked == 0 && store.pinnedTree(in: list).isEmpty, "a folder holding only empty folders goes without asking")
+
+    store.newFolder(in: list, .end)
+    store.cancelRename()
+    let folder = store.pinnedTree(in: list)[0].id
+    let inside = bookmark(store, news, to: list)
+    store.moveToPinned(inside.id, list: list, in: .end(of: folder))
+    spaces.openAndCreate(inside, tabId: 10)
+    store.deleteFolder(folder)
+    check(asked == 1 && store.folder(folder) != nil, "with a pinned item inside it asks first, and No keeps it")
+    answer = true
+    store.deleteFolder(folder)
+    check(asked == 2 && store.folder(folder) == nil && store.bookmarks(in: list).isEmpty, "Yes deletes it and everything in it")
+    check(listedIds(store).contains(10) && closes(spaces.commands).isEmpty, "the open tabs of the items inside stay open, back under Tabs")
+    check(TabStore.folderDeletionQuestion == "Deleting this folder will also delete all bookmarks inside. Are you sure?", "the question is word for word")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

@@ -63,6 +63,8 @@ struct CustomName: Codable, Hashable {
 enum RenameTarget: Hashable {
     case tab(TabKey)
     case bookmark(UUID)
+    /// A folder in Pinned (#76).
+    case folder(UUID)
 }
 
 extension String {

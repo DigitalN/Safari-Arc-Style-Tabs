@@ -21,7 +21,7 @@ echo "== TabStore"
 swiftc -o "$WORK/store-checks" \
     Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift SideTabs/TabBarMatcher.swift \
     SideTabs/BookmarkTabs.swift Shared/Bridge.swift SideTabs/TabCleanup.swift \
-    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift \
+    SideTabs/BookmarkLists.swift SideTabs/PinnedTree.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift \
     SideTabs/ExtensionCopyCheck.swift
 "$WORK/store-checks"
 
@@ -31,7 +31,7 @@ echo "== tab cleanup"
 swiftc -o "$WORK/cleanup-checks" \
     Tests/TabCleanupChecks/main.swift SideTabs/TabCleanup.swift SideTabs/TabStore.swift SideTabs/Models.swift \
     SideTabs/TabBarMatcher.swift SideTabs/AppSettings.swift SideTabs/BookmarkTabs.swift Shared/Bridge.swift \
-    SideTabs/BookmarkLists.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift \
+    SideTabs/BookmarkLists.swift SideTabs/PinnedTree.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift \
     SideTabs/ExtensionCopyCheck.swift
 "$WORK/cleanup-checks"
 
@@ -163,7 +163,8 @@ swiftc -o "$WORK/tile-grid-checks" Tests/TileGridChecks/main.swift SideTabs/Tile
 "$WORK/tile-grid-checks"
 
 echo "== row gestures"
-if grep -n "DragGesture" SideTabs/Views/TabRow.swift SideTabs/Views/BookmarkRow.swift SideTabs/Views/FavoritesSection.swift; then
+if grep -n "DragGesture" SideTabs/Views/TabRow.swift SideTabs/Views/BookmarkRow.swift SideTabs/Views/FavoritesSection.swift \
+    SideTabs/Views/FolderRow.swift; then
     echo "FAIL: rows must not attach a DragGesture of their own; use sidebarRowGesture (SidebarDrag.swift)"
     exit 1
 fi

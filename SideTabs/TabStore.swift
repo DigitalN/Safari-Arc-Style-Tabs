@@ -1216,6 +1216,10 @@ final class TabStore {
             if !name.isEmpty {
                 bookmarkLists.update(id) { $0.title = name }
             }
+        case .folder(let id):
+            if !name.isEmpty {
+                bookmarkLists.updateFolder(id) { $0.name = name }
+            }
         }
         renaming = nil
         scheduleSave()
@@ -2060,13 +2064,19 @@ final class TabStore {
     /// Makes a favorite or pinned item of the tab's page, at `index` in `list` (at the end without
     /// one). It's what dragging a tab onto Favorites or Pinned does, and the tab's menu.
     func addBookmark(from tab: BrowserTab, instance: String, to list: BookmarkList, at index: Int? = nil) {
+        addBookmark(from: tab, instance: instance, to: list, in: PinnedPlace(parent: nil, index: index ?? .max))
+    }
+
+    /// Makes a favorite or pinned item of the tab's page at `place`: for Favorites, its index there; for Pinned, a
+    /// place in its tree (#76), as a drop on Pinned gives.
+    func addBookmark(from tab: BrowserTab, instance: String, to list: BookmarkList, in place: PinnedPlace) {
         guard let url = tab.url, !url.isEmpty else { return }
         let bookmark = Bookmark(
             title: displayTitle(for: tab, instance: instance),
             url: url,
             faviconURL: tab.favIconUrl
         )
-        insert(bookmark, into: list, at: index)
+        guard insert(bookmark, into: list, in: place) else { return }
         // The tab moves up as the new bookmark's tab, unless it's another bookmark's, or its window
         // doesn't show that list (another profile's, or a private window).
         if let window = window(instance: instance, id: tab.windowId),
@@ -2087,14 +2097,30 @@ final class TabStore {
 
     /// A link dragged in from a web page or Safari's address bar.
     func addBookmark(url: URL, to list: BookmarkList, at index: Int? = nil) {
-        guard let scheme = url.scheme, ["http", "https"].contains(scheme.lowercased()) else { return }
-        insert(Bookmark(title: url.host() ?? url.absoluteString, url: url.absoluteString), into: list, at: index)
+        addBookmark(url: url, to: list, in: PinnedPlace(parent: nil, index: index ?? .max))
     }
 
-    private func insert(_ bookmark: Bookmark, into list: BookmarkList, at index: Int?) {
-        bookmarkLists.insert(bookmark, into: list, at: index)
+    /// A link dragged in, at `place` (see `addBookmark(from:instance:to:in:)`).
+    func addBookmark(url: URL, to list: BookmarkList, in place: PinnedPlace) {
+        guard let scheme = url.scheme, ["http", "https"].contains(scheme.lowercased()) else { return }
+        insert(Bookmark(title: url.host() ?? url.absoluteString, url: url.absoluteString), into: list, in: place)
+    }
+
+    /// Says whether it went in: not into a folder that's gone, or another profile's.
+    @discardableResult
+    private func insert(_ bookmark: Bookmark, into list: BookmarkList, in place: PinnedPlace) -> Bool {
+        switch list {
+        case .favorites:
+            bookmarkLists.insert(bookmark, into: list, at: place.index)
+        case .pinned(let profile):
+            guard bookmarkLists.insert(.bookmark(bookmark), intoPinnedOf: profile, at: place) else {
+                log.notice("not adding a bookmark to \(list, privacy: .public) at \(place, privacy: .public): no such folder there")
+                return false
+            }
+        }
         log.notice("added a bookmark to \(list, privacy: .public), which has \(self.bookmarkLists.items(in: list).count) now")
         scheduleSave()
+        return true
     }
 
     /// Takes a favorite or pinned item out of its list. Its tabs stay open, back under Tabs.
@@ -2201,6 +2227,150 @@ final class TabStore {
         scheduleSave()
     }
 
+    // MARK: - Folders in Pinned (#76)
+
+    /// A Pinned list's tree of pinned items and folders. Empty for a Favorites list, which has no folders.
+    func pinnedTree(in list: BookmarkList) -> [PinnedNode] {
+        guard case .pinned(let profile) = list else { return [] }
+        return bookmarkLists.pinnedTree(of: profile)
+    }
+
+    func folder(_ id: UUID) -> PinnedFolder? {
+        bookmarkLists.folder(id)?.folder
+    }
+
+    /// Where "New Folder" puts the folder: at the end of the top level (from Pinned's header or blank space), just
+    /// below a pinned item or folder at its level (from its row), or at the top inside a folder (from the folder's).
+    enum NewFolderSpot {
+        case end
+        case below(UUID)
+        case inside(UUID)
+    }
+
+    /// "New Folder" in a Pinned list's menus. The folder starts empty and open, is named "New Folder", and goes
+    /// straight into rename. The folders it's in open, so it's in view.
+    func newFolder(in list: BookmarkList, _ spot: NewFolderSpot) {
+        guard case .pinned(let profile) = list else { return }
+        let place: PinnedPlace
+        switch spot {
+        case .end:
+            place = .end(of: nil)
+        case .below(let id):
+            guard let (owner, at) = bookmarkLists.pinnedPlace(of: id), owner == profile else { return }
+            place = PinnedPlace(parent: at.parent, index: at.index + 1)
+        case .inside(let id):
+            guard bookmarkLists.pinnedPlace(of: id)?.profile == profile else { return }
+            place = PinnedPlace(parent: id, index: 0)
+        }
+        let folder = PinnedFolder(name: "New Folder", isOpen: true, children: [])
+        guard bookmarkLists.insert(.folder(folder), intoPinnedOf: profile, at: place) else { return }
+        for outer in bookmarkLists.pinnedTree(of: profile).ancestors(of: folder.id) {
+            bookmarkLists.updateFolder(outer) { $0.isOpen = true }
+        }
+        log.notice("added a folder to \(list, privacy: .public) at \(place, privacy: .public)")
+        scheduleSave()
+        beginRename(.folder(folder.id))
+    }
+
+    /// Opens or closes a folder. Saved, so it stays that way after a restart.
+    func setFolderOpen(_ id: UUID, _ isOpen: Bool) {
+        guard let folder = folder(id), folder.isOpen != isOpen else { return }
+        bookmarkLists.updateFolder(id) { $0.isOpen = isOpen }
+        scheduleSave()
+    }
+
+    /// A click on a folder's row.
+    func toggleFolder(_ id: UUID) {
+        guard let folder = folder(id) else { return }
+        setFolderOpen(id, !folder.isOpen)
+    }
+
+    /// The tabs of the pinned items inside a folder, at any depth, that are open in the window a page of the
+    /// sidebar shows (`SidebarPageWindow`).
+    func openTabs(inFolder id: UUID, inPage page: SidebarPageWindow?) -> [BrowserTab] {
+        guard let folder = folder(id) else { return [] }
+        return folder.children.flattenedBookmarks.compactMap { openTab(for: $0, inPage: page) }
+    }
+
+    /// A folder's Close Tabs: closes the open tabs of every pinned item inside it, at any depth, in the window the
+    /// sidebar shows.
+    func closeTabs(inFolder id: UUID) {
+        guard let selection = shownWindow, let folder = folder(id) else { return }
+        let tabs = folder.children.flattenedBookmarks.compactMap(openTab(for:))
+        guard !tabs.isEmpty else { return }
+        close(tabs, instance: selection.instance)
+    }
+
+    /// Asks whether to delete a folder that holds pinned items, in front of Safari, and answers on the main thread
+    /// (AppDelegate). The question says the bookmarks inside go too.
+    @ObservationIgnored var confirmFolderDeletion: ((_ answer: @escaping (Bool) -> Void) -> Void)?
+
+    /// The question `confirmFolderDeletion` asks, word for word (#76).
+    static let folderDeletionQuestion = "Deleting this folder will also delete all bookmarks inside. Are you sure?"
+
+    /// Delete Folder: removes the folder and everything in it. With a pinned item anywhere inside, only once that's
+    /// confirmed (`confirmFolderDeletion`); an empty folder, or one holding only empty folders, goes at once. The open
+    /// tabs of the items inside stay open, back under Tabs, as Remove from Pinned leaves them.
+    func deleteFolder(_ id: UUID) {
+        guard let folder = folder(id) else { return }
+        if folder.children.flattenedBookmarks.isEmpty {
+            removeFolder(id)
+            return
+        }
+        guard let confirmFolderDeletion else {
+            log.notice("not deleting a folder with bookmarks inside: there's no one to ask")
+            return
+        }
+        confirmFolderDeletion { [weak self] confirmed in
+            guard confirmed else { return }
+            self?.removeFolder(id)
+        }
+    }
+
+    private func removeFolder(_ id: UUID) {
+        guard let (_, profile) = bookmarkLists.folder(id), let removed = bookmarkLists.removeFolder(id) else { return }
+        changeBookmarkTabs { tabs in
+            for bookmark in removed {
+                tabs.forget(bookmark: bookmark.id)
+            }
+        }
+        switch renaming {
+        case .folder(let renamed)? where folder(renamed) == nil:
+            cancelRename()
+        case .bookmark(let renamed)? where bookmarkLists.bookmark(renamed) == nil:
+            cancelRename()
+        default:
+            break
+        }
+        log.notice("deleted a folder with \(removed.count) bookmarks from \(BookmarkList.pinned(profile), privacy: .public)")
+        scheduleSave()
+    }
+
+    /// A drop on Pinned (#76): a favorite, a pinned item or a folder moves to `place` in the profile's Pinned list
+    /// (given as it would be with it taken out). Never into another profile's list, or a folder into itself.
+    func moveToPinned(_ id: UUID, list: BookmarkList, in place: PinnedPlace) {
+        guard case .pinned(let profile) = list else { return }
+        let from = bookmarkLists.list(containing: id) ?? bookmarkLists.folder(id).map { .pinned($0.profile) }
+        guard let from else { return }
+        guard from.profile == profile else {
+            log.notice("not moving from \(from, privacy: .public) to \(list, privacy: .public): lists don't cross profiles")
+            return
+        }
+        guard bookmarkLists.movePinned(id, in: profile, to: place) else {
+            log.notice("not moving to \(place, privacy: .public) in \(list, privacy: .public): a folder can't go inside itself")
+            return
+        }
+        if from != list {
+            log.notice("moved a bookmark from \(from, privacy: .public) to \(list, privacy: .public)")
+            changeBookmarkTabs { tabs in
+                for snapshot in snapshots.values {
+                    tabs.unlinkTabs(in: snapshot) { bookmarkIds(shownIn: $0, instance: snapshot.instance) }
+                }
+            }
+        }
+        scheduleSave()
+    }
+
     /// An ordinary tab in the window on the bookmark's saved page: the one showing, or the first.
     private func tabOnSavedPage(of bookmark: Bookmark, in selection: WindowSelection) -> BrowserTab? {
         let page = bookmark.url.comparableURL
@@ -2265,7 +2435,12 @@ final class TabStore {
         /// favorites belonged to profiles, or by a version that didn't know the key.
         var favorites: [String: [Bookmark]]?
         /// Each profile's Pinned list, by `ProfileKey.rawValue`. Missing from files saved before it existed.
+        /// Since there are folders (#76) it holds every pinned item, at any depth, in display order, so Side Tabs
+        /// 1.3.3 still reads the file; it's only read when `pinnedTree` is missing.
         var pinned: [String: [Bookmark]]?
+        /// Each profile's Pinned tree, folders and all (#76). Missing from files saved before there were folders, or
+        /// by a version without them, which drops the key.
+        var pinnedTree: [String: [PinnedNode]]?
         var names: [SavedName]
         var orphanNames: [String: String]
         /// Which tabs belong to bookmarks, and the extension instances running when they were saved
@@ -2283,7 +2458,7 @@ final class TabStore {
         guard let data = try? Data(contentsOf: stateURL),
               let state = try? JSONDecoder().decode(SavedState.self, from: data) else { return }
         cleanup.restore(state.cleanup)
-        bookmarkLists = BookmarkLists(favorites: state.favorites, bookmarks: state.bookmarks, pinned: state.pinned ?? [:])
+        bookmarkLists = BookmarkLists(favorites: state.favorites, bookmarks: state.bookmarks, pinned: state.pinned ?? [:], pinnedTree: state.pinnedTree)
         orphanNames = state.orphanNames
         customNames = Dictionary(
             state.names.map { (TabKey(instance: $0.instance, tabId: $0.tabId), $0.name) },
@@ -2305,6 +2480,7 @@ final class TabStore {
             bookmarks: bookmarkLists.items(in: .favorites(.defaultProfile)),
             favorites: bookmarkLists.savedFavorites,
             pinned: bookmarkLists.savedPinned,
+            pinnedTree: bookmarkLists.savedPinnedTree,
             names: customNames.map { SavedName(instance: $0.key.instance, tabId: $0.key.tabId, name: $0.value) },
             orphanNames: orphanNames,
             bookmarkTabs: bookmarkTabs.saved,
