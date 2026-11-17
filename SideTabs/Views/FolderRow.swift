@@ -109,10 +109,13 @@ struct FolderMenu: View {
     }
 }
 
-/// "Empty", under an open folder with nothing in it. Dropping on it puts the item in the folder.
+/// "Empty", under an open folder with nothing in it. Dropping on it puts the item in the folder, and New Folder in its
+/// menu makes a folder inside it.
 struct EmptyFolderRow: View {
     let folder: UUID
     let depth: Int
+    let list: BookmarkList
+    @Environment(TabStore.self) private var store
     @Environment(SidebarDrag.self) private var drag
 
     var body: some View {
@@ -123,6 +126,11 @@ struct EmptyFolderRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: SidebarDrag.rowHeight)
             .background(FolderDropHighlight(isOn: drag.pinnedDrop == .into(folder)))
+            .contentShape(Rectangle())
+            // Its own menu rather than Pinned's: New Folder makes one inside this folder, as the folder's menu does.
+            .contextMenu {
+                Button("New Folder") { store.newFolder(in: list, .inside(folder)) }
+            }
             .accessibilityLabel("Empty folder")
     }
 }

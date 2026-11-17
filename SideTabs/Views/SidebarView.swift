@@ -391,7 +391,7 @@ private struct PinnedRowView: View {
         case .folder(let folder, let expanded, let openTabs):
             FolderRow(folder: folder, depth: row.depth, expanded: expanded, openTabs: openTabs, list: list)
         case .empty(let folder):
-            EmptyFolderRow(folder: folder, depth: row.depth)
+            EmptyFolderRow(folder: folder, depth: row.depth, list: list)
         }
     }
 }
