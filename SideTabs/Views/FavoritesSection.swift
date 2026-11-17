@@ -50,6 +50,10 @@ struct FavoritesSection: View {
         if case .favorites = drag.target { true } else { false }
     }
 
+    private var isFolderDrag: Bool {
+        if case .folder? = drag.item { true } else { false }
+    }
+
     /// The favorite being renamed: tiles have no room for the name, so it's edited in a row below.
     private var renamed: Bookmark? {
         guard case .bookmark(let id) = store.renaming else { return nil }
@@ -82,7 +86,8 @@ struct FavoritesSection: View {
                     FavoriteRenameRow(favorite: renamed)
                         .padding(.top, 6)
                 }
-            } else if drag.isActive {
+            } else if drag.isActive && !isFolderDrag {
+                // Not for a folder, which Favorites refuses (#76).
                 FavoritesDropArea(isTargeted: isDropTarget)
                     .frame(height: max(metrics.tile, TileGridMetrics.minimumTile))
                     .onSidebarFrame { drag.favoritesFrame = $0 }
@@ -93,7 +98,7 @@ struct FavoritesSection: View {
             width = newWidth
             drag.favoritesMetrics = TileGridMetrics(width: newWidth)
         }
-        .padding(.bottom, isEmpty && !drag.isActive ? 0 : 8)
+        .padding(.bottom, isEmpty && (!drag.isActive || isFolderDrag) ? 0 : 8)
     }
 }
 

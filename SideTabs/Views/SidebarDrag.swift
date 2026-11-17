@@ -15,29 +15,37 @@ final class SidebarDrag {
     static let rowHeight: CGFloat = 30
     static let rowSpacing: CGFloat = 1
     static var pitch: CGFloat { rowHeight + rowSpacing }
+    /// How long a closed folder has to be held over during a drag before it springs open (#76).
+    static let springDelay: TimeInterval = 0.7
 
     enum Item: Equatable {
         case tab(BrowserTab, instance: String)
         /// A favorite's tile.
         case favorite(Bookmark)
-        /// A row in the Pinned list the sidebar shows.
+        /// A row in the Pinned list the sidebar shows, at any depth (#76).
         case pinned(Bookmark)
+        /// A folder in the Pinned list the sidebar shows (#76). It's drawn collapsed while it's dragged.
+        case folder(PinnedFolder)
     }
 
-    /// Where the item would land: a slot index in one of the lists, or nowhere. `favorites` and `pinned`
-    /// are the lists the sidebar shows (`TabStore.currentFavoritesList` and `currentPinnedList`).
+    /// Where the item would land: a slot index in Tabs or Favorites, a place in Pinned (#76), or nowhere.
+    /// `favorites` and `pinned` are the lists the sidebar shows (`TabStore.currentFavoritesList` and
+    /// `currentPinnedList`).
     enum Target: Equatable {
         case none
         case tabs(Int)
         case favorites(Int)
-        case pinned(Int)
+        case pinned(PinnedDrop)
     }
 
     /// What the sections hold while the pointer moves, which bounds the slots.
     struct Counts {
         /// Both nil when there are no Favorites or Pinned sections (a private window).
         var favorites: Int?
-        var pinned: Int?
+        /// The Pinned list's tree of pinned items and folders (#76).
+        var pinned: [PinnedNode]?
+        /// The pinned item whose tab is the active one in the window shown: it stays in view under a collapsed folder.
+        var pinnedActive: UUID?
         var tabs: Int
         /// Whether Favorites and Pinned show (Settings). Without them every tab is in the Tabs list.
         var sectionsShown: Bool
@@ -48,6 +56,11 @@ final class SidebarDrag {
 
     private(set) var item: Item?
     private(set) var target: Target = .none
+    /// Where a link dragged in from a web page or Safari's address bar would land in Pinned, while one is over it.
+    private(set) var linkTarget: PinnedDrop?
+    /// Folders that sprang open during this drag, outermost first. They close again once the drag moves on from
+    /// them, and stay open if it ends in them (#76).
+    private(set) var springOpen: [UUID] = []
     /// Top left of the floating copy, in sidebar coordinates. A row's copy spans the width, so only
     /// its top moves.
     private(set) var ghostOrigin: CGPoint = .zero
@@ -58,6 +71,12 @@ final class SidebarDrag {
     @ObservationIgnored private var grab: CGPoint = .zero
     /// Whether Favorites and Pinned show, which decides whether their tabs are in the Tabs list.
     @ObservationIgnored private var sectionsVisible = true
+    /// What the last link over Pinned would have done, kept for a moment after it left, in case the drop is
+    /// reported after the link left the list.
+    @ObservationIgnored private var recentLink: (drop: PinnedDrop, sprung: [UUID], at: Date)?
+    /// The closed folder being held over, and the timer that springs it open.
+    @ObservationIgnored private var springCandidate: UUID?
+    @ObservationIgnored private var springWork: DispatchWorkItem?
 
     // Layout reported by the sections, in sidebar coordinates.
     /// The favorites' grid, or the drop area that stands in for it during a drag while there are none.
@@ -69,6 +88,41 @@ final class SidebarDrag {
     @ObservationIgnored var tabsSectionTop: CGFloat = .greatestFiniteMagnitude
 
     var isActive: Bool { item != nil }
+
+    /// Where whatever is over Pinned would land there: a dragged row, tile or tab, or a link.
+    var pinnedDrop: PinnedDrop? {
+        if item != nil {
+            if case .pinned(let drop) = target { return drop }
+            return nil
+        }
+        return linkTarget
+    }
+
+    /// The pinned item or folder being dragged.
+    var draggedNode: UUID? {
+        switch item {
+        case .pinned(let bookmark)?: bookmark.id
+        case .folder(let folder)?: folder.id
+        default: nil
+        }
+    }
+
+    /// The rows Pinned shows for `tree` during this drag: with the folders that sprang open, and the folder being
+    /// dragged drawn collapsed. With `hidingDragged`, what's dragged is left out, as where it would land is worked
+    /// out (see `PinnedOutline`).
+    func pinnedOutline(tree: [PinnedNode], active: UUID?, isOpen: (Bookmark) -> Bool = { _ in false }, hidingDragged: Bool) -> PinnedOutline {
+        let sprung = springOpen
+        var draggedFolder: UUID?
+        if case .folder(let folder)? = item { draggedFolder = folder.id }
+        return PinnedOutline(
+            tree: tree,
+            isExpanded: { $0.isOpen || sprung.contains($0.id) },
+            isOpen: isOpen,
+            active: active,
+            hiding: hidingDragged ? draggedNode : nil,
+            drawnCollapsed: draggedFolder
+        )
+    }
 
     /// The row being dragged is drawn as the open slot while it's over its own list.
     func isSlot(tab: BrowserTab) -> Bool {
@@ -85,8 +139,18 @@ final class SidebarDrag {
         return false
     }
 
-    func isSlot(pinned: Bookmark) -> Bool {
-        if case .pinned(let dragged)? = item, dragged.id == pinned.id, case .pinned = target {
+    /// The pinned item or folder being dragged is drawn as the open slot while it's over a slot in Pinned.
+    func isSlot(pinned id: UUID) -> Bool {
+        if draggedNode == id, case .pinned(.slot) = target {
+            return true
+        }
+        return false
+    }
+
+    /// The pinned item or folder being dragged takes no room while it's over a folder it would go into: it's
+    /// kept in the list, so its gesture carries on, but the folder's row highlights instead of a slot opening.
+    func isTucked(_ id: UUID) -> Bool {
+        if draggedNode == id, case .pinned(.into) = target {
             return true
         }
         return false
@@ -126,17 +190,20 @@ final class SidebarDrag {
         switch (item, region) {
         case (.tab, .tabs):
             newTarget = .tabs(slot(rowTop: rowTop, rowsTop: tabRowsTop, others: counts.tabs - 1))
-        case (.pinned, .pinned):
-            newTarget = .pinned(slot(rowTop: rowTop, rowsTop: pinnedRowsTop, others: (counts.pinned ?? 0) - 1))
-        case (.tab, .pinned), (.favorite, .pinned):
-            newTarget = .pinned(slot(rowTop: rowTop, rowsTop: pinnedRowsTop, others: counts.pinned ?? 0))
+        case (.favorite, .tabs), (.pinned, .tabs):
+            // Dropped there, it's unpinned and its tab lands in the slot (#75). None of the tabs listed is its own.
+            newTarget = counts.tabsListShown ? .tabs(slot(rowTop: rowTop, rowsTop: tabRowsTop, others: counts.tabs)) : .none
+        case (.folder, .tabs), (.folder, .favorites):
+            // Folders are only ever in Pinned (#76).
+            newTarget = .none
         case (.favorite, .favorites):
             newTarget = .favorites(gridSlot(at: pointer, others: (counts.favorites ?? 0) - 1))
         case (.tab, .favorites), (.pinned, .favorites):
             newTarget = .favorites(gridSlot(at: pointer, others: counts.favorites ?? 0))
-        case (.favorite, .tabs), (.pinned, .tabs):
-            // Dropped there, it's unpinned and its tab lands in the slot (#75). None of the tabs listed is its own.
-            newTarget = counts.tabsListShown ? .tabs(slot(rowTop: rowTop, rowsTop: tabRowsTop, others: counts.tabs)) : .none
+        case (_, .pinned):
+            // The middle of the floating row, among the rows without it.
+            let outline = pinnedOutline(tree: counts.pinned ?? [], active: counts.pinnedActive, hidingDragged: true)
+            newTarget = .pinned(outline.drop(atY: rowTop + Self.rowHeight / 2 - pinnedRowsTop, x: pointer.x, pitch: Self.pitch))
         }
 
         let asTile: Bool
@@ -152,6 +219,80 @@ final class SidebarDrag {
                 target = newTarget
             }
         }
+        updateSpring(tree: counts.pinned ?? [])
+    }
+
+    /// A link dragged in from outside the sidebar is over Pinned, at `location` in the section's coordinates.
+    func updateLink(at location: CGPoint, tree: [PinnedNode], active: UUID?) {
+        let outline = pinnedOutline(tree: tree, active: active, hidingDragged: false)
+        let drop = outline.drop(atY: location.y - (pinnedRowsTop - pinnedSectionTop), x: location.x, pitch: Self.pitch)
+        if drop != linkTarget {
+            withAnimation(.snappy(duration: 0.18)) {
+                linkTarget = drop
+            }
+        }
+        updateSpring(tree: tree)
+    }
+
+    /// The link left Pinned.
+    func endLink() {
+        if let linkTarget {
+            recentLink = (linkTarget, springOpen, Date())
+        }
+        guard linkTarget != nil || !springOpen.isEmpty else { return }
+        withAnimation(.snappy(duration: 0.18)) {
+            linkTarget = nil
+            springOpen = []
+        }
+        stopSpringTimer()
+    }
+
+    /// The link was dropped on Pinned: where it lands, and the folders that sprang open and are to stay open
+    /// because it lands in them. Ends the link's drag.
+    func takeLinkDrop() -> (drop: PinnedDrop?, sprung: [UUID]) {
+        var taken = (drop: linkTarget, sprung: springOpen)
+        if taken.drop == nil, let recentLink, Date().timeIntervalSince(recentLink.at) < 1 {
+            taken = (recentLink.drop, recentLink.sprung)
+        }
+        recentLink = nil
+        endLink()
+        recentLink = nil
+        return taken
+    }
+
+    /// Closed folders spring open while held over, and close again once the drag moves on from them (#76).
+    private func updateSpring(tree: [PinnedNode]) {
+        let drop = pinnedDrop
+        // The folders the drop is in, at any depth.
+        let containing = drop?.folder.map { Set(tree.ancestors(of: $0) + [$0]) } ?? []
+        let staying = springOpen.filter(containing.contains)
+        if staying != springOpen {
+            withAnimation(.snappy(duration: 0.18)) {
+                springOpen = staying
+            }
+        }
+        guard case .into(let folder)? = drop, let closed = tree.folder(folder), !closed.isOpen, !springOpen.contains(folder) else {
+            stopSpringTimer()
+            return
+        }
+        guard springCandidate != folder else { return }
+        stopSpringTimer()
+        springCandidate = folder
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, pinnedDrop == .into(folder) else { return }
+            springCandidate = nil
+            withAnimation(.snappy(duration: 0.18)) {
+                self.springOpen.append(folder)
+            }
+        }
+        springWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.springDelay, execute: work)
+    }
+
+    private func stopSpringTimer() {
+        springWork?.cancel()
+        springWork = nil
+        springCandidate = nil
     }
 
     /// The slot whose position the floating row overlaps most.
@@ -177,9 +318,13 @@ final class SidebarDrag {
                 if let list = store.currentFavoritesList {
                     store.moveBookmark(bookmark.id, to: list, at: index)
                 }
-            case (.favorite(let bookmark), .pinned(let index)), (.pinned(let bookmark), .pinned(let index)):
+            case (.favorite(let bookmark), .pinned(let drop)), (.pinned(let bookmark), .pinned(let drop)):
                 if let list = store.currentPinnedList {
-                    store.moveBookmark(bookmark.id, to: list, at: index)
+                    store.moveToPinned(bookmark.id, list: list, in: drop.place)
+                }
+            case (.folder(let folder), .pinned(let drop)):
+                if let list = store.currentPinnedList {
+                    store.moveToPinned(folder.id, list: list, in: drop.place)
                 }
             case (.tab(let tab, let instance), .tabs(let index)):
                 store.moveTab(tab, instance: instance, toListedSlot: index, bookmarksShown: sectionsVisible)
@@ -189,16 +334,24 @@ final class SidebarDrag {
                 if let list = store.currentFavoritesList {
                     store.addBookmark(from: tab, instance: instance, to: list, at: index)
                 }
-            case (.tab(let tab, let instance), .pinned(let index)):
+            case (.tab(let tab, let instance), .pinned(let drop)):
                 if let list = store.currentPinnedList {
-                    store.addBookmark(from: tab, instance: instance, to: list, at: index)
+                    store.addBookmark(from: tab, instance: instance, to: list, in: drop.place)
                 }
             default:
                 break
             }
+            // A folder that sprang open and was dropped into stays open. Only those are still open by now.
+            if case .pinned = target {
+                for folder in springOpen {
+                    store.setFolderOpen(folder, true)
+                }
+            }
             self.item = nil
             self.target = .none
+            springOpen = []
         }
+        stopSpringTimer()
     }
 
     /// Forgets a drag whose gesture was cancelled before it ended (SwiftUI doesn't call `onEnded`
@@ -208,15 +361,9 @@ final class SidebarDrag {
         withAnimation(.snappy(duration: 0.18)) {
             item = nil
             target = .none
+            springOpen = []
         }
-    }
-
-    /// Pinned slot for a link dropped from outside the sidebar at `y` (section coordinates).
-    func pinnedIndex(forDropAt y: CGFloat, count: Int) -> Int {
-        let rowsOffset = pinnedRowsTop - pinnedSectionTop
-        let position = ((y - rowsOffset) / Self.pitch).rounded(.down)
-        guard position.isFinite else { return count }
-        return min(max(Int(position), 0), count)
+        stopSpringTimer()
     }
 }
 
@@ -243,7 +390,13 @@ struct DragGhost: View {
             (tab.favIconUrl, tab.url, store.displayTitle(for: tab, instance: instance))
         case .favorite(let bookmark), .pinned(let bookmark):
             (bookmark.faviconURL, bookmark.url, bookmark.title)
+        case .folder(let folder):
+            (nil, nil, folder.name)
         }
+    }
+
+    private var isFolder: Bool {
+        if case .folder = item { true } else { false }
     }
 
     private var background: some View {
@@ -260,7 +413,12 @@ struct DragGhost: View {
                 .scaleEffect(1.04)
         } else {
             HStack(spacing: 8) {
-                FaviconView(iconURL: page.icon, pageURL: page.url)
+                if isFolder {
+                    // Drawn collapsed for the drag (#76).
+                    FolderIcon(isOpen: false)
+                } else {
+                    FaviconView(iconURL: page.icon, pageURL: page.url)
+                }
                 Text(page.title)
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -347,7 +505,10 @@ private struct SidebarRowGesture: ViewModifier {
         let selection = store.shownWindow
         return SidebarDrag.Counts(
             favorites: store.currentFavoritesList.map { store.bookmarks(in: $0).count },
-            pinned: store.currentPinnedList.map { store.bookmarks(in: $0).count },
+            pinned: store.currentPinnedList.map(store.pinnedTree(in:)),
+            pinnedActive: store.currentPinnedList.flatMap { list in
+                store.bookmarks(in: list).first { store.openTab(for: $0)?.active == true }?.id
+            },
             tabs: selection.map {
                 store.tabsListed(in: $0.window, instance: $0.instance, bookmarksShown: settings.showBookmarks).count
             } ?? 0,

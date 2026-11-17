@@ -1,8 +1,11 @@
 import SwiftUI
 
-/// A row in the Pinned list (#34): a pinned item, with #25's rules for its tab.
+/// A row in the Pinned list (#34): a pinned item, with #25's rules for its tab, at any depth in its folders (#76).
 struct BookmarkRow: View {
     let bookmark: Bookmark
+    /// How many levels it's indented (#76): how deep it is in folders, one deeper than its folder while that's
+    /// collapsed and it's shown under it, and the slot's level while it's dragged.
+    var depth = 0
 
     @Environment(TabStore.self) private var store
     @Environment(AppSettings.self) private var settings
@@ -20,7 +23,8 @@ struct BookmarkRow: View {
     @State private var closeFrame = CGRect.zero
 
     private var isRenaming: Bool { store.renaming == .bookmark(bookmark.id) }
-    private var isSlot: Bool { drag.isSlot(pinned: bookmark) }
+    private var isSlot: Bool { drag.isSlot(pinned: bookmark.id) }
+    private var isTucked: Bool { drag.isTucked(bookmark.id) }
 
     /// The first event of a press, with where it landed (sidebar coordinates). Says whether the
     /// row took it.
@@ -72,16 +76,17 @@ struct BookmarkRow: View {
             }
         }
         .font(.system(size: 13))
-        .padding(.leading, 8)
+        .padding(.leading, PinnedOutline.leading + CGFloat(depth) * PinnedOutline.indent)
         // The "−" lines up with the close buttons of the tab rows.
         .padding(.trailing, openTab != nil && !isRenaming ? 4 : 8)
         .frame(height: SidebarDrag.rowHeight)
         .background(RowBackground(isActive: openTab?.active == true, isHovering: hovering && !drag.isActive))
         .background(MouseTracking(onHover: { hovering = $0 }))
-        .opacity(isSlot ? 0 : 1)
+        .opacity(isSlot || isTucked ? 0 : 1)
         .overlay {
             if isSlot {
                 DropSlot()
+                    .padding(.leading, CGFloat(depth) * PinnedOutline.indent)
             }
         }
         .contentShape(Rectangle())
@@ -107,6 +112,7 @@ struct BookmarkRow: View {
         .help("\(bookmark.title)\n\(bookmark.url)")
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(openTab?.active == true ? [.isButton, .isSelected] : .isButton)
+        .tucked(isTucked)
     }
 }
 
@@ -128,7 +134,8 @@ struct BookmarkMenu: View {
         Divider()
         // Within the profile whose window the sidebar shows, the only one whose lists it shows.
         if isFavorite, let pinned = store.currentPinnedList {
-            Button("Move to Pinned") { store.moveBookmark(bookmark.id, to: pinned, at: store.bookmarks(in: pinned).count) }
+            // At the end of its top level (#76): an index past the end is the end.
+            Button("Move to Pinned") { store.moveBookmark(bookmark.id, to: pinned, at: .max) }
         } else if !isFavorite, let favorites = store.currentFavoritesList {
             Button("Move to Favorites") { store.moveBookmark(bookmark.id, to: favorites, at: store.bookmarks(in: favorites).count) }
         }
@@ -136,5 +143,10 @@ struct BookmarkMenu: View {
             Button("Close Tab") { store.closeBookmarkTab(bookmark.id) }
         }
         Button(isFavorite ? "Remove from Favorites" : "Remove from Pinned") { store.removeBookmark(bookmark) }
+        if !isFavorite, let list = store.bookmarkLists.list(containing: bookmark.id) {
+            Divider()
+            // Just below this row, at its level (#76).
+            Button("New Folder") { store.newFolder(in: list, .below(bookmark.id)) }
+        }
     }
 }
