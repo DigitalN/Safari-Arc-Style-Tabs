@@ -3318,6 +3318,8 @@ struct PinnedDragRun {
     static let rowHeight: CGFloat = 30
     let rows: PinnedOutline
     var spacer: Int?
+    /// Where the pointer holds the floating row, from its top (its middle unless said otherwise).
+    var grab: CGFloat = 15
     private(set) var drop: PinnedDrop?
     /// Every drop it changed to, in order.
     private(set) var drops: [PinnedDrop] = []
@@ -3331,9 +3333,9 @@ struct PinnedDragRun {
 
     @discardableResult
     mutating func move(top: CGFloat, x: CGFloat = 200) -> PinnedDrop {
-        let middle = top + Self.rowHeight / 2
-        let step = rows.dragStep(spacer: spacer, centerY: middle, x: x, pitch: Self.pitch)
-        let again = rows.dragStep(spacer: step.spacer, centerY: middle, x: x, pitch: Self.pitch)
+        let middle = top + Self.rowHeight / 2, pointer = top + grab
+        let step = rows.dragStep(spacer: spacer, centerY: middle, pointerY: pointer, x: x, pitch: Self.pitch)
+        let again = rows.dragStep(spacer: step.spacer, centerY: middle, pointerY: pointer, x: x, pitch: Self.pitch)
         if again.drop != step.drop || again.spacer != step.spacer { unsettled += 1 }
         spacer = step.spacer
         if step.drop != drop { drops.append(step.drop) }
@@ -3438,6 +3440,54 @@ do {
         }
     }
     check(settled, "every position settles in one step")
+}
+
+do {
+    // The pointer over a folder's row targets the folder, wherever it holds the floating row (#76 hand test).
+    let a = item("a"), b = item("b"), c = item("c")
+    let tree: [PinnedNode] = [.bookmark(a), .bookmark(b), folderNode("F", open: false, [.bookmark(item("x"))]), .bookmark(c)]
+    let f = id(tree, "F")
+    let pitch = PinnedDragRun.pitch
+    let rows = outline(tree) // a b F c, a tab coming in from Tabs
+    func target(pointer: CGFloat, grab: CGFloat, room: Int? = nil) -> PinnedDrop {
+        let top = pointer - grab
+        return rows.dragStep(spacer: room, centerY: top + PinnedDragRun.rowHeight / 2, pointerY: pointer, x: 200, pitch: pitch).drop
+    }
+    check(target(pointer: 2 * pitch + 18, grab: 2) == .into(f), "held near its top, with its middle on the next row, the pointer on the folder targets it")
+    check(target(pointer: 2 * pitch + 20, grab: 28) == .into(f), "held near its bottom, with its middle on the row before, too")
+    check(target(pointer: 2 * pitch + 10, grab: 2, room: 3) == .into(f) && target(pointer: 3 * pitch + 10, grab: 28, room: 2) == .into(f),
+          "and with the room open above or below the folder")
+    check(target(pointer: 2 * pitch + 3, grab: 15) == .slot(gap: 2, depth: 0, place: PinnedPlace(parent: nil, index: 2)),
+          "the top few points of the folder's row give the slot just above it")
+    check(target(pointer: 2 * pitch + 27, grab: 15) == .slot(gap: 3, depth: 0, place: PinnedPlace(parent: nil, index: 3)),
+          "the bottom few give the slot just below it")
+    check(target(pointer: 2 * pitch + 7, grab: 15) == .into(f) && target(pointer: 2 * pitch + 23, grab: 15) == .into(f),
+          "everything between is the folder")
+
+    // A point at a time across the folder, from above and below, held at its top, middle and bottom: the folder is
+    // reached every time, with no flip-flop.
+    for grab in [CGFloat(2), 15, 28] {
+        var down = PinnedDragRun(tree, dragging: a.id) // others: b F c
+        down.grab = grab
+        down.sweep(from: 0, to: 3 * pitch)
+        check(down.drops.contains(.into(f)) && down.unsettled == 0, "from above, held \(Int(grab)) pt from its top: into F, settled at every step")
+        check(Set(down.drops.map { slotGap($0) ?? -1 }).count == down.drops.count, "and nothing comes back once left (\(Int(grab)) pt)")
+        var up = PinnedDragRun(tree, dragging: c.id) // others: a b F
+        up.grab = grab
+        up.sweep(from: 3 * pitch, to: 0)
+        check(up.drops.contains(.into(f)) && up.unsettled == 0, "from below, held \(Int(grab)) pt from its top: into F, settled at every step")
+        check(Set(up.drops.map { slotGap($0) ?? -1 }).count == up.drops.count, "and nothing comes back once left (\(Int(grab)) pt, up)")
+        var tab = PinnedDragRun(tree)
+        tab.grab = grab
+        tab.sweep(from: -pitch, to: 4 * pitch)
+        check(tab.drops.contains(.into(f)) && tab.unsettled == 0, "a tab from Tabs, held \(Int(grab)) pt from its top, reaches F too")
+        var resting = PinnedDragRun(tree, dragging: a.id)
+        resting.grab = grab
+        resting.sweep(from: 0, to: 2 * pitch - grab + 15)
+        let room = resting.spacer
+        resting.move(top: 2 * pitch - grab + 15)
+        check(resting.drop == .into(f) && resting.spacer == room, "while it's over F the room stays where it was (\(Int(grab)) pt)")
+    }
 }
 
 do {

@@ -135,6 +135,8 @@ private struct SidebarPage: View {
                         .overlay(alignment: .topLeading) {
                             if let item = drag.item {
                                 DragGhost(item: item, tileSize: drag.ghostIsTile ? max(drag.favoritesMetrics.tile, 40) : nil)
+                                    // Over a folder it would go into, it fades so the folder's highlight shows (#76).
+                                    .opacity(drag.isOverFolder ? 0.5 : 1)
                                     .offset(x: drag.ghostOrigin.x, y: drag.ghostOrigin.y)
                                     .allowsHitTesting(false)
                             }

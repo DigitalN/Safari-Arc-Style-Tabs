@@ -106,6 +106,12 @@ final class SidebarDrag {
         return linkTarget
     }
 
+    /// Whether whatever is over Pinned would go into a folder: its floating copy fades, so the folder's highlight
+    /// shows through it.
+    var isOverFolder: Bool {
+        if case .into? = pinnedDrop { true } else { false }
+    }
+
     /// The pinned item or folder being dragged.
     var draggedNode: UUID? {
         switch item {
@@ -220,7 +226,10 @@ final class SidebarDrag {
                 // Arriving in Pinned: a pinned item or folder still takes up room where it was.
                 room = draggedNode.flatMap { pinnedOutline(tree: tree, active: counts.pinnedActive, hidingDragged: false).index(of: $0) }
             }
-            let step = outline.dragStep(spacer: room, centerY: rowTop + Self.rowHeight / 2 - pinnedRowsTop, x: pointer.x, pitch: Self.pitch)
+            let step = outline.dragStep(
+                spacer: room, centerY: rowTop + Self.rowHeight / 2 - pinnedRowsTop, pointerY: pointer.y - pinnedRowsTop,
+                x: pointer.x, pitch: Self.pitch
+            )
             newTarget = .pinned(step.drop)
             newSpacer = step.spacer
         }

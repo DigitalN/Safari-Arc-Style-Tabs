@@ -32,7 +32,8 @@ struct FolderRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            FolderIcon(isOpen: expanded)
+            // Open while something would be dropped into it, too.
+            FolderIcon(isOpen: expanded || isDropTarget, onAccent: isDropTarget)
 
             if isRenaming {
                 RenameField(target: .folder(folder.id), text: folder.name)
@@ -48,11 +49,12 @@ struct FolderRow: View {
                 // Where a pinned row's "−" sits. It does nothing on hover.
                 Text("\(openTabs)")
                     .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isDropTarget ? AnyShapeStyle(.white.opacity(0.85)) : AnyShapeStyle(.secondary))
                     .frame(minWidth: 20)
             }
         }
         .font(.system(size: 13))
+        .foregroundStyle(isDropTarget ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
         .padding(.leading, PinnedOutline.leading + CGFloat(depth) * PinnedOutline.indent)
         .padding(.trailing, showsCount ? 4 : 8)
         .frame(height: SidebarDrag.rowHeight)
@@ -116,7 +118,6 @@ struct EmptyFolderRow: View {
     let depth: Int
     let list: BookmarkList
     @Environment(TabStore.self) private var store
-    @Environment(SidebarDrag.self) private var drag
 
     var body: some View {
         Text("Empty")
@@ -125,7 +126,7 @@ struct EmptyFolderRow: View {
             .padding(.leading, PinnedOutline.leading + CGFloat(depth) * PinnedOutline.indent)
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: SidebarDrag.rowHeight)
-            .background(FolderDropHighlight(isOn: drag.pinnedDrop == .into(folder)))
+            // A drop here goes into the folder, whose row highlights.
             .contentShape(Rectangle())
             // Its own menu rather than Pinned's: New Folder makes one inside this folder, as the folder's menu does.
             .contextMenu {
@@ -135,14 +136,14 @@ struct EmptyFolderRow: View {
     }
 }
 
-/// The highlight of a folder something would be dropped into.
+/// The highlight of a folder something would be dropped into: filled with the accent color, as Finder highlights a
+/// folder a drop goes into, with the row's text and icon white over it, so it reads in light and dark.
 private struct FolderDropHighlight: View {
     let isOn: Bool
 
     var body: some View {
         RoundedRectangle(cornerRadius: 7, style: .continuous)
-            .fill(Color.accentColor.opacity(isOn ? 0.14 : 0))
-            .strokeBorder(Color.accentColor.opacity(isOn ? 0.7 : 0), lineWidth: 1.5)
+            .fill(Color.accentColor.opacity(isOn ? 1 : 0))
     }
 }
 
@@ -150,6 +151,8 @@ private struct FolderDropHighlight: View {
 /// the same style: its back with the tab, and the front flap tipped forward.
 struct FolderIcon: View {
     let isOpen: Bool
+    /// Drawn white, over a drop highlight.
+    var onAccent = false
 
     var body: some View {
         Group {
@@ -162,7 +165,7 @@ struct FolderIcon: View {
                     .font(.system(size: 13))
             }
         }
-        .foregroundStyle(.secondary)
+        .foregroundStyle(onAccent ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
         .frame(width: 16, height: 16)
         .accessibilityHidden(true)
     }
