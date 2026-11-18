@@ -66,6 +66,9 @@ final class SidebarDrag {
     /// pinned item or folder that hasn't reached a target in Pinned yet, it's where the item was. Nil while
     /// nothing has opened.
     private(set) var pinnedSpacer: Int?
+    /// Whether an empty Favorites list shows its drop area: only once the pointer has reached Pinned's header in this
+    /// drag (FavoritesReveal), so starting a drag doesn't push the rows down.
+    private(set) var favoritesReveal = FavoritesReveal()
     /// Top left of the floating copy, in sidebar coordinates. A row's copy spans the width, so only
     /// its top moves.
     private(set) var ghostOrigin: CGPoint = .zero
@@ -92,6 +95,8 @@ final class SidebarDrag {
     @ObservationIgnored var favoritesMetrics = TileGridMetrics(width: 0)
     @ObservationIgnored var pinnedRowsTop: CGFloat = 0
     @ObservationIgnored var pinnedSectionTop: CGFloat = 0
+    /// The bottom of Pinned's header, where an empty Favorites list's drop area appears once the pointer gets there.
+    @ObservationIgnored var pinnedHeaderBottom: CGFloat = -.greatestFiniteMagnitude
     @ObservationIgnored var tabRowsTop: CGFloat = 0
     @ObservationIgnored var tabsSectionTop: CGFloat = .greatestFiniteMagnitude
 
@@ -189,11 +194,26 @@ final class SidebarDrag {
         let tileOrigin = CGPoint(x: pointer.x - tileGrab.x, y: pointer.y - tileGrab.y)
 
         // Favorites are at the top, then Pinned, then Tabs. A private window has Tabs only.
+        // With no favorites, their drop area appears once the pointer reaches Pinned's header, and the pointer is over
+        // it from then on: it slides in under the pointer (until the layout reports where Pinned moved to).
+        var revealed = false
+        if counts.sectionsShown, counts.favorites != nil, counts.pinned != nil {
+            var folder = false
+            if case .folder = item { folder = true }
+            var reveal = favoritesReveal
+            revealed = reveal.pointerMoved(toY: pointer.y, headerBottom: pinnedHeaderBottom, hasFavorites: (counts.favorites ?? 0) > 0, draggingFolder: folder)
+            if revealed {
+                withAnimation(.snappy(duration: 0.18)) {
+                    favoritesReveal = reveal
+                }
+            }
+        }
+
         enum Region { case favorites, pinned, tabs }
         let region: Region
         if !counts.sectionsShown || counts.favorites == nil || counts.pinned == nil {
             region = .tabs
-        } else if pointer.y < pinnedSectionTop {
+        } else if revealed || pointer.y < pinnedSectionTop {
             region = .favorites
         } else if pointer.y < tabsSectionTop {
             region = .pinned
@@ -395,6 +415,7 @@ final class SidebarDrag {
             self.target = .none
             springOpen = []
             pinnedSpacer = nil
+            favoritesReveal.reset()
         }
         pinnedContext = nil
         stopSpringTimer()
@@ -409,6 +430,7 @@ final class SidebarDrag {
             target = .none
             springOpen = []
             pinnedSpacer = nil
+            favoritesReveal.reset()
         }
         pinnedContext = nil
         stopSpringTimer()

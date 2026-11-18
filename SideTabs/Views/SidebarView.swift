@@ -344,6 +344,7 @@ private struct PinnedSection: View {
                     store.addBookmarkForCurrentTab()
                 }
             }
+            .onSidebarFrame { drag.pinnedHeaderBottom = $0.maxY }
 
             VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
                 ForEach(slots) { slot in

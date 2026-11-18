@@ -20,7 +20,7 @@ node Tests/ExtensionChecks/background-checks.js
 echo "== TabStore"
 swiftc -o "$WORK/store-checks" \
     Tests/StoreChecks/main.swift SideTabs/TabStore.swift SideTabs/Models.swift SideTabs/TabBarMatcher.swift \
-    SideTabs/BookmarkTabs.swift Shared/Bridge.swift SideTabs/TabCleanup.swift \
+    SideTabs/BookmarkTabs.swift Shared/Bridge.swift SideTabs/TabCleanup.swift SideTabs/FavoritesReveal.swift \
     SideTabs/BookmarkLists.swift SideTabs/PinnedTree.swift SideTabs/ProfileKey.swift SideTabs/SwitchPreviewRules.swift SideTabs/CopySilence.swift \
     SideTabs/ExtensionCopyCheck.swift
 "$WORK/store-checks"

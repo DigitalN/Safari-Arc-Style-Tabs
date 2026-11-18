@@ -3781,6 +3781,38 @@ do {
     check(store.renaming == nil && store.folder(folder)?.name == "New Folder", "Escape keeps the old name")
 }
 
+// MARK: - An empty Favorites list's drop area appears only near the top (#76 hand test)
+
+do {
+    // Pinned's header ends 60 pt down; the drag starts on a row further down.
+    let header: CGFloat = 60
+    var reveal = FavoritesReveal()
+    check(!reveal.pointerMoved(toY: 140, headerBottom: header, hasFavorites: false, draggingFolder: false) && !reveal.isShown,
+          "starting a drag with no favorites leaves their drop area hidden, so nothing shifts")
+    for y in stride(from: CGFloat(140), through: 61, by: -1) {
+        reveal.pointerMoved(toY: y, headerBottom: header, hasFavorites: false, draggingFolder: false)
+    }
+    check(!reveal.isShown, "nor while the pointer is still below Pinned's header")
+    check(reveal.pointerMoved(toY: 59, headerBottom: header, hasFavorites: false, draggingFolder: false) && reveal.isShown,
+          "reaching the header shows it")
+    var changes = 0
+    for y in [CGFloat(61), 59, 60, 58, 200, 400] where reveal.pointerMoved(toY: y, headerBottom: header, hasFavorites: false, draggingFolder: false) {
+        changes += 1
+    }
+    check(reveal.isShown && changes == 0, "moving back down, or resting at the line, keeps it without another change")
+    reveal.reset()
+    check(!reveal.isShown, "the drag's end resets it")
+
+    var folder = FavoritesReveal()
+    for y in stride(from: CGFloat(140), through: -20, by: -1) {
+        folder.pointerMoved(toY: y, headerBottom: header, hasFavorites: false, draggingFolder: true)
+    }
+    check(!folder.isShown, "a folder being dragged never shows it")
+    var some = FavoritesReveal()
+    some.pointerMoved(toY: 10, headerBottom: header, hasFavorites: true, draggingFolder: false)
+    check(!some.isShown, "with favorites there's a grid already, and nothing changes")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {
