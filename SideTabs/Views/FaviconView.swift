@@ -7,19 +7,17 @@ struct FaviconView: View {
 
     @Environment(FaviconStore.self) private var favicons
 
-    private var candidates: [String] {
-        FaviconStore.candidates(iconURL: iconURL, pageURL: pageURL)
-    }
-
     private struct Load: Equatable {
         let candidates: [String]
         let generation: Int
     }
 
     var body: some View {
+        let candidates = FaviconStore.candidates(iconURL: iconURL, pageURL: pageURL)
         Group {
+            // Depends only on these candidates' icons, so another icon arriving doesn't update this view (#83).
             if let image = favicons.image(for: candidates) {
-                Image(nsImage: image)
+                Image(decorative: image, scale: 2)
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
@@ -34,7 +32,7 @@ struct FaviconView: View {
         }
         .frame(width: size, height: size)
         .task(id: Load(candidates: candidates, generation: favicons.generation)) {
-            await favicons.load(candidates)
+            await favicons.show(candidates)
         }
     }
 }
