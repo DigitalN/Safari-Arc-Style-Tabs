@@ -1,5 +1,11 @@
 import SwiftUI
 
+extension EnvironmentValues {
+    /// When each tab started loading, for its spinner (TabLoading). Set by SidebarView; without it, rows show no
+    /// spinner.
+    @Entry var tabLoading: TabLoading? = nil
+}
+
 struct TabRow: View {
     let tab: BrowserTab
     let instance: String
@@ -15,8 +21,20 @@ struct TabRow: View {
     /// the button is showing.
     @State private var muteFrame = CGRect.zero
     @State private var closeFrame = CGRect.zero
+    @Environment(\.tabLoading) private var tabLoading
+    @Environment(\.windowIsOnScreen) private var windowIsOnScreen
+    /// The spinner over the favicon: only for the first seconds of loading, and only while the sidebar is on
+    /// screen (#83). The dimmed favicon shows loading for as long as it lasts.
+    @State private var showsSpinner = false
 
     private var key: TabKey { TabKey(instance: instance, tabId: tab.id) }
+
+    /// What decides whether the spinner shows.
+    private struct SpinnerState: Equatable {
+        let loading: Bool
+        let url: String?
+        let onScreen: Bool
+    }
     private var isSlot: Bool { drag.isSlot(tab: tab) }
     private var isRenaming: Bool { store.renaming == .tab(key) }
     private var showsMute: Bool { tab.audible || tab.muted }
@@ -29,12 +47,24 @@ struct TabRow: View {
             ZStack {
                 FaviconView(iconURL: tab.favIconUrl, pageURL: tab.url)
                     .opacity(tab.loading ? 0.35 : 1)
-                if tab.loading {
+                if tab.loading && showsSpinner {
                     ProgressView()
                         .controlSize(.mini)
                 }
             }
             .frame(width: 16, height: 16)
+            .task(id: SpinnerState(loading: tab.loading, url: tab.url, onScreen: windowIsOnScreen)) {
+                let left = tabLoading?.spinnerTimeLeft(for: key, loading: tab.loading, url: tab.url)
+                guard windowIsOnScreen, let left else {
+                    showsSpinner = false
+                    return
+                }
+                showsSpinner = true
+                try? await Task.sleep(for: .seconds(left))
+                if !Task.isCancelled {
+                    showsSpinner = false
+                }
+            }
 
             if isRenaming {
                 RenameField(target: .tab(key), text: store.displayTitle(for: tab, instance: instance))
