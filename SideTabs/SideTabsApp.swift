@@ -97,6 +97,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             bridge.send(command)
         }
+        // Delete Folder on a folder with pinned items inside (#76). Asked from a menu, so only once it has closed.
+        store.confirmFolderDeletion = { [weak self] answer in
+            DispatchQueue.main.async {
+                answer(self?.confirmFolderDeletion() ?? false)
+            }
+        }
         store.onToggleSidebar = { [weak self] in self?.toggleSidebar() }
         store.onRenameStateChanged = { [weak self] editing in self?.dock?.setEditing(editing) }
         store.onOpenAddressBar = { [weak self] in self?.dock?.openSafariAddressBar() }
@@ -265,6 +271,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             settingsWindow = makeWindow(title: "Side Tabs Settings", content: SettingsView(updater: updater).environment(settings))
         }
         present(settingsWindow)
+    }
+
+    /// Asks whether to delete a folder that holds pinned items (#76), with No as the default (Return or Escape).
+    /// The sidebar is ordered behind Safari's window, so a sheet on it would be hidden: the question comes up in
+    /// front of Safari, as Settings does, and Safari comes back in front once it's answered.
+    private func confirmFolderDeletion() -> Bool {
+        presentingOwnWindow = true
+        defer {
+            presentingOwnWindow = false
+            dock?.bringSafariForward()
+        }
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = TabStore.folderDeletionQuestion
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "No").keyEquivalent = "\r"
+        alert.addButton(withTitle: "Yes").keyEquivalent = ""
+        // In front of Safari even if macOS doesn't let Side Tabs come forward.
+        alert.window.level = .modalPanel
+        let escape = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.keyCode == 53, NSApp.modalWindow === alert.window else { return event }
+            NSApp.stopModal(withCode: .alertFirstButtonReturn)
+            return nil
+        }
+        defer {
+            if let escape { NSEvent.removeMonitor(escape) }
+        }
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     private func makeWindow<Content: View>(title: String, content: Content) -> NSWindow {

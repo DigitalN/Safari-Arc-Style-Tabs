@@ -94,30 +94,40 @@ struct SidebarIconButton: View {
     }
 }
 
-/// Inline text field used to rename tabs and bookmarks.
+/// Inline text field used to rename tabs, bookmarks and folders. Return keeps what's typed, Escape the old name. So
+/// does a click anywhere outside the field, which DockController watches for while a rename is open, using what the
+/// field tells the store (`TabStore.renameFieldChanged`).
 struct RenameField: View {
+    /// What's being renamed: the store only takes this field's word for that rename, not a later one.
+    let target: RenameTarget
     @State var text: String
-    let onCommit: (String) -> Void
-    let onCancel: () -> Void
+    @Environment(TabStore.self) private var store
     @FocusState private var focused: Bool
 
     var body: some View {
         TextField("Name", text: $text)
             .textFieldStyle(.plain)
             .focused($focused)
-            .onSubmit { onCommit(text) }
-            .onExitCommand { onCancel() }
+            .onSubmit { store.commitRename(text, how: .returnKey, of: target) }
+            .onExitCommand { store.cancelRename(how: .escape, of: target) }
             .onAppear {
+                store.renameFieldChanged(target, text: text)
                 DispatchQueue.main.async { focused = true }
+            }
+            .onChange(of: text) { _, text in
+                store.renameFieldChanged(target, text: text)
+            }
+            .onWindowFrame { frame in
+                store.renameFieldChanged(target, frame: frame)
             }
             .onChange(of: focused) { _, isFocused in
                 if !isFocused {
-                    onCommit(text)
+                    store.commitRename(text, how: .lostFocus, of: target)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { note in
                 if note.object is SidebarPanel {
-                    onCommit(text)
+                    store.commitRename(text, how: .resignKey, of: target)
                 }
             }
     }

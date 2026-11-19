@@ -30,7 +30,10 @@ Apple, so Apple hasn't checked it; all of its code is on this page.
   switch profiles.
 - **Favorites and Pinned**: your sites as tiles at the top, and a Pinned list below, for
   each profile. An opened one keeps its tab; − closes it, back to the saved page.
-- **Drag to reorder** tabs, favorites and pinned sites. Drag a tab up to keep it.
+- **Folders**: right-click in Pinned and choose New Folder, then drag sites in. Folders can
+  hold folders.
+- **Drag to reorder** tabs, favorites and pinned sites. Drag a tab up to keep it, or a
+  pinned site down to Tabs to unpin it with its tab still open.
 - **Rename tabs**: double-click a tab to give it your own name.
 - **Address bar**: shows the current site. Click it to type a new address or search.
 - **Stays out of the way**: follows Safari's window and makes room for itself, or stays

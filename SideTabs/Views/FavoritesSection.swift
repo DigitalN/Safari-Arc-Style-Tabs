@@ -50,6 +50,12 @@ struct FavoritesSection: View {
         if case .favorites = drag.target { true } else { false }
     }
 
+    /// With no favorites, the drop area shows during a drag once the pointer has reached Pinned's header
+    /// (FavoritesReveal), so a drag starting doesn't push everything down.
+    private var showsDropArea: Bool {
+        drag.isActive && drag.favoritesReveal.isShown
+    }
+
     /// The favorite being renamed: tiles have no room for the name, so it's edited in a row below.
     private var renamed: Bookmark? {
         guard case .bookmark(let id) = store.renaming else { return nil }
@@ -82,7 +88,8 @@ struct FavoritesSection: View {
                     FavoriteRenameRow(favorite: renamed)
                         .padding(.top, 6)
                 }
-            } else if drag.isActive {
+            } else if showsDropArea {
+                // Only once the pointer heads for the top, and never for a folder, which Favorites refuses (#76).
                 FavoritesDropArea(isTargeted: isDropTarget)
                     .frame(height: max(metrics.tile, TileGridMetrics.minimumTile))
                     .onSidebarFrame { drag.favoritesFrame = $0 }
@@ -93,7 +100,7 @@ struct FavoritesSection: View {
             width = newWidth
             drag.favoritesMetrics = TileGridMetrics(width: newWidth)
         }
-        .padding(.bottom, isEmpty && !drag.isActive ? 0 : 8)
+        .padding(.bottom, isEmpty && !showsDropArea ? 0 : 8)
     }
 }
 
@@ -244,7 +251,7 @@ private struct FavoriteRenameRow: View {
     var body: some View {
         HStack(spacing: 8) {
             FaviconView(iconURL: favorite.faviconURL, pageURL: favorite.url)
-            RenameField(text: favorite.title, onCommit: store.commitRename, onCancel: store.cancelRename)
+            RenameField(target: .bookmark(favorite.id), text: favorite.title)
         }
         .font(.system(size: 13))
         .padding(.horizontal, 8)

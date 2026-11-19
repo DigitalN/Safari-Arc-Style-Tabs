@@ -37,11 +37,7 @@ struct TabRow: View {
             .frame(width: 16, height: 16)
 
             if isRenaming {
-                RenameField(
-                    text: store.displayTitle(for: tab, instance: instance),
-                    onCommit: store.commitRename,
-                    onCancel: store.cancelRename
-                )
+                RenameField(target: .tab(key), text: store.displayTitle(for: tab, instance: instance))
             } else {
                 Text(store.displayTitle(for: tab, instance: instance))
                     .lineLimit(1)

@@ -135,6 +135,8 @@ private struct SidebarPage: View {
                         .overlay(alignment: .topLeading) {
                             if let item = drag.item {
                                 DragGhost(item: item, tileSize: drag.ghostIsTile ? max(drag.favoritesMetrics.tile, 40) : nil)
+                                    // Over a folder it would go into, it fades so the folder's highlight shows (#76).
+                                    .opacity(drag.isOverFolder ? 0.5 : 1)
                                     .offset(x: drag.ghostOrigin.x, y: drag.ghostOrigin.y)
                                     .allowsHitTesting(false)
                             }
@@ -267,67 +269,100 @@ private struct TabsPlaceholder: View {
     }
 }
 
-/// The Pinned list of the profile whose window the sidebar shows (#34). It starts out empty, and then
-/// says how to pin something, so there's a place to drop tabs.
+/// The Pinned list of the profile whose window the sidebar shows (#34), with its folders (#76). It starts out empty,
+/// and then says how to pin something, so there's a place to drop tabs.
 private struct PinnedSection: View {
     let list: BookmarkList
     @Environment(TabStore.self) private var store
     @Environment(SidebarDrag.self) private var drag
+    @Environment(\.sidebarPageWindow) private var pageWindow
 
     private enum Slot: Identifiable {
-        case pinned(Bookmark)
-        case dropSlot
+        case row(PinnedOutline.Row)
+        /// The open slot for a tab, a favorite's tile or a link, at its level.
+        case dropSlot(depth: Int)
+        /// The room the slot was in, kept open but empty while a folder is the target, so the rows don't move.
+        case room
 
         var id: String {
             switch self {
-            case .pinned(let item): item.id.uuidString
-            case .dropSlot: "drop-slot"
+            case .row(let row): row.id
+            // One id for both, so the slot fades into the empty room and back.
+            case .dropSlot, .room: "drop-slot"
             }
         }
     }
 
-    /// Pinned items in display order. While one is dragged over the list it moves to the target
-    /// slot (and draws itself as the slot); a dragged tab or favorite gets a separate slot.
+    private var tree: [PinnedNode] { store.pinnedTree(in: list) }
+
+    /// The pinned item whose tab is the active one in the window this page shows.
+    private var active: UUID? {
+        store.bookmarks(in: list).first { store.openTab(for: $0, inPage: pageWindow)?.active == true }?.id
+    }
+
+    /// The rows in display order (see PinnedOutline), laid out as the drag works them out: without what's dragged,
+    /// with its room open at `SidebarDrag.pinnedSpacer`. A pinned item or folder dragged over a slot moves there and
+    /// draws itself as the slot; over a folder it would go into, it stays in that room without being drawn. A
+    /// dragged tab, tile or link gets a separate slot, or an empty room.
     private var slots: [Slot] {
-        var items = store.bookmarks(in: list)
-        switch (drag.item, drag.target) {
-        case (.pinned(let dragged)?, .pinned(let index)):
-            if let from = items.firstIndex(where: { $0.id == dragged.id }) {
-                let moved = items.remove(at: from)
-                items.insert(moved, at: min(index, items.count))
+        let tree = tree
+        let active = active
+        let isOpen = { (bookmark: Bookmark) in store.openTab(for: bookmark, inPage: pageWindow) != nil }
+        let shown = drag.pinnedOutline(tree: tree, active: active, isOpen: isOpen, hidingDragged: false)
+        let drop = drag.pinnedDrop
+        let room = drag.pinnedSpacer
+        guard let dragged = drag.draggedNode, let drop else {
+            var slots = shown.rows.map(Slot.row)
+            switch drop {
+            case .slot(let gap, let depth, _)?:
+                slots.insert(.dropSlot(depth: depth), at: min(gap, slots.count))
+            case .into?:
+                if let room {
+                    slots.insert(.room, at: min(room, slots.count))
+                }
+            case nil:
+                break
             }
-            return items.map(Slot.pinned)
-        case (.tab?, .pinned(let index)), (.favorite?, .pinned(let index)):
-            var slots = items.map(Slot.pinned)
-            slots.insert(.dropSlot, at: min(index, slots.count))
             return slots
-        default:
-            return items.map(Slot.pinned)
         }
+        let others = drag.pinnedOutline(tree: tree, active: active, isOpen: isOpen, hidingDragged: true)
+        var slots = others.rows.map(Slot.row)
+        guard let row = shown.rows.first(where: { $0.kind.node == dragged }) else { return slots }
+        switch drop {
+        case .slot(let gap, let depth, _):
+            slots.insert(.row(PinnedOutline.Row(kind: row.kind, depth: depth, steps: row.steps)), at: min(gap, slots.count))
+        case .into:
+            slots.insert(.row(row), at: min(room ?? slots.count, slots.count))
+        }
+        return slots
     }
 
     var body: some View {
-        let isEmpty = store.bookmarks(in: list).isEmpty
         VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
             SectionHeader(title: "Pinned") {
                 SidebarIconButton(systemImage: "plus", help: "Pin Current Tab") {
                     store.addBookmarkForCurrentTab()
                 }
             }
+            .onSidebarFrame { drag.pinnedHeaderBottom = $0.maxY }
 
             VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
                 ForEach(slots) { slot in
                     switch slot {
-                    case .pinned(let item):
-                        BookmarkRow(bookmark: item)
-                    case .dropSlot:
+                    case .row(let row):
+                        PinnedRowView(row: row, list: list)
+                    case .dropSlot(let depth):
                         DropSlot()
+                            .padding(.leading, CGFloat(depth) * PinnedOutline.indent)
+                    case .room:
+                        Color.clear
+                            .frame(height: SidebarDrag.rowHeight)
                     }
                 }
             }
             .onSidebarTop { drag.pinnedRowsTop = $0 }
 
-            if isEmpty && drag.target == .none {
+            if tree.isEmpty && drag.target == .none && drag.linkTarget == nil {
                 Text("Drag a tab here, or click + to pin the current page.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
@@ -338,12 +373,67 @@ private struct PinnedSection: View {
         }
         .contentShape(Rectangle())
         .onSidebarTop { drag.pinnedSectionTop = $0 }
+        // On the header or blank space: a folder at the end of the top level. Rows have menus of their own (#76).
+        .contextMenu {
+            Button("New Folder") { store.newFolder(in: list, .end) }
+        }
         // Links dragged in from a web page or Safari's address bar.
-        .onDrop(of: [.url], isTargeted: nil) { providers, location in
-            let index = drag.pinnedIndex(forDropAt: location.y, count: store.bookmarks(in: list).count)
-            return loadDroppedURL(from: providers) { url in
-                store.addBookmark(url: url, to: list, at: index)
-            }
+        .onDrop(of: [.url], delegate: PinnedLinkDrop(list: list, tree: tree, active: active, store: store, drag: drag))
+    }
+}
+
+/// One row of Pinned: a pinned item, a folder, or "Empty" under an open folder (#76).
+private struct PinnedRowView: View {
+    let row: PinnedOutline.Row
+    let list: BookmarkList
+
+    var body: some View {
+        switch row.kind {
+        case .bookmark(let bookmark), .activeUnder(let bookmark, _):
+            BookmarkRow(bookmark: bookmark, depth: row.depth)
+        case .folder(let folder, let expanded, let openTabs):
+            FolderRow(folder: folder, depth: row.depth, expanded: expanded, openTabs: openTabs, list: list)
+        case .empty(let folder):
+            EmptyFolderRow(folder: folder, depth: row.depth, list: list)
+        }
+    }
+}
+
+/// A link dragged over Pinned from a web page or Safari's address bar: it lands where a dragged row would, the
+/// slot or folder showing while it's over the list, and closed folders spring open under it (#76).
+private struct PinnedLinkDrop: DropDelegate {
+    let list: BookmarkList
+    let tree: [PinnedNode]
+    let active: UUID?
+    let store: TabStore
+    let drag: SidebarDrag
+
+    func validateDrop(info: DropInfo) -> Bool {
+        !drag.isActive && info.hasItemsConforming(to: [.url])
+    }
+
+    func dropEntered(info: DropInfo) {
+        drag.updateLink(at: info.location, tree: tree, active: active)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        drag.updateLink(at: info.location, tree: tree, active: active)
+        return DropProposal(operation: .copy)
+    }
+
+    func dropExited(info: DropInfo) {
+        drag.endLink()
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let (drop, sprung) = drag.takeLinkDrop()
+        let place = drop?.place ?? .end(of: nil)
+        // The folders that sprang open and are still open are those it's dropped in: they stay open.
+        for folder in sprung {
+            store.setFolderOpen(folder, true)
+        }
+        return loadDroppedURL(from: info.itemProviders(for: [.url])) { [store, list] url in
+            store.addBookmark(url: url, to: list, in: place)
         }
     }
 }
@@ -360,15 +450,36 @@ private struct TabsSection: View {
         store.tabsListed(in: selection.window, instance: selection.instance, bookmarksShown: settings.showBookmarks)
     }
 
-    /// Tabs in display order; a tab dragged within the list moves to the target slot.
-    private var tabs: [BrowserTab] {
-        var tabs = listed
-        if case .tab(let dragged, _)? = drag.item, case .tabs(let index) = drag.target,
-           let from = tabs.firstIndex(where: { $0.id == dragged.id }) {
-            let moved = tabs.remove(at: from)
-            tabs.insert(moved, at: min(index, tabs.count))
+    private enum Slot: Identifiable {
+        case tab(BrowserTab)
+        case dropSlot
+
+        var id: String {
+            switch self {
+            case .tab(let tab): "tab-\(tab.id)"
+            case .dropSlot: "drop-slot"
+            }
         }
-        return tabs
+    }
+
+    /// Tabs in display order. A tab dragged within the list moves to the target slot (and draws itself as the
+    /// slot); a favorite or pinned item dragged here to be unpinned gets a slot of its own (#75).
+    private var slots: [Slot] {
+        var tabs = listed
+        switch (drag.item, drag.target) {
+        case (.tab(let dragged, _)?, .tabs(let index)):
+            if let from = tabs.firstIndex(where: { $0.id == dragged.id }) {
+                let moved = tabs.remove(at: from)
+                tabs.insert(moved, at: min(index, tabs.count))
+            }
+            return tabs.map(Slot.tab)
+        case (.favorite?, .tabs(let index)), (.pinned?, .tabs(let index)):
+            var slots = tabs.map(Slot.tab)
+            slots.insert(.dropSlot, at: min(index, slots.count))
+            return slots
+        default:
+            return tabs.map(Slot.tab)
+        }
     }
 
     var body: some View {
@@ -380,8 +491,13 @@ private struct TabsSection: View {
             }
 
             VStack(alignment: .leading, spacing: SidebarDrag.rowSpacing) {
-                ForEach(tabs) { tab in
-                    TabRow(tab: tab, instance: selection.instance)
+                ForEach(slots) { slot in
+                    switch slot {
+                    case .tab(let tab):
+                        TabRow(tab: tab, instance: selection.instance)
+                    case .dropSlot:
+                        DropSlot()
+                    }
                 }
             }
             .onSidebarTop { drag.tabRowsTop = $0 }

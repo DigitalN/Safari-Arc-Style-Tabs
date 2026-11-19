@@ -536,9 +536,52 @@ final class DockController {
         isEditing = editing
         if editing {
             panel.makeKey()
+            watchClicksWhileRenaming()
         } else {
+            stopWatchingClicks()
             tracker.focusSafari()
         }
+    }
+
+    /// While a rename is open, a mouse-down anywhere outside its field ends it, keeping what's typed (#76 hand test):
+    /// another row, blank space, the bottom bar, Safari's window or another app, with any button. The sidebar stays
+    /// key while Safari is raised by a click, so nothing else would end it. The click goes on to do what it does.
+    private var renameClickMonitors: [Any] = []
+
+    private func watchClicksWhileRenaming() {
+        guard renameClickMonitors.isEmpty else { return }
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let local = NSEvent.addLocalMonitorForEvents(matching: clicks, handler: { [weak self] event in
+            self?.renameMouseDown(event)
+            return event
+        }) {
+            renameClickMonitors.append(local)
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: clicks, handler: { [weak self] _ in
+            self?.store.renameClick(at: nil)
+        }) {
+            renameClickMonitors.append(global)
+        }
+    }
+
+    private func stopWatchingClicks() {
+        let monitors = renameClickMonitors
+        renameClickMonitors = []
+        // Not from inside a monitor's own handler, which is where a rename usually ends.
+        DispatchQueue.main.async {
+            monitors.forEach(NSEvent.removeMonitor)
+        }
+    }
+
+    /// A mouse-down in one of Side Tabs' own windows while renaming: in the sidebar, where it landed in the
+    /// coordinates the rename field reports its frame in (SwiftUI's `.global`: top left origin).
+    private func renameMouseDown(_ event: NSEvent) {
+        guard event.window === panel, let view = panel.contentView else {
+            store.renameClick(at: nil)
+            return
+        }
+        let local = view.convert(event.locationInWindow, from: nil)
+        store.renameClick(at: CGPoint(x: local.x, y: view.isFlipped ? local.y : view.bounds.height - local.y))
     }
 
     func openSafariAddressBar() {
