@@ -436,8 +436,9 @@ function noteLateReply(message, milliseconds) {
 //
 // While Safari is held back (the Mac asleep, the screen locked and the like) the app doesn't count silence,
 // and asks the copies to stop heartbeating (`pauseHeartbeats`). Commands can be lost, so a pause never lasts
-// past the time the app gave (and never more than PAUSE_LIMIT_MS), and any other command from the app ends
-// it: the one the app sends when the hold ends (`resumeHeartbeats`), its request for a snapshot, anything.
+// past the time the app gave, by the clock (`until`) or from when it came (`ms`), whichever is sooner, nor
+// more than PAUSE_LIMIT_MS. Any other command from the app ends it: the one the app sends when the hold
+// ends (`resumeHeartbeats`), its request for a snapshot, anything.
 
 const PAUSE_LIMIT_MS = 5 * 60 * 1000;
 
@@ -481,10 +482,12 @@ function sendHeartbeat() {
     postToApp({ type: "heartbeat", instance, seq: sentSeq });
 }
 
-// The app asked for no heartbeats until `until` (Date.now() time), because it doesn't count silence now.
-function pauseHeartbeats(until) {
+// The app asked for no heartbeats until `until` (Date.now() time) and for at most `ms`, because it doesn't
+// count silence now.
+function pauseHeartbeats(until, ms) {
     const now = Date.now();
-    pausedUntil = Math.min(Number(until) || 0, now + PAUSE_LIMIT_MS);
+    const length = Math.min(Number.isFinite(ms) ? ms : PAUSE_LIMIT_MS, PAUSE_LIMIT_MS);
+    pausedUntil = Math.min(Number.isFinite(until) ? until : now + length, now + length);
     if (pausedUntil <= now) pausedUntil = 0;
     scheduleHeartbeat();
 }
@@ -536,7 +539,7 @@ async function runCommand(command, via = "unknown") {
     if (command.instance && command.instance !== instance) return;
     if (isRepeat(command, via)) return;
     if (command.action === "pauseHeartbeats") {
-        pauseHeartbeats(command.until);
+        pauseHeartbeats(command.until, command.ms);
         return;
     }
     resumeHeartbeats();

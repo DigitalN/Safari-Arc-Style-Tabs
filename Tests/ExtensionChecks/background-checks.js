@@ -133,7 +133,8 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
     const states = () => sent.filter((entry) => isState(entry.message)).map((entry) => entry.message);
     // Carries out a command from the app, as the port or a reply would deliver it.
     const run = (command) => context.runCommand({ instance: "test-instance", ...command });
-    const heartbeat = () => context.sendHeartbeat();
+    // (A background.js older than #80 sends them from a 5 s setInterval instead.)
+    const heartbeat = () => (context.sendHeartbeat ? context.sendHeartbeat() : intervals.filter((entry) => entry.ms === 5000).forEach((entry) => entry.fn()));
     // Reads one of background.js's top-level variables.
     const state = (name) => vm.runInContext(name, context);
     // How many times Safari was asked for every tab.
@@ -428,7 +429,7 @@ async function settled(page) {
         await sleep(LIMIT / 2);
         check(page.ofType("hello").length === 1, "the hello was sent");
         check(page.states().length >= 1, "the first snapshot doesn't wait for the hello's reply");
-        check(page.state("heartbeatTimer") !== null, "heartbeats are started without waiting for it either");
+        check(page.state("typeof heartbeatTimer") === "undefined" ? page.intervals.length > 0 : page.state("heartbeatTimer") !== null, "heartbeats are started without waiting for it either");
         page.heartbeat();
         check(page.ofType("heartbeat").length === 1, "and they go out");
         await sleep(LIMIT * 4);
@@ -444,7 +445,7 @@ async function settled(page) {
         const gaps = hellos.slice(1).map((at, i) => at - hellos[i]);
         check(gaps.every((gap, i) => i === 0 || gap > gaps[i - 1]), `further and further apart (gaps ${gaps.join(", ")} ms)`);
         check(page.states().length >= 3, "and snapshots keep being tried");
-        check(page.state("heartbeatTimer") !== null, "and heartbeats run");
+        check(page.state("typeof heartbeatTimer") === "undefined" ? page.intervals.length > 0 : page.state("heartbeatTimer") !== null, "and heartbeats run");
     }
 
     {
@@ -636,7 +637,7 @@ async function settled(page) {
         answerLate({ appRunning: true });
         // The snapshot after the switch was delivered at once, so the next heartbeat is an interval after it anyway.
         await page.advance(10000);
-        check(page.state("lastDeliveredAt") >= sentAt, "a reply that came after the time limit still counts as delivered");
+        check(page.state("typeof lastDeliveredAt") !== "undefined" && page.state("lastDeliveredAt") >= sentAt, "a reply that came after the time limit still counts as delivered");
     }
 
     {
@@ -692,6 +693,21 @@ async function settled(page) {
         page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 24 * 3600 * 1000, id: "L-1" });
         await page.advance(5 * 60 * 1000);
         check(heartbeatTimes(page, start)[0] === start + 5 * 60 * 1000, "a pause for a day ends after 5 min");
+
+        // The app says until when by the clock and for how long; whichever ends first ends the pause, so a
+        // clock set back, or a command that came late, doesn't make it longer than the app counts on.
+        const late = load({ manualTime: true, queryDelay: 0 });
+        await late.advance(1000);
+        const came = late.now();
+        late.ports[0].deliver({ action: "pauseHeartbeats", until: came + 600000, ms: 90000, id: "L-1" });
+        await late.advance(90000);
+        check(heartbeatTimes(late, came)[0] === came + 90000, "a pause ends after the time it was given for, though its clock time is later");
+        const early = load({ manualTime: true, queryDelay: 0 });
+        await early.advance(1000);
+        const at = early.now();
+        early.ports[0].deliver({ action: "pauseHeartbeats", until: at + 60000, ms: 90000, id: "L-1" });
+        await early.advance(60000);
+        check(heartbeatTimes(early, at)[0] === at + 60000, "and at its clock time, if that's sooner");
 
         const other = load({ manualTime: true, queryDelay: 0 });
         await other.advance(1000);
