@@ -52,6 +52,8 @@ struct WelcomeView: View {
     @State private var extensionEnabled = false
     @State private var askedForAccessibilityAt: Date?
     @State private var now = Date()
+    /// The window is kept when it closes, so the checks below go by whether it's open (#83).
+    @State private var windowIsOpen = false
 
     private var websiteAccess: Bool { store.hasData && !store.lacksWebsiteAccess }
 
@@ -116,8 +118,11 @@ struct WelcomeView: View {
                 onStepCompleted()
             }
         }
-        .task {
-            while !Task.isCancelled {
+        .onWindowVisibilityChange { windowIsOpen = $0.isOpen }
+        // Steps are done in System Settings and Safari, which say nothing, so they're checked every second while
+        // the window is open, even behind them, and not at all once it's closed.
+        .task(id: windowIsOpen) {
+            while windowIsOpen && !Task.isCancelled {
                 accessibility = Permissions.accessibilityGranted
                 extensionEnabled = await Permissions.extensionEnabled()
                 if accessibility && extensionEnabled && !settings.hasCompletedSetup {
@@ -432,6 +437,8 @@ private struct WindowBecameKey: NSViewRepresentable {
 private struct PermissionRow: View {
     @State private var accessibility = Permissions.accessibilityGranted
     @State private var extensionEnabled = false
+    /// The Settings window is kept when it closes, so the checks below go by whether it's open (#83).
+    @State private var windowIsOpen = false
 
     var body: some View {
         Group {
@@ -450,8 +457,9 @@ private struct PermissionRow: View {
                 }
             }
         }
-        .task {
-            while !Task.isCancelled {
+        .onWindowVisibilityChange { windowIsOpen = $0.isOpen }
+        .task(id: windowIsOpen) {
+            while windowIsOpen && !Task.isCancelled {
                 accessibility = Permissions.accessibilityGranted
                 extensionEnabled = await Permissions.extensionEnabled()
                 try? await Task.sleep(for: .seconds(2))
