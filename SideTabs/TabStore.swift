@@ -274,7 +274,7 @@ final class TabStore {
         cleanup.onChange = { [weak self] in self?.scheduleSave() }
         // Copies already running haven't spoken to this launch of Side Tabs yet (#45).
         noteChance(at: uptime())
-        scheduleQuietCheck()
+        scheduleCopyCheck()
     }
 
     // MARK: - Messages from the extension
@@ -747,6 +747,7 @@ final class TabStore {
             isConnected = false
             bridgeLog.notice("Safari quit; the extension no longer counts as connected")
         }
+        scheduleCopyCheck()
     }
 
     /// Asks the extension for a full snapshot: only copy `copy` (#47), or every copy when it's nil, which is
@@ -897,9 +898,11 @@ final class TabStore {
     //
     // - Quiet: nothing of any kind from it for `quietAfter`, while it could have spoken (#45, CopySilence):
     //   the Mac asleep, the screen locked and the like don't count, and when they end every copy starts
-    //   over. Its windows aren't shown. Its snapshot stays in `snapshots`, and with it its bookmarks' tabs
-    //   and cleanup's clocks, because under heavy load a copy that is running has gone that long without a
-    //   word. Anything it sends shows its windows again.
+    //   over. Nor does a pause in heartbeats the app asked for during one of them (#80). One timer looks at
+    //   the moment the first live copy could go quiet (`scheduleCopyCheck`). Its windows aren't shown. Its
+    //   snapshot stays in `snapshots`, and with it its bookmarks' tabs and cleanup's clocks, because under
+    //   heavy load a copy that is running has gone that long without a word. Anything it sends shows its
+    //   windows again.
     // - Gone: a newer copy of the same profile has reported (`replace`), or Safari quit
     //   (`safariDidTerminate`). Only then does its snapshot go, through the paths for an instance that's
     //   gone: its clocks are dropped and its bookmarks' tabs wait to be re-linked to the new copy's.
@@ -933,11 +936,9 @@ final class TabStore {
     }
 
     /// How long a copy can go without sending anything, while it could speak, before it counts as quiet and
-    /// its windows are hidden. It sends a heartbeat every 5 s, but under heavy load the extension has run up
-    /// to 20 s late (#16–#22).
+    /// its windows are hidden. It sends something at least every 10 s, but under heavy load the extension has
+    /// run up to 20 s late (#16–#22).
     static let quietAfter = CopySilence.allowance
-    /// How often copies are checked for having gone quiet, while there are any.
-    static let quietCheckInterval: TimeInterval = 5
 
     /// The copies of the extension that are running now: heard from within `quietAfter`, and not replaced by a
     /// newer copy of their profile. By instance id, as in `snapshots` and `TabKey`. Read-only.
@@ -988,9 +989,12 @@ final class TabStore {
     /// For a copy that replaced another: the replaced copy's window and tab ids, and the most of them it has
     /// reported so far (see `compareWithReplaced`).
     @ObservationIgnored private var replacedIds: [String: (since: TimeInterval, windows: Set<Int>, tabs: Set<Int>, most: Int)] = [:]
-    @ObservationIgnored private var quietCheckScheduled = false
-    /// A look at `copiesHaveHadTheirChance` for when they will have.
-    @ObservationIgnored private var chanceCheck: DispatchWorkItem?
+    /// The one timer for looking at the copies (`noteQuietCopies`), and when it's set for, on the awake clock:
+    /// the moment the first live copy could go quiet, the copies will all have had their chance, or, during a
+    /// hold, they're to be asked to stop heartbeating again. Nil when there's nothing to look at. Read by the
+    /// checks in Tests/.
+    @ObservationIgnored private var copyCheckTimer: DispatchSourceTimer?
+    @ObservationIgnored private(set) var nextCopyCheck: TimeInterval?
 
     /// Notes a message from a copy of the extension.
     ///
@@ -1000,6 +1004,8 @@ final class TabStore {
     /// after all (a second Safari, say); it's taken back, without replacing anything in turn.
     private func hear(from object: [String: Any]) -> Sender {
         guard let instance = object["instance"] as? String else { return .live }
+        // The moment this copy could go quiet has moved.
+        defer { scheduleCopyCheck() }
         let now = uptime()
         let profile = object["profile"] as? String
         if let replacedAt = replacedCopies[instance] {
@@ -1021,7 +1027,6 @@ final class TabStore {
             }
             copies[instance] = Copy(profile: profile, lastHeard: now)
             liveInstances.insert(instance)
-            scheduleQuietCheck()
             return .live
         }
         let silence = now - copy.lastHeard
@@ -1092,11 +1097,14 @@ final class TabStore {
     }
 
     /// Hides the windows of copies that have sent nothing for `quietAfter` while they could have spoken.
-    /// Runs every few seconds while there are copies, while they may not all have spoken yet, and during a
-    /// hold.
+    /// Runs when the first live copy could have gone quiet, when every copy will have had its chance to speak,
+    /// and every `CopySilence.pauseAfter` during a hold, where it asks the copies to stop heartbeating
+    /// (`scheduleCopyCheck`). Reads the holds afresh first, so one that began or ended without a notification
+    /// is noticed.
     func noteQuietCopies() {
         noteHolds()
         let now = uptime()
+        defer { scheduleCopyCheck() }
         for (instance, copy) in copies where liveInstances.contains(instance) {
             let counted = silence.silence(lastHeard: copy.lastHeard, extraChance: copy.extraChance, at: now)
             guard counted >= Self.quietAfter else { continue }
@@ -1108,6 +1116,9 @@ final class TabStore {
             log.notice("extension copy \(instance.prefix(8), privacy: .public) has sent nothing for \(Int(counted)) s\(before, privacy: .public)\(self.safariIsFrontmost ? "" : ", Safari in the background", privacy: .public); hiding its \(self.snapshots[instance]?.windows.count ?? 0) windows until it does")
         }
         noteChance(at: now)
+        if let ask = silence.nextPauseAsk, now >= ask {
+            askCopiesToPause(at: now)
+        }
     }
 
     /// Something that can hold Safari's copies back has changed (HoldWatcher): the Mac slept or woke, the
@@ -1116,7 +1127,7 @@ final class TabStore {
     func holdsMayHaveChanged() {
         noteHolds()
         noteChance(at: uptime())
-        scheduleQuietCheck()
+        scheduleCopyCheck()
     }
 
     /// Safari has launched: its copies are all new, and none has spoken yet. Until they've had the time to,
@@ -1126,7 +1137,7 @@ final class TabStore {
         silence.startListening(at: now)
         log.notice("Safari launched; no profile counts as off for \(Int(Self.quietAfter)) s while its extension copies start")
         noteChance(at: now)
-        scheduleQuietCheck()
+        scheduleCopyCheck()
     }
 
     /// Takes what's holding the copies back now. When the last hold ends, every copy starts over with a whole
@@ -1136,8 +1147,15 @@ final class TabStore {
         let held = currentHolds()
         let before = silence.holds
         guard held != before else { return }
-        if silence.update(holds: held, at: uptime()) {
-            log.notice("the extension's copies are no longer held back by \(CopySilence.describe(before), privacy: .public): each has \(Int(Self.quietAfter)) s to speak before it counts as quiet; asking each for a snapshot")
+        let paused = silence.pauseAskedDuringHold
+        let now = uptime()
+        if silence.update(holds: held, at: now) {
+            let wait = Int(silence.countsSince - now + Self.quietAfter)
+            log.notice("the extension's copies are no longer held back by \(CopySilence.describe(before), privacy: .public): each has \(wait) s to speak before it counts as quiet; asking each for a snapshot\(paused ? " and to heartbeat again" : "", privacy: .public)")
+            if paused {
+                // A copy that misses this is silent until its pause runs out, which `silence` allows for.
+                sendCommand?(["action": "resumeHeartbeats"]) {}
+            }
             requestSnapshot()
         } else if before.isEmpty {
             log.notice("the extension's copies are held back by \(CopySilence.describe(held), privacy: .public); their silence doesn't count until that ends")
@@ -1146,7 +1164,8 @@ final class TabStore {
         }
     }
 
-    /// Updates `copiesHaveHadTheirChance`, and looks again when they will have.
+    /// Updates `copiesHaveHadTheirChance`. The copy check looks again when they will have
+    /// (`scheduleCopyCheck`).
     private func noteChance(at now: TimeInterval) {
         let had = silence.copiesHaveHadTheirChance(at: now)
         if copiesHaveHadTheirChance != had {
@@ -1155,18 +1174,21 @@ final class TabStore {
                 log.notice("every extension copy has had \(Int(Self.quietAfter)) s to speak; Side Tabs can count as off in a profile again")
             }
         }
-        chanceCheck?.cancel()
-        chanceCheck = nil
-        // During a hold it can't be told; the hold's end looks again.
-        guard !had, let wait = silence.timeUntilCopiesHaveHadTheirChance(at: now) else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.chanceCheck = nil
-            self.noteHolds()
-            self.noteChance(at: self.uptime())
+    }
+
+    /// A hold has lasted `CopySilence.pauseAfter`, or as long again since the last ask: asks every copy to stop
+    /// heartbeating for `CopySilence.pauseLength`, while their silence doesn't count anyway (#80). The ask says
+    /// until when on the wall clock and for how long, and a copy stops at whichever comes first, so a copy
+    /// never stays silent past `pauseLength` after the ask (the Mac sleeping in between only shortens it), nor
+    /// long past it if the command was delivered late. A copy that misses an ask goes on heartbeating.
+    private func askCopiesToPause(at now: TimeInterval) {
+        if !silence.pauseAskedDuringHold {
+            log.notice("the extension's copies have been held back by \(CopySilence.describe(self.silence.holds), privacy: .public) for \(Int(CopySilence.pauseAfter)) s; asking them to stop heartbeating until that ends")
         }
-        chanceCheck = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + wait + 0.05, execute: work)
+        silence.notePauseAsked(at: now)
+        let milliseconds = Int(CopySilence.pauseLength * 1000)
+        let until = Int(clock().timeIntervalSince1970 * 1000) + milliseconds
+        sendCommand?(["action": "pauseHeartbeats", "until": until, "ms": milliseconds]) {}
     }
 
     /// Safari came to the front. In the background, Safari can hold its extensions' timers back (its windows
@@ -1188,19 +1210,58 @@ final class TabStore {
                 send(["action": "snapshot"], to: instance)
             }
         }
+        scheduleCopyCheck()
     }
 
-    private func scheduleQuietCheck() {
-        guard !quietCheckScheduled else { return }
-        quietCheckScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.quietCheckInterval) { [weak self] in
-            guard let self else { return }
-            self.quietCheckScheduled = false
-            self.noteQuietCopies()
-            if !self.copies.isEmpty || !self.copiesHaveHadTheirChance || !self.silence.holds.isEmpty {
-                self.scheduleQuietCheck()
+    /// When the copies next need looking at (see `nextCopyCheck`), on the awake clock, or nil for never.
+    private func nextCopyCheckTime(at now: TimeInterval) -> TimeInterval? {
+        var times: [TimeInterval] = []
+        for (instance, copy) in copies where liveInstances.contains(instance) {
+            if let quiet = silence.quietAt(lastHeard: copy.lastHeard, extraChance: copy.extraChance) {
+                times.append(quiet)
             }
         }
+        if !copiesHaveHadTheirChance, let wait = silence.timeUntilCopiesHaveHadTheirChance(at: now) {
+            times.append(now + wait)
+        }
+        if let ask = silence.nextPauseAsk {
+            times.append(ask)
+        }
+        return times.min()
+    }
+
+    /// Sets the copy check's one timer for when the copies next need looking at, or stops it when they don't
+    /// (#80). Called whenever that moment may have moved: a message from a copy, a hold beginning or ending,
+    /// Safari launching, quitting or coming to the front, and each check. The timer has leeway, so macOS can
+    /// line it up with other wakeups; it's never early, and a check that finds it a moment early sets it again.
+    private func scheduleCopyCheck() {
+        let now = uptime()
+        guard let next = nextCopyCheckTime(at: now) else {
+            copyCheckTimer?.cancel()
+            copyCheckTimer = nil
+            nextCopyCheck = nil
+            return
+        }
+        guard next != nextCopyCheck || copyCheckTimer == nil else { return }
+        nextCopyCheck = next
+        // A moment past it, so the check doesn't find the copy a hair short of quiet.
+        let delay = max(0, next - now) + 0.05
+        let leeway = DispatchTimeInterval.milliseconds(Int(min(5, max(0.1, delay / 10)) * 1000))
+        if let copyCheckTimer {
+            copyCheckTimer.schedule(deadline: .now() + delay, repeating: .never, leeway: leeway)
+            return
+        }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.nextCopyCheck = nil
+                self.noteQuietCopies()
+            }
+        }
+        timer.schedule(deadline: .now() + delay, repeating: .never, leeway: leeway)
+        copyCheckTimer = timer
+        timer.resume()
     }
 
     /// A profile for the log: its UUID's first characters, never its name.

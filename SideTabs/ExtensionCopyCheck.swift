@@ -34,14 +34,14 @@ nonisolated struct ExtensionCopyCheck: Equatable, Sendable {
 
     /// How long Safari has, after the app registers its own extension, to start it in place of the other
     /// copy's before the sidebar shows the notice. On 2026-11-12 it took about a second, and each copy
-    /// sends a heartbeat every 5 s.
+    /// says hello as soon as it starts.
     static let switchTime: TimeInterval = 10
     /// How long after a repair that didn't work the next one may run: this, then twice as long each time
     /// after, up to `longestWait`, until this app's extension talks to it.
     static let firstWait: TimeInterval = 60
     static let longestWait: TimeInterval = 30 * 60
     /// A copy of the extension heard from within this is still running: the allowance #31 gives a heartbeat.
-    static let runningWithin: TimeInterval = 30
+    static let runningWithin: TimeInterval = CopySilence.allowance
 
     /// The app's own bundle.
     let appPath: String
