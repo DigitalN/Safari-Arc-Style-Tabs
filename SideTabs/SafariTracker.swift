@@ -87,14 +87,11 @@ final class SafariTracker {
         var full: Bool
         /// Something the user waits on: read at `.userInitiated` rather than the reader's `.utility`.
         var urgent: Bool
-        /// Read Safari's bars above the page, where they're read at all.
-        var bars: Bool
         var completions: [(Bool) -> Void]
 
         mutating func merge(_ other: RefreshRequest) {
             full = full || other.full
             urgent = urgent || other.urgent
-            bars = bars || other.bars
             completions += other.completions
         }
     }
@@ -336,10 +333,9 @@ final class SafariTracker {
     /// resize needs.
     ///
     /// `urgent: false` is for the dock's periodic look (#78), which nobody waits on: it reads at the
-    /// reader queue's `.utility`. Without `bars`, Safari's bars above the page aren't read, and the last
-    /// answer is kept.
-    func refreshWindow(full: Bool = true, urgent: Bool = true, bars: Bool = true, then completion: ((Bool) -> Void)? = nil) {
-        let request = RefreshRequest(full: full || window == nil, urgent: urgent, bars: bars, completions: completion.map { [$0] } ?? [])
+    /// reader queue's `.utility`.
+    func refreshWindow(full: Bool = true, urgent: Bool = true, then completion: ((Bool) -> Void)? = nil) {
+        let request = RefreshRequest(full: full || window == nil, urgent: urgent, completions: completion.map { [$0] } ?? [])
         guard !refreshRunning else {
             if var queued = queuedRefresh {
                 queued.merge(request)
@@ -372,8 +368,7 @@ final class SafariTracker {
         let qos: DispatchQoS = request.urgent ? .userInitiated : .unspecified
         let flags: DispatchWorkItemFlags = request.urgent ? .enforceQoS : []
         reader.queue.async(qos: qos, flags: flags) { [weak self] in
-            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full,
-                                      toolbarInWindows: toolbarInWindows, bars: request.bars)
+            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full, toolbarInWindows: toolbarInWindows)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self?.finish(request, outcome: outcome, epoch: epoch)

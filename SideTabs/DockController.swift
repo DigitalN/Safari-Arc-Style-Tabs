@@ -125,26 +125,19 @@ final class DockController {
 
     /// Puts the sidebar right after changes macOS didn't announce (HealthCheck.swift).
     private func look() {
-        guard let look = healthSchedule.next(cadence: healthCadence, hasWindow: tracker.window != nil) else { return }
+        guard let read = healthSchedule.next(cadence: healthCadence, hasWindow: tracker.window != nil) else { return }
         let wasAttached = tracker.isAttached
-        if look.attaches {
-            tracker.attachIfNeeded(readingWindow: false)
-        }
-        let check = { [weak self] (windowChanged: Bool) in
+        tracker.attachIfNeeded(readingWindow: false)
+        // At `.utility`: nobody waits on a look.
+        tracker.refreshWindow(full: read == .full, urgent: false) { [weak self] windowChanged in
             guard let self else { return }
             if !wasAttached && self.tracker.isAttached || self.mode == .hidden || windowChanged {
                 self.update(makeRoom: true)
-            } else if let problem = self.placementProblem(checksStacking: look.checksStacking) {
+            } else if let problem = self.placementProblem(checksStacking: self.tracker.isSafariFrontmost) {
+                // Safari may have gone behind while the read was out: the window list is only for Safari in front.
                 self.log.notice("fixing: \(problem, privacy: .public)")
                 self.update(makeRoom: NSEvent.pressedMouseButtons == 0)
             }
-        }
-        switch look.read {
-        case .none:
-            check(false)
-        case .geometry, .full:
-            // At `.utility`: nobody waits on a look.
-            tracker.refreshWindow(full: look.read == .full, urgent: false, bars: look.readsBars, then: check)
         }
     }
 

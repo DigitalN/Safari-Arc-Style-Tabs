@@ -93,9 +93,9 @@ swiftc -o "$WORK/update-control-checks" Tests/UpdateControlChecks/main.swift Sid
 "$WORK/update-control-checks"
 
 # When the dock looks again at Safari's window for changes macOS doesn't announce (#78): never with the sidebar
-# off, Safari not running, or while something holds Safari back (asleep, the screen locked and the like); rarely
-# and cheaply while Safari is behind; and often enough while it's in front that each case is caught within
-# about two seconds. With the timer's tolerance.
+# off, Safari not running, Safari behind another app, or while something holds Safari back (asleep, the screen
+# locked and the like); and often enough while it's in front that each case is caught within about two seconds.
+# With the timer's tolerance.
 echo "== looking again at Safari's window"
 swiftc -o "$WORK/health-check-checks" Tests/HealthCheckChecks/main.swift SideTabs/HealthCheck.swift SideTabs/CopySilence.swift
 "$WORK/health-check-checks"

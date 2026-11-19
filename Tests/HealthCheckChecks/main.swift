@@ -21,7 +21,10 @@ func cadence(sidebar: Bool = true, running: Bool = true, holds: Set<CopySilence.
 // MARK: - When the looks run
 
 check(cadence() == .safariInFront, "sidebar on, Safari running and in front, nothing held: every second")
-check(cadence(front: false) == .safariBehind, "with another app in front: the slow looks")
+// With another app in front no look runs either: a look would have to ask Safari to see anything its own
+// notifications don't already report (#78 acceptance: no Accessibility calls into Safari while it's behind).
+check(!cadence(front: false).isRunning, "with another app in front: no looks")
+check(cadence(front: false) == .off("Safari in the background"), "and the log says why")
 
 // Nothing to keep in place: no timer at all, so no Accessibility calls into Safari and no wakeups.
 for front in [true, false] {
@@ -56,55 +59,24 @@ check(cadence(sidebar: false, running: false, holds: [.asleep]) == .off("sidebar
 // MARK: - How often
 
 check(Cadence.safariInFront.interval == 1, "every second while Safari is in front")
-if let behind = Cadence.safariBehind.interval {
-    check(behind >= 5, "at most every 5 s while Safari is behind: \(behind)")
-} else {
-    check(false, "the slow looks have an interval")
-}
 check(Cadence.off("x").interval == nil, "no interval when off")
-for running in [Cadence.safariInFront, .safariBehind] {
-    let interval = running.interval ?? 0
-    check(running.tolerance >= interval * 0.1, "tolerance is at least 10% of the interval for \(running.summary)")
-    check(running.tolerance <= interval * 0.5, "but not so much the looks drift for \(running.summary)")
-}
+check(Cadence.safariInFront.tolerance >= 0.1, "tolerance is at least 10% of the interval")
+check(Cadence.safariInFront.tolerance <= 0.5, "but not so much the looks drift")
 
 // MARK: - What a look reads
 
-func look(_ cadence: Cadence, since: Int = 0, due: Bool = false, window: Bool = true) -> HealthCheck.Look? {
+func look(_ cadence: Cadence, since: Int = 0, due: Bool = false, window: Bool = true) -> HealthCheck.Read? {
     HealthCheck.look(cadence: cadence, looksSinceFullRead: since, fullReadDue: due, hasWindow: window)
 }
 
 check(look(.off("x")) == nil, "no look when off")
 check(look(.off("x"), due: true, window: false) == nil, "not even when a full read is due")
+check(look(.off("Safari in the background"), since: 5, due: true) == nil, "nor while Safari is behind")
 
-// Safari behind: never picks the window, never reads the bars or copies the window list, never attaches.
-for since in 0..<20 {
-    for due in [false, true] {
-        guard let behind = look(.safariBehind, since: since, due: due) else {
-            check(false, "a look runs while Safari is behind")
-            continue
-        }
-        check(behind.read == .geometry, "Safari behind: only the docked window's frame and the like (since \(since), due \(due))")
-        check(!behind.readsBars, "Safari behind: Safari's bars aren't read")
-        check(!behind.checksStacking, "Safari behind: the window list isn't copied")
-        check(!behind.attaches, "Safari behind: attaching again is the tracker's job")
-    }
-}
-check(look(.safariBehind, window: false)?.read == HealthCheck.Read.none, "Safari behind with no window: nothing is read from Safari")
-check(look(.safariBehind, due: true, window: false)?.read == HealthCheck.Read.none, "not even when a full read is due")
-
-// Safari in front: everything the looks are for.
-if let front = look(.safariInFront, since: 0) {
-    check(front.readsBars, "Safari in front: its bars are read (#35)")
-    check(front.checksStacking, "Safari in front: what's between Safari's window and the sidebar is checked")
-    check(front.attaches, "Safari in front: attaches if needed")
-} else {
-    check(false, "a look runs while Safari is in front")
-}
-check(look(.safariInFront, since: 0)?.read == .geometry, "right after a full read: only the geometry")
-check(look(.safariInFront, since: 0, due: true)?.read == .full, "a full read when one is due")
-check(look(.safariInFront, since: 0, window: false)?.read == .full, "a full read when no window is known")
-check(look(.safariInFront, since: HealthCheck.fullReadEvery - 1)?.read == .full, "a full read every \(HealthCheck.fullReadEvery) looks")
+check(look(.safariInFront, since: 0) == .geometry, "right after a full read: only the geometry")
+check(look(.safariInFront, since: 0, due: true) == .full, "a full read when one is due")
+check(look(.safariInFront, since: 0, window: false) == .full, "a full read when no window is known")
+check(look(.safariInFront, since: HealthCheck.fullReadEvery - 1) == .full, "a full read every \(HealthCheck.fullReadEvery) looks")
 
 // MARK: - The schedule, look after look
 
@@ -114,7 +86,9 @@ do {
     var schedule = HealthCheck.Schedule()
     var reads: [HealthCheck.Read] = []
     for _ in 0..<10 {
-        reads.append(schedule.next(cadence: .safariInFront, hasWindow: true)?.read ?? .none)
+        if let read = schedule.next(cadence: .safariInFront, hasWindow: true) {
+            reads.append(read)
+        }
     }
     check(reads.first == .full, "the first look after starting picks the window: \(reads)")
     check(reads.contains(.geometry), "not every look picks the window: \(reads)")
@@ -127,28 +101,33 @@ do {
     let worst = Double(longest + 1) * ((Cadence.safariInFront.interval ?? 99) + Cadence.safariInFront.tolerance)
     check(worst <= 2.5, "a missed window switch is caught within about 2 s: \(worst) s, reads \(reads)")
     check((Cadence.safariInFront.interval ?? 99) + Cadence.safariInFront.tolerance <= 1.5, "the geometry cases within about 1 s")
+    check(reads.count == 10, "every tick is a look while Safari is in front")
     check(reads.filter { $0 == .full }.count <= 5, "at most half the looks pick the window: \(reads)")
 }
 
 do {
-    // Behind, then the looks stop (a hold), then start again: the first look after picks the window.
+    // In front, then a hold, then in front again: the first look after picks the window.
     var schedule = HealthCheck.Schedule()
     _ = schedule.next(cadence: .safariInFront, hasWindow: true)
-    _ = schedule.next(cadence: .safariBehind, hasWindow: true)
+    _ = schedule.next(cadence: .safariInFront, hasWindow: true)
     check(schedule.next(cadence: .off("the screen locked"), hasWindow: true) == nil, "no look during a hold")
     schedule.resume()
-    check(schedule.next(cadence: .safariInFront, hasWindow: true)?.read == .full, "after a hold, the first look picks the window")
-    check(schedule.next(cadence: .safariInFront, hasWindow: true)?.read == .geometry, "then only the geometry")
+    check(schedule.next(cadence: .safariInFront, hasWindow: true) == .full, "after a hold, the first look picks the window")
+    check(schedule.next(cadence: .safariInFront, hasWindow: true) == .geometry, "then only the geometry")
 }
 
 do {
-    // A full read due while Safari is behind waits for Safari to come to the front.
+    // Safari goes behind and comes back to the front. Behind is an .off cadence, so coming back starts the looks
+    // again (DockController resumes the schedule when the cadence goes from not running to running), and the
+    // first look picks the window: whatever changed while it was behind and unannounced is seen.
+    let behind = cadence(front: false)
+    let front = cadence(front: true)
+    check(!behind.isRunning && front.isRunning, "behind to front starts the looks, so the schedule resumes")
     var schedule = HealthCheck.Schedule()
+    _ = schedule.next(cadence: front, hasWindow: true)
+    check(schedule.next(cadence: behind, hasWindow: true) == nil, "behind: no look, so nothing is read from Safari")
     schedule.resume()
-    check(schedule.next(cadence: .safariBehind, hasWindow: true)?.read == .geometry, "behind: no full read, even when due")
-    check(schedule.fullReadDue, "it stays due")
-    check(schedule.next(cadence: .safariInFront, hasWindow: true)?.read == .full, "in front: the due full read")
-    check(!schedule.fullReadDue, "and it's done")
+    check(schedule.next(cadence: front, hasWindow: true) == .full, "back in front: the first look picks the window")
 }
 
 if failures == 0 {

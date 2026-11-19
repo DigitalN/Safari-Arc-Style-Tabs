@@ -43,7 +43,8 @@ docks to, and never Settings, against the same trees; what a press on a row turn
 middle click; which queued
 Accessibility requests are still wanted; which notifications the docked window is watched for; when the docked
 sidebar's shadow is worked out again and when it's ordered behind Safari's window again; when the sidebar looks
-again at Safari's window for changes macOS doesn't announce, how often, and what each look reads;
+again at Safari's window for changes macOS doesn't announce (only while it's on and Safari is in front), how often,
+and what each look reads;
 where the sidebar slides out over the page in full screen or when it hides automatically, below which
 of Safari's bars (against trees in `Tests/SidebarOverlayChecks/trees`), and what
 brings it out and puts it away, and which pointer movements it needs to look at; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
