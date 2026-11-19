@@ -194,9 +194,10 @@ separate window that the app keeps attached to Safari's window:
   could have spoken: sleep, a locked screen, the screen saver, a switched-away session and
   Safari hidden don't count, and each copy gets 40 seconds again when they end
   (`CopySilence`, `HoldWatcher`). When one of those lasts 30 seconds, the app asks the
-  copies to stop heartbeating for 45 seconds, again every 30 seconds while it lasts, and to
-  start again when it ends; a copy that misses that starts again when its pause runs out,
-  and its silence counts from then. Every command from the app carries an id, and
+  copies to stop heartbeating for 5 minutes, again every 4 minutes while it lasts, and to
+  start again when it ends. A copy heard from after that counts as usual; one that says its
+  heartbeats are still paused, or isn't heard from at all, counts only once its pause has
+  run out, since it may have missed the word. Every command from the app carries an id, and
   `background.js` skips one it has already run, since Safari has delivered commands twice.
 - `SideTabsExtension/`: the extension's native handler. It passes messages to the app
   over a CFMessagePort named after the app group, which is what lets the sandboxed

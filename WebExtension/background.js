@@ -328,6 +328,9 @@ let heardFromApp = false;
 // lost reply can't hold up whatever comes next. A reply that turns up later goes to handleLateReply.
 function postToApp(message) {
     const sentAt = Date.now();
+    // While the app has heartbeats paused, every message says for how much longer (see "Heartbeats").
+    const pausedFor = pausedUntil - sentAt;
+    const sent = pausedFor > 0 ? { ...message, heartbeatsPausedFor: pausedFor } : message;
     return new Promise((resolve) => {
         let settled = false;
         const timer = setTimeout(() => {
@@ -338,7 +341,7 @@ function postToApp(message) {
         }, REPLY_TIME_LIMIT_MS);
         let call;
         try {
-            call = Promise.resolve(browser.runtime.sendNativeMessage(NATIVE_APP_ID, message));
+            call = Promise.resolve(browser.runtime.sendNativeMessage(NATIVE_APP_ID, sent));
         } catch (error) {
             call = Promise.reject(error);
         }
@@ -438,7 +441,9 @@ function noteLateReply(message, milliseconds) {
 // and asks the copies to stop heartbeating (`pauseHeartbeats`). Commands can be lost, so a pause never lasts
 // past the time the app gave, by the clock (`until`) or from when it came (`ms`), whichever is sooner, nor
 // more than PAUSE_LIMIT_MS. Any other command from the app ends it: the one the app sends when the hold
-// ends (`resumeHeartbeats`), its request for a snapshot, anything.
+// ends (`resumeHeartbeats`), its request for a snapshot, anything. While a pause lasts, every message says
+// how much longer (`heartbeatsPausedFor`, ms), so the app knows not to count that silence, and can tell a
+// copy that missed the end of the hold to start again.
 
 const PAUSE_LIMIT_MS = 5 * 60 * 1000;
 

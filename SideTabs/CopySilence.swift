@@ -12,9 +12,11 @@ import Foundation
 //   timers back, or doesn't run at all. Nothing goes quiet during a hold, and when the last one ends,
 //   every copy starts over with a whole allowance: its next heartbeat, as late as load can make it.
 // - **Pauses the app asked for.** A hold that lasts `pauseAfter` has the copies asked to stop heartbeating
-//   for `pauseLength`, and asked again every `pauseAfter` while it lasts (#80). The app tells them when the
-//   hold ends, but commands can be lost, so a copy that missed it is silent until its pause runs out. Its
-//   silence counts from then at the earliest.
+//   for `pauseLength`, and asked again every `pauseRenewal` while it lasts (#80). The app tells them when
+//   the hold ends, but commands can be lost, so a copy that missed it is silent until its pause runs out.
+//   Counted per copy: one heard from since the hold ended has had the word (or its pause ran out), and its
+//   silence counts as usual; one not heard from since counts from the end of its pause at the earliest. A
+//   copy that's still paused says so in every message, and for how long (`heartbeatsPausedFor`).
 // - **Listening starts.** When Side Tabs starts or Safari launches, no copy has spoken yet. Until they've
 //   had the allowance, a profile with no live copy may only have a copy that hasn't spoken yet.
 // - **Safari in the background.** Its timers can be held back then too, but that can't be told from Side
@@ -33,13 +35,14 @@ nonisolated struct CopySilence: Equatable, Sendable {
     /// sends something at least every `heartbeatInterval`, but under heavy load the extension has run up to
     /// 20 s late (#16–#22), and a reply can take 4 s: a heartbeat 30 s after the last message, and 10 s more.
     static let allowance: TimeInterval = 40
-    /// How long a hold lasts before the copies are asked to stop heartbeating, and how often they're asked
-    /// again while it lasts.
+    /// How long a hold lasts before the copies are asked to stop heartbeating, so a short one asks nothing.
     static let pauseAfter: TimeInterval = 30
-    /// How long each ask stops a copy's heartbeats for, unless the app says the hold has ended first. A little
-    /// more than `pauseAfter`, so a long hold's asks overlap; not much more, since a copy that misses the end of
-    /// the hold may be silent for up to this long after it.
-    static let pauseLength: TimeInterval = 45
+    /// How long each ask stops a copy's heartbeats for, unless the app says the hold has ended first: the most
+    /// the extension allows (`PAUSE_LIMIT_MS` in background.js), so a long hold asks rarely.
+    static let pauseLength: TimeInterval = 300
+    /// How often the copies are asked again while a hold lasts: a minute before the last ask runs out, so a
+    /// late timer or a slow command doesn't let them start heartbeating in between.
+    static let pauseRenewal: TimeInterval = 240
 
     /// Something that holds Safari's extension copies back, though nothing is wrong with them.
     enum Hold: String, CaseIterable, Comparable, Sendable {
@@ -64,12 +67,16 @@ nonisolated struct CopySilence: Equatable, Sendable {
     /// When listening started (Side Tabs starting, Safari launching), while copies may not all have spoken
     /// yet. Nil once they've had the allowance.
     private(set) var waitingSince: TimeInterval?
-    /// When the copies were last asked to stop heartbeating, on the awake clock. Nil if they never were.
+    /// When the copies were last asked to stop heartbeating, on the awake clock. Nil if they never were, or
+    /// since Safari launched (its copies are new).
     private(set) var pauseAskedAt: TimeInterval?
-    /// When it was last time to ask, whether or not there were copies to ask.
-    private(set) var pauseAskDueAt: TimeInterval?
+    /// When the last hold ended. Nil before the first.
+    private(set) var lastHoldEnd: TimeInterval?
+    /// Until when a copy not heard from since the last hold ended may still be silent because it was asked to
+    /// be and missed the word that the hold had ended. Nil when no ask outlasted the hold.
+    private(set) var missedResumeUntil: TimeInterval?
 
-    /// Until when a copy may still be silent because it was asked to be, if it missed the end of the hold.
+    /// Until when a copy asked to stop heartbeating at the last ask may still be silent.
     var pausedUntil: TimeInterval? {
         pauseAskedAt.map { $0 + Self.pauseLength }
     }
@@ -81,19 +88,18 @@ nonisolated struct CopySilence: Equatable, Sendable {
     }
 
     /// When the copies should next be asked to stop heartbeating: `pauseAfter` into a hold, and every
-    /// `pauseAfter` after that while it lasts. Nil when nothing holds them back.
+    /// `pauseRenewal` after that while it lasts. Nil when nothing holds them back.
     var nextPauseAsk: TimeInterval? {
         guard let heldSince else { return nil }
-        return max(heldSince, pauseAskDueAt ?? -.infinity) + Self.pauseAfter
+        if pauseAskedDuringHold, let pauseAskedAt {
+            return pauseAskedAt + Self.pauseRenewal
+        }
+        return heldSince + Self.pauseAfter
     }
 
-    /// It was time at `now` to ask the copies to stop heartbeating for `pauseLength`, and they were asked, or
-    /// there were none to ask (`asked` false).
-    mutating func notePauseAsk(at now: TimeInterval, asked: Bool) {
-        pauseAskDueAt = now
-        if asked {
-            pauseAskedAt = now
-        }
+    /// The copies were asked at `now` to stop heartbeating for `pauseLength`.
+    mutating func notePauseAsked(at now: TimeInterval) {
+        pauseAskedAt = now
     }
 
     /// Listening starts at `now`, when Side Tabs starts.
@@ -102,10 +108,12 @@ nonisolated struct CopySilence: Equatable, Sendable {
         waitingSince = now
     }
 
-    /// Safari launched at `now`: its copies are all new, and none has spoken yet.
+    /// Safari launched at `now`: its copies are all new, none has spoken yet, and none was asked to pause.
     mutating func startListening(at now: TimeInterval) {
         countsSince = now
         waitingSince = now
+        pauseAskedAt = nil
+        missedResumeUntil = nil
     }
 
     /// Takes what's holding the copies back now. Says whether that has just ended: then every copy's silence
@@ -120,30 +128,43 @@ nonisolated struct CopySilence: Equatable, Sendable {
             }
         } else if !old.isEmpty, new.isEmpty {
             heldSince = nil
+            countsSince = now
+            lastHoldEnd = now
             // A copy that missed the app saying so is silent until its pause runs out.
-            let start = max(now, pausedUntil ?? now)
-            countsSince = start
+            missedResumeUntil = pausedUntil.flatMap { $0 > now ? $0 : nil }
             if waitingSince != nil {
-                waitingSince = start
+                // Copies that haven't spoken yet haven't been heard from since, either.
+                waitingSince = max(now, missedResumeUntil ?? now)
             }
             return true
         }
         return false
     }
 
-    /// How long a copy last heard at `lastHeard` has been silent in a way that counts: only since the last
-    /// hold ended, or since `extraChance` (TabStore gives one when Safari comes to the front), and not at all
-    /// during a hold.
-    func silence(lastHeard: TimeInterval, extraChance: TimeInterval? = nil, at now: TimeInterval) -> TimeInterval {
+    /// Since when silence from a copy last heard at `lastHeard` counts: since the last hold ended, or since
+    /// `extraChance` (TabStore gives one when Safari comes to the front), and not before a pause it may still
+    /// be in has run out: `pausedUntil`, as its last message said, or, if it hasn't been heard from since the
+    /// last hold ended, the end of the pause it may have missed the word on.
+    private func countsFrom(lastHeard: TimeInterval, extraChance: TimeInterval?, pausedUntil: TimeInterval?) -> TimeInterval {
+        var from = max(lastHeard, countsSince, extraChance ?? -.infinity, pausedUntil ?? -.infinity)
+        if let missedResumeUntil, let lastHoldEnd, lastHeard < lastHoldEnd {
+            from = max(from, missedResumeUntil)
+        }
+        return from
+    }
+
+    /// How long a copy last heard at `lastHeard` has been silent in a way that counts (`countsFrom`), and not
+    /// at all during a hold.
+    func silence(lastHeard: TimeInterval, extraChance: TimeInterval? = nil, pausedUntil: TimeInterval? = nil, at now: TimeInterval) -> TimeInterval {
         guard holds.isEmpty else { return 0 }
-        return max(0, now - max(lastHeard, countsSince, extraChance ?? -.infinity))
+        return max(0, now - countsFrom(lastHeard: lastHeard, extraChance: extraChance, pausedUntil: pausedUntil))
     }
 
     /// When a copy last heard at `lastHeard` will count as quiet, if it says nothing more and nothing holds
     /// the copies back meanwhile. Nil during a hold, when no silence counts.
-    func quietAt(lastHeard: TimeInterval, extraChance: TimeInterval? = nil) -> TimeInterval? {
+    func quietAt(lastHeard: TimeInterval, extraChance: TimeInterval? = nil, pausedUntil: TimeInterval? = nil) -> TimeInterval? {
         guard holds.isEmpty else { return nil }
-        return max(lastHeard, countsSince, extraChance ?? -.infinity) + Self.allowance
+        return countsFrom(lastHeard: lastHeard, extraChance: extraChance, pausedUntil: pausedUntil) + Self.allowance
     }
 
     /// Whether a copy last heard at `lastHeard` counts as quiet at `now`.

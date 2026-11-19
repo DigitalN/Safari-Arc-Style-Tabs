@@ -665,6 +665,25 @@ async function settled(page) {
     }
 
     {
+        // While a pause lasts, every message says for how much longer, so the app doesn't count that silence and
+        // can tell a copy that missed the end of the hold. Once the pause is over, they don't.
+        const page = load({ manualTime: true, queryDelay: 0 });
+        await page.advance(1000);
+        const start = page.now();
+        page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 300000, ms: 300000, id: "L-1" });
+        await page.advance(100000);
+        page.fire("activated", { tabId: 2, windowId: 1 });
+        await page.advance(1000);
+        const during = sentAfter(page, start);
+        check(during.length >= 2 && during.every((entry) => entry.message.heartbeatsPausedFor === start + 300000 - entry.at),
+            `messages sent during a pause say how much longer it lasts (${during.map((entry) => entry.message.heartbeatsPausedFor).join(", ")})`);
+        check(heartbeatTimes(page, start).length === 0, "a 5 min pause sends no heartbeat in its first 100 s, whatever else goes out");
+        await page.advance(200000);
+        const after = sentAfter(page, start + 300000 - 1);
+        check(after.length >= 1 && after.every((entry) => entry.message.heartbeatsPausedFor === undefined), "messages after it has run out don't");
+    }
+
+    {
         // The app says the hold has ended: heartbeats start again, an interval later, unless something else
         // was delivered first. So does any other command from the app, such as its request for a snapshot.
         for (const ending of [{ action: "resumeHeartbeats" }, { action: "snapshot" }, { action: "activate", tabId: 2 }]) {

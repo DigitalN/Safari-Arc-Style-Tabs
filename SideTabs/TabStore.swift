@@ -923,6 +923,11 @@ final class TabStore {
         var quietInBackground = false
         /// It's live again on that extra chance, without having spoken.
         var onExtraChance = false
+        /// Until when its heartbeats are paused, as its last message said (`heartbeatsPausedFor`, #80). Nil
+        /// when they aren't.
+        var pausedUntil: TimeInterval?
+        /// It has been told to start heartbeating again since it last said it was paused.
+        var toldToResume = false
     }
 
     /// What a message says about the copy that sent it (see `hear`).
@@ -1004,9 +1009,12 @@ final class TabStore {
     /// after all (a second Safari, say); it's taken back, without replacing anything in turn.
     private func hear(from object: [String: Any]) -> Sender {
         guard let instance = object["instance"] as? String else { return .live }
-        // The moment this copy could go quiet has moved.
-        defer { scheduleCopyCheck() }
         let now = uptime()
+        // The moment this copy could go quiet has moved.
+        defer {
+            notePause(of: instance, from: object, at: now)
+            scheduleCopyCheck()
+        }
         let profile = object["profile"] as? String
         if let replacedAt = replacedCopies[instance] {
             let since = now - replacedAt
@@ -1045,6 +1053,26 @@ final class TabStore {
         liveInstances.insert(instance)
         log.notice("extension copy \(instance.prefix(8), privacy: .public) is sending again after \(Int(silence)) s; showing its windows")
         return .backFromQuiet
+    }
+
+    /// Takes what a message from a copy says about a pause in its heartbeats (#80). A copy that's still paused
+    /// with no hold on missed the word that the hold ended, and is told again, once per pause.
+    private func notePause(of instance: String, from object: [String: Any], at now: TimeInterval) {
+        guard var copy = copies[instance] else { return }
+        let milliseconds = (object["heartbeatsPausedFor"] as? NSNumber)?.doubleValue ?? 0
+        guard milliseconds > 0 else {
+            copy.pausedUntil = nil
+            copy.toldToResume = false
+            copies[instance] = copy
+            return
+        }
+        copy.pausedUntil = now + min(milliseconds / 1000, CopySilence.pauseLength)
+        if silence.holds.isEmpty, !copy.toldToResume {
+            copy.toldToResume = true
+            log.notice("extension copy \(instance.prefix(8), privacy: .public) still has heartbeats paused, \(Int(milliseconds / 1000)) s more; telling it to start again")
+            send(["action": "resumeHeartbeats"], to: instance)
+        }
+        copies[instance] = copy
     }
 
     /// `old` has stopped for good, because `new`, a newer copy of the same profile, has reported. Its snapshot
@@ -1098,7 +1126,7 @@ final class TabStore {
 
     /// Hides the windows of copies that have sent nothing for `quietAfter` while they could have spoken.
     /// Runs when the first live copy could have gone quiet, when every copy will have had its chance to speak,
-    /// and every `CopySilence.pauseAfter` during a hold, where it asks the copies to stop heartbeating
+    /// and during a hold when it's time to ask the copies to stop heartbeating, if any are known
     /// (`scheduleCopyCheck`). Reads the holds afresh first, so one that began or ended without a notification
     /// is noticed.
     func noteQuietCopies() {
@@ -1106,7 +1134,7 @@ final class TabStore {
         let now = uptime()
         defer { scheduleCopyCheck() }
         for (instance, copy) in copies where liveInstances.contains(instance) {
-            let counted = silence.silence(lastHeard: copy.lastHeard, extraChance: copy.extraChance, at: now)
+            let counted = silence.silence(lastHeard: copy.lastHeard, extraChance: copy.extraChance, pausedUntil: copy.pausedUntil, at: now)
             guard counted >= Self.quietAfter else { continue }
             liveInstances.remove(instance)
             copies[instance]?.quietInBackground = !safariIsFrontmost
@@ -1116,7 +1144,7 @@ final class TabStore {
             log.notice("extension copy \(instance.prefix(8), privacy: .public) has sent nothing for \(Int(counted)) s\(before, privacy: .public)\(self.safariIsFrontmost ? "" : ", Safari in the background", privacy: .public); hiding its \(self.snapshots[instance]?.windows.count ?? 0) windows until it does")
         }
         noteChance(at: now)
-        if let ask = silence.nextPauseAsk, now >= ask {
+        if !copies.isEmpty, let ask = silence.nextPauseAsk, now >= ask {
             askCopiesToPause(at: now)
         }
     }
@@ -1150,8 +1178,8 @@ final class TabStore {
         let paused = silence.pauseAskedDuringHold
         let now = uptime()
         if silence.update(holds: held, at: now) {
-            let wait = Int(silence.countsSince - now + Self.quietAfter)
-            log.notice("the extension's copies are no longer held back by \(CopySilence.describe(before), privacy: .public): each has \(wait) s to speak before it counts as quiet; asking each for a snapshot\(paused ? " and to heartbeat again" : "", privacy: .public)")
+            let missed = silence.missedResumeUntil.map { ", or until \(Int($0 - now + Self.quietAfter)) s from now if it isn't heard from first, since it may have missed this" } ?? ""
+            log.notice("the extension's copies are no longer held back by \(CopySilence.describe(before), privacy: .public): each has \(Int(Self.quietAfter)) s to speak before it counts as quiet\(missed, privacy: .public); asking each for a snapshot\(paused ? " and to heartbeat again" : "", privacy: .public)")
             if paused {
                 // A copy that misses this is silent until its pause runs out, which `silence` allows for.
                 sendCommand?(["action": "resumeHeartbeats"]) {}
@@ -1176,21 +1204,18 @@ final class TabStore {
         }
     }
 
-    /// A hold has lasted `CopySilence.pauseAfter`, or as long again since the last ask: asks every copy to stop
-    /// heartbeating for `CopySilence.pauseLength`, while their silence doesn't count anyway (#80). The ask says
-    /// until when on the wall clock and for how long, and a copy stops at whichever comes first, so a copy
-    /// never stays silent past `pauseLength` after the ask (the Mac sleeping in between only shortens it), nor
-    /// long past it if the command was delivered late. A copy that misses an ask goes on heartbeating. With no
-    /// copy known (Safari not running, say) nothing is sent, but the holds are still looked at as often.
+    /// A hold has lasted `CopySilence.pauseAfter`, or `CopySilence.pauseRenewal` since the last ask: asks every
+    /// copy to stop heartbeating for `CopySilence.pauseLength`, while their silence doesn't count anyway (#80).
+    /// The ask says until when on the wall clock and for how long, and a copy stops at whichever comes first,
+    /// so a copy never stays silent past `pauseLength` after the ask (the Mac sleeping in between only shortens
+    /// it), nor long past it if the command was delivered late. A copy that misses an ask goes on heartbeating.
+    /// Only while copies are known: with none (Safari not running, say), nothing is asked, and no timer runs for
+    /// it.
     private func askCopiesToPause(at now: TimeInterval) {
-        guard !copies.isEmpty else {
-            silence.notePauseAsk(at: now, asked: false)
-            return
-        }
         if !silence.pauseAskedDuringHold {
             log.notice("the extension's copies have been held back by \(CopySilence.describe(self.silence.holds), privacy: .public) for \(Int(CopySilence.pauseAfter)) s; asking them to stop heartbeating until that ends")
         }
-        silence.notePauseAsk(at: now, asked: true)
+        silence.notePauseAsked(at: now)
         let milliseconds = Int(CopySilence.pauseLength * 1000)
         let until = Int(clock().timeIntervalSince1970 * 1000) + milliseconds
         sendCommand?(["action": "pauseHeartbeats", "until": until, "ms": milliseconds]) {}
@@ -1222,14 +1247,16 @@ final class TabStore {
     private func nextCopyCheckTime(at now: TimeInterval) -> TimeInterval? {
         var times: [TimeInterval] = []
         for (instance, copy) in copies where liveInstances.contains(instance) {
-            if let quiet = silence.quietAt(lastHeard: copy.lastHeard, extraChance: copy.extraChance) {
+            if let quiet = silence.quietAt(lastHeard: copy.lastHeard, extraChance: copy.extraChance, pausedUntil: copy.pausedUntil) {
                 times.append(quiet)
             }
         }
         if !copiesHaveHadTheirChance, let wait = silence.timeUntilCopiesHaveHadTheirChance(at: now) {
             times.append(now + wait)
         }
-        if let ask = silence.nextPauseAsk {
+        // During a hold, only to ask copies to pause: with none known there's nothing to ask, and the hold's end
+        // comes from HoldWatcher's notifications.
+        if !copies.isEmpty, let ask = silence.nextPauseAsk {
             times.append(ask)
         }
         return times.min()
