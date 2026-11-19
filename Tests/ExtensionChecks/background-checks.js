@@ -29,8 +29,10 @@ const HANG = Symbol("hang");
 // a snapshot build overlap with other events. `reply(message, count)` answers each native message
 // (`count` messages so far, this one included): a reply, a promise of one (to answer late), or HANG.
 // `timeScale` shortens every timer background.js sets, so a check of its 4 s time limit doesn't take
-// seconds. `hangLastFocused` makes windows.getLastFocused never answer. Heartbeats don't run by
-// themselves; `heartbeat()` sends one as the timer would. `ports` are the ports background.js connected
+// seconds. `hangLastFocused` makes windows.getLastFocused never answer. `heartbeat()` sends a heartbeat
+// as the heartbeat timer does when one is due. With `manualTime`, background.js's clock (Date.now) and its
+// timers are the checks' own: time stands still until `advance(ms)` moves it, running each timer that comes
+// due on the way. `ports` are the ports background.js connected
 // for the app's commands, oldest first: `deliver(command)` sends one through a port as Safari would, and
 // `drop()` has Safari report it disconnected. The first `connectFails` attempts to connect throw.
 // `quiet` keeps background.js's warnings out of the output, for a check that expects them.
@@ -38,7 +40,9 @@ const HANG = Symbol("hang");
 // Safari says was focused last. `injected` lists the tabs.executeScript calls, and `inject(tabId)` answers
 // each one: a promise to finish later, or HANG.
 function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true }), timeScale = 1, hangLastFocused = false, connectFails = 0, quiet = false,
-    tabList = null, lastFocused = 1, inject = () => undefined } = {}) {
+    tabList = null, lastFocused = 1, inject = () => undefined, manualTime = false } = {}) {
+    const clock = { now: 1_000_000, timers: [], nextId: 1 };
+    const now = () => (manualTime ? clock.now : Date.now());
     const sent = [];
     let queries = 0;
     const injected = [];
@@ -65,7 +69,7 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
         tabs: {
             query: async () => { queries++; await sleep(queryDelay); return tabs.map((tab) => ({ ...tab })); },
             executeScript: (tabId, details) => {
-                injected.push({ at: Date.now(), tabId, file: details.file });
+                injected.push({ at: now(), tabId, file: details.file });
                 const answer = inject(tabId);
                 return answer === HANG ? new Promise(() => {}) : Promise.resolve(answer);
             },
@@ -78,7 +82,7 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
         runtime: {
             sendNativeMessage: (id, message) => {
                 const copy = JSON.parse(JSON.stringify(message));
-                sent.push({ at: Date.now(), message: copy });
+                sent.push({ at: now(), message: copy });
                 const answer = reply(copy, sent.length);
                 return answer === HANG ? new Promise(() => {}) : Promise.resolve(answer);
             },
@@ -107,10 +111,20 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
     // background.js, run through BACKGROUND_JS, has no refreshAfterStart: there they're told by delay.)
     const startupRefresh = (fn, ms) => (context.refreshAfterStart ? fn === context.refreshAfterStart : [1000, 3000, 6000].includes(ms));
     const timer = (fn, ms, ...args) => (startupRefresh(fn, ms) ? 0 : setTimeout(fn, (ms ?? 0) * timeScale, ...args));
+    const manualTimer = (fn, ms, ...args) => {
+        if (startupRefresh(fn, ms)) return 0;
+        const id = clock.nextId++;
+        clock.timers.push({ id, at: clock.now + Math.max(0, ms ?? 0), fn, args });
+        return id;
+    };
+    const manualClear = (id) => {
+        clock.timers = clock.timers.filter((entry) => entry.id !== id);
+    };
     const context = vm.createContext({
-        browser, console: quiet ? { ...console, warn: () => {} } : console, setTimeout: timer, clearTimeout,
+        browser, console: quiet ? { ...console, warn: () => {} } : console,
+        setTimeout: manualTime ? manualTimer : timer, clearTimeout: manualTime ? manualClear : clearTimeout,
         setInterval: (fn, ms) => intervals.push({ fn, ms }), crypto: { randomUUID: () => "test-instance" },
-        URL, fetch: async () => ({}), AbortController, FileReader: class {}, Date, Math,
+        URL, fetch: async () => ({}), AbortController, FileReader: class {}, Date: manualTime ? { now: () => clock.now } : Date, Math,
     });
     vm.runInContext(source.replace('"use strict";', ""), context);
     const fire = (name, ...args) => (listeners[name] || []).forEach((fn) => fn(...args));
@@ -119,12 +133,29 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
     const states = () => sent.filter((entry) => isState(entry.message)).map((entry) => entry.message);
     // Carries out a command from the app, as the port or a reply would deliver it.
     const run = (command) => context.runCommand({ instance: "test-instance", ...command });
-    const heartbeat = () => intervals.filter((entry) => entry.ms === 5000).forEach((entry) => entry.fn());
+    const heartbeat = () => context.sendHeartbeat();
     // Reads one of background.js's top-level variables.
     const state = (name) => vm.runInContext(name, context);
     // How many times Safari was asked for every tab.
     const queryCount = () => queries;
-    return { sent, tabs, updates, created, windowUpdates, windowsCreated, intervals, ports, injected, fire, ofType, states, run, heartbeat, state, queryCount };
+    // Moves the manual clock on by `ms`, running the timers that come due, in order, and letting what they
+    // start (replies, snapshots) finish in between.
+    const settle = () => sleep(queryDelay + 2);
+    const advance = async (ms) => {
+        const end = clock.now + ms;
+        for (;;) {
+            await settle();
+            clock.timers.sort((a, b) => a.at - b.at || a.id - b.id);
+            const next = clock.timers[0];
+            if (!next || next.at > end) break;
+            clock.timers.shift();
+            clock.now = Math.max(clock.now, next.at);
+            next.fn(...next.args);
+        }
+        clock.now = end;
+        await settle();
+    };
+    return { sent, tabs, updates, created, windowUpdates, windowsCreated, intervals, ports, injected, fire, ofType, states, run, heartbeat, state, queryCount, advance, now };
 }
 
 const isState = (message) => message.type === "snapshot" || message.type === "changes";
@@ -397,7 +428,7 @@ async function settled(page) {
         await sleep(LIMIT / 2);
         check(page.ofType("hello").length === 1, "the hello was sent");
         check(page.states().length >= 1, "the first snapshot doesn't wait for the hello's reply");
-        check(page.intervals.some((entry) => entry.ms === 5000), "heartbeats are started without waiting for it either");
+        check(page.state("heartbeatTimer") !== null, "heartbeats are started without waiting for it either");
         page.heartbeat();
         check(page.ofType("heartbeat").length === 1, "and they go out");
         await sleep(LIMIT * 4);
@@ -413,7 +444,7 @@ async function settled(page) {
         const gaps = hellos.slice(1).map((at, i) => at - hellos[i]);
         check(gaps.every((gap, i) => i === 0 || gap > gaps[i - 1]), `further and further apart (gaps ${gaps.join(", ")} ms)`);
         check(page.states().length >= 3, "and snapshots keep being tried");
-        check(page.intervals.some((entry) => entry.ms === 5000), "and heartbeats run");
+        check(page.state("heartbeatTimer") !== null, "and heartbeats run");
     }
 
     {
@@ -522,6 +553,153 @@ async function settled(page) {
         check(lines.length === 6, `13 lost heartbeat replies are logged 6 times: the first five and the 10th (got ${lines.length})`);
         check(lines.at(-1)?.includes("(10 so far)"), "each line says how many so far");
         check(!page.ofType("log").some((message) => message.message.includes(`to "snapshot"`)), "and other types are counted apart");
+    }
+
+    // --- #80: a heartbeat only when nothing else has been delivered for the interval, and none during a pause ---
+
+    const HEARTBEAT = 10000;
+    // The times, on the manual clock, of the messages sent after `from`, and of the heartbeats among them.
+    const sentAfter = (page, from) => page.sent.filter((entry) => entry.at > from);
+    const heartbeatTimes = (page, from = -Infinity) => sentAfter(page, from).filter((entry) => entry.message.type === "heartbeat").map((entry) => entry.at);
+    const gapsOf = (times) => times.slice(1).map((at, i) => at - times[i]);
+
+    {
+        // Nothing happening in Safari: one message per interval, and that's the heartbeat.
+        const page = load({ manualTime: true, queryDelay: 0 });
+        await page.advance(1000);
+        const start = page.now();
+        check(sentAfter(page, -Infinity).some((entry) => entry.message.type === "hello"), "the copy says hello at once");
+        check(heartbeatTimes(page).length === 0, "and sends no heartbeat with it: the hello and the first snapshot show it's running");
+        await page.advance(60000);
+        const idle = sentAfter(page, start);
+        check(idle.every((entry) => entry.message.type === "heartbeat"), `with nothing happening, only heartbeats go out (${idle.map((entry) => entry.message.type).join(", ")})`);
+        check(idle.length === 6, `one every 10 s: 6 in a minute (got ${idle.length})`);
+        const gaps = gapsOf(idle.map((entry) => entry.at));
+        check(gaps.every((gap) => gap === HEARTBEAT), `exactly an interval apart (gaps ${gaps.join(", ")} ms)`);
+        const lastSnapshot = page.ofType("snapshot").at(-1);
+        check(idle.every((entry) => entry.message.seq === lastSnapshot.seq), "each names the last snapshot the app confirmed, as before");
+    }
+
+    {
+        // While other messages are delivered, no heartbeat; the first one comes an interval after the last
+        // delivered message.
+        const page = load({ manualTime: true, queryDelay: 0 });
+        await page.advance(1000);
+        const start = page.now();
+        for (let i = 0; i < 10; i++) {
+            page.fire("activated", { tabId: (i % 3) + 1, windowId: 1 });
+            await page.advance(3000);
+        }
+        check(heartbeatTimes(page, start).length === 0, "30 s of tab switches every 3 s: no heartbeat");
+        const lastPost = page.sent.at(-1).at;
+        await page.advance(30000);
+        const after = heartbeatTimes(page, start);
+        check(after[0] === lastPost + HEARTBEAT, `the first heartbeat comes 10 s after the last message (${after[0] - lastPost} ms)`);
+        check(after.length === 3, `then one per interval (${after.length} in 30 s)`);
+    }
+
+    {
+        // Messages the app didn't get don't count: the app not running (no `appRunning` in the reply), or no
+        // reply at all. Heartbeats go on every interval meanwhile, and no faster.
+        const page = load({ manualTime: true, queryDelay: 0, quiet: true, reply: (message) => (message.type === "heartbeat" ? { appRunning: true } : message.type === "log" ? HANG : {}) });
+        await page.advance(1000);
+        const start = page.now();
+        for (let i = 0; i < 20; i++) {
+            page.fire("activated", { tabId: (i % 3) + 1, windowId: 1 });
+            await page.advance(2000);
+        }
+        const times = heartbeatTimes(page, start);
+        check(times.length === 4, `undelivered messages every 2 s don't hold heartbeats back: 4 in 40 s (got ${times.length})`);
+
+        const lost = load({ manualTime: true, queryDelay: 0, quiet: true, reply: (message) => (message.type === "heartbeat" ? HANG : { appRunning: true }) });
+        await lost.advance(1000);
+        const from = lost.now();
+        await lost.advance(60000);
+        const beats = heartbeatTimes(lost, from);
+        const gaps = gapsOf(beats);
+        // (Each lost reply is logged 4 s after its heartbeat, and the log, which is delivered, counts.)
+        check(beats.length >= 4 && gaps.every((gap) => gap >= HEARTBEAT && gap <= HEARTBEAT + 4000),
+            `heartbeats whose replies are lost go on, an interval apart, not one after another (${beats.length}, gaps ${gaps.join(", ")} ms)`);
+    }
+
+    {
+        // A late reply from the app still counts: it heard the message when it was sent.
+        let answerLate;
+        const page = load({ manualTime: true, queryDelay: 0, quiet: true, reply: (message) => {
+            if (message.type === "activated") return new Promise((resolve) => { answerLate = resolve; });
+            return { appRunning: true };
+        } });
+        await page.advance(20000);
+        page.fire("activated", { tabId: 2, windowId: 1 });
+        const sentAt = page.now();
+        await page.advance(6000);
+        answerLate({ appRunning: true });
+        // The snapshot after the switch was delivered at once, so the next heartbeat is an interval after it anyway.
+        await page.advance(10000);
+        check(page.state("lastDeliveredAt") >= sentAt, "a reply that came after the time limit still counts as delivered");
+    }
+
+    {
+        // The app asks for a pause while a hold lasts: no heartbeats until the time it gave, then they go on by
+        // themselves, at once, though the app never said the hold ended.
+        const page = load({ manualTime: true, queryDelay: 0 });
+        await page.advance(1000);
+        const start = page.now();
+        page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 90000, id: "L-1" });
+        await page.advance(89000);
+        check(heartbeatTimes(page, start).length === 0 && sentAfter(page, start).length === 0, "nothing at all during a 90 s pause");
+        await page.advance(1000);
+        const times = heartbeatTimes(page, start);
+        check(times[0] === start + 90000, `a pause the app doesn't end ends on its own: a heartbeat when it's over (${times[0] - start} ms)`);
+        await page.advance(30000);
+        check(heartbeatTimes(page, start).length === 4, "and they go on every interval after it");
+
+        // A later pause replaces the earlier one, so the app can keep a long hold going.
+        const second = page.now();
+        page.ports[0].deliver({ action: "pauseHeartbeats", until: second + 60000, id: "L-2" });
+        await page.advance(50000);
+        page.ports[0].deliver({ action: "pauseHeartbeats", until: page.now() + 60000, id: "L-3" });
+        await page.advance(50000);
+        check(heartbeatTimes(page, second).length === 0, "a pause asked for again before it's over goes on");
+    }
+
+    {
+        // The app says the hold has ended: heartbeats start again, an interval later, unless something else
+        // was delivered first. So does any other command from the app, such as its request for a snapshot.
+        for (const ending of [{ action: "resumeHeartbeats" }, { action: "snapshot" }, { action: "activate", tabId: 2 }]) {
+            const page = load({ manualTime: true, queryDelay: 0 });
+            await page.advance(1000);
+            const start = page.now();
+            page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 90000, id: "L-1" });
+            await page.advance(30000);
+            const ended = page.now();
+            page.ports[0].deliver({ ...ending, id: "L-2" });
+            await page.advance(30000);
+            const times = heartbeatTimes(page, start);
+            const delivered = sentAfter(page, ended).filter((entry) => entry.message.type !== "heartbeat").map((entry) => entry.at);
+            const expected = Math.max(ended, ...delivered) + HEARTBEAT;
+            check(page.state("pausedUntil") === 0, `"${ending.action}" ends a pause`);
+            check(times[0] === expected, `after "${ending.action}", the first heartbeat is an interval after it or after the last message (${times[0] - ended} ms after)`);
+        }
+    }
+
+    {
+        // A pause never lasts more than 5 min, whatever the app says, nor applies when it's already over; a pause
+        // for another copy isn't this copy's.
+        const page = load({ manualTime: true, queryDelay: 0 });
+        await page.advance(1000);
+        const start = page.now();
+        page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 24 * 3600 * 1000, id: "L-1" });
+        await page.advance(5 * 60 * 1000);
+        check(heartbeatTimes(page, start)[0] === start + 5 * 60 * 1000, "a pause for a day ends after 5 min");
+
+        const other = load({ manualTime: true, queryDelay: 0 });
+        await other.advance(1000);
+        const from = other.now();
+        other.ports[0].deliver({ action: "pauseHeartbeats", until: from + 90000, id: "L-1", instance: "another-copy" });
+        other.ports[0].deliver({ action: "pauseHeartbeats", until: from - 1000, id: "L-2" });
+        await other.advance(20000);
+        check(heartbeatTimes(other, from).length === 2, "a pause for another copy, or one already over, doesn't stop heartbeats");
     }
 
     // --- #37: a command runs once, however many times it arrives ---

@@ -11,7 +11,8 @@
 // Safari ignores this value and always talks to the containing app.
 const NATIVE_APP_ID = "com.digitaln.sidetabs";
 const WINDOW_ID_NONE = browser.windows.WINDOW_ID_NONE ?? -1;
-const HEARTBEAT_MS = 5000;
+// A copy that has had nothing delivered to the app for this long sends a heartbeat (see "Heartbeats" below).
+const HEARTBEAT_MS = 10000;
 
 // How long a native message waits for its reply. The extension's handler always answers within about
 // 3 s (its message to the app gives up after 1 s + 2 s), but Safari can lose the reply, and then the
@@ -343,6 +344,7 @@ function postToApp(message) {
         }
         call.then((reply) => {
             heardFromApp = true;
+            noteDelivered(reply, sentAt);
             if (settled) {
                 handleLateReply(reply, message, Date.now() - sentAt);
                 return;
@@ -424,6 +426,78 @@ function noteLateReply(message, milliseconds) {
 }
 
 // ---------------------------------------------------------------------------
+// Heartbeats
+//
+// The app counts a copy that has sent nothing for a while as stopped (Side Tabs turned off in its profile,
+// #31), and hides its windows. Any message shows the copy is running, so a heartbeat is only sent when
+// nothing else has been delivered for HEARTBEAT_MS: with nothing happening in Safari, one message per
+// interval, and none while snapshots and the like are going out (#80). Each heartbeat carries the last
+// snapshot the app confirmed (`sentSeq`), so the app can ask for one it doesn't have.
+//
+// While Safari is held back (the Mac asleep, the screen locked and the like) the app doesn't count silence,
+// and asks the copies to stop heartbeating (`pauseHeartbeats`). Commands can be lost, so a pause never lasts
+// past the time the app gave (and never more than PAUSE_LIMIT_MS), and any other command from the app ends
+// it: the one the app sends when the hold ends (`resumeHeartbeats`), its request for a snapshot, anything.
+
+const PAUSE_LIMIT_MS = 5 * 60 * 1000;
+
+// When the latest message the app answered was sent: the app heard from this copy then, at the earliest.
+let lastDeliveredAt = 0;
+// When the last heartbeat was sent, delivered or not, so one whose reply is lost isn't followed at once by
+// another. Starts now: the hello and the first snapshot go out at once anyway.
+let heartbeatSentAt = Date.now();
+// Until when the app asked for no heartbeats, and when a pause last ended early. Zero for none.
+let pausedUntil = 0;
+let resumedAt = 0;
+let heartbeatTimer = null;
+
+// A reply came, on time or late: if it's from the app, it heard the message.
+function noteDelivered(reply, sentAt) {
+    if (reply && typeof reply === "object" && reply.appRunning && sentAt > lastDeliveredAt) lastDeliveredAt = sentAt;
+}
+
+// When the next heartbeat is due, if nothing else is delivered before then.
+function nextHeartbeatAt() {
+    return Math.max(lastDeliveredAt + HEARTBEAT_MS, heartbeatSentAt + HEARTBEAT_MS, resumedAt + HEARTBEAT_MS, pausedUntil);
+}
+
+// Sets the one heartbeat timer for when the next heartbeat is due. Messages going out don't touch it: when it
+// fires early, because something was delivered meanwhile, it's set again for the new time.
+function scheduleHeartbeat() {
+    clearTimeout(heartbeatTimer);
+    heartbeatTimer = setTimeout(heartbeatTimerFired, Math.max(0, nextHeartbeatAt() - Date.now()));
+}
+
+function heartbeatTimerFired() {
+    heartbeatTimer = null;
+    // A pause the app didn't end ends on its own.
+    if (pausedUntil && Date.now() >= pausedUntil) pausedUntil = 0;
+    if (Date.now() >= nextHeartbeatAt()) sendHeartbeat();
+    scheduleHeartbeat();
+}
+
+function sendHeartbeat() {
+    heartbeatSentAt = Date.now();
+    postToApp({ type: "heartbeat", instance, seq: sentSeq });
+}
+
+// The app asked for no heartbeats until `until` (Date.now() time), because it doesn't count silence now.
+function pauseHeartbeats(until) {
+    const now = Date.now();
+    pausedUntil = Math.min(Number(until) || 0, now + PAUSE_LIMIT_MS);
+    if (pausedUntil <= now) pausedUntil = 0;
+    scheduleHeartbeat();
+}
+
+// A command from the app other than a pause: the app is counting silence again, or soon will.
+function resumeHeartbeats() {
+    if (!pausedUntil) return;
+    pausedUntil = 0;
+    resumedAt = Date.now();
+    scheduleHeartbeat();
+}
+
+// ---------------------------------------------------------------------------
 // Commands from the app
 
 // The ids of the commands run lately, each with how it came (a port's number, or "reply"). The app gives
@@ -461,9 +535,17 @@ async function runCommand(command, via = "unknown") {
     if (!command || typeof command !== "object") return;
     if (command.instance && command.instance !== instance) return;
     if (isRepeat(command, via)) return;
+    if (command.action === "pauseHeartbeats") {
+        pauseHeartbeats(command.until);
+        return;
+    }
+    resumeHeartbeats();
 
     try {
         switch (command.action) {
+        case "resumeHeartbeats":
+            break;
+
         case "snapshot":
             // Always a full snapshot, whatever the app already has (#81).
             scheduleFullSnapshot();
@@ -886,7 +968,7 @@ browser.tabs.onRemoved.addListener((tabId) => awaitingLoad.delete(tabId));
 // The first message: it tells the app this copy has started, and has the extension's handler open the
 // app if it isn't running. Safari can lose the reply (see REPLY_TIME_LIMIT_MS), so it's sent again,
 // with back-off, until any message from this copy has had a reply, a few times at most. Nothing waits
-// for it: snapshots and heartbeats start at once.
+// for it: snapshots start at once, and heartbeats run as usual.
 const HELLO_RETRIES = 5;
 
 async function sayHello(attempt = 0) {
@@ -923,5 +1005,5 @@ function refreshAfterStart() {
     for (const delay of STARTUP_REFRESH_MS) setTimeout(refreshAfterStart, delay);
     setTimeout(() => collectExistingFavicons().catch(() => {}), FAVICON_SWEEP_DELAY_MS);
 
-    setInterval(() => postToApp({ type: "heartbeat", instance, seq: sentSeq }), HEARTBEAT_MS);
+    scheduleHeartbeat();
 })();
