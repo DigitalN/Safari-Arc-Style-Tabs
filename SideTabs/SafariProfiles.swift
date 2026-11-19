@@ -420,6 +420,8 @@ final class SafariProfiles {
         minimizing.dockedWindowChanging(from: tracker.previousReading, profile: dockedResolved ? dockedProfileID : nil)
         let window = tracker.window
         dockedWindow = window
+        // A window just docked may be one Safari restored without telling its copy (#82).
+        store.dockedWindowChanged()
         dockedNumber = nil
         dockedToolbar = .unknown
         dockedResolved = false
