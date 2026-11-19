@@ -2848,6 +2848,12 @@ do {
     _ = reply(store, message("heartbeat", from: instance, ["seq": 2, "heartbeatsPausedFor": 24 * 3600 * 1000]))
     check(abs(next() - (clocks.awake + CopySilence.pauseLength + quiet)) < 0.01, "a pause is never taken for longer than \(Int(CopySilence.pauseLength)) s")
     check(toldThis() == 2, "and a new pause after the copy heartbeated again is told again")
+
+    // Snapshots and changes are read without the rest of their fields (#81), but say so too.
+    var paused = snapshotObject(seq: 5, active: 1)
+    paused["heartbeatsPausedFor"] = 100_000
+    send(store, paused)
+    check(abs(next() - (clocks.awake + 100 + quiet)) < 0.01, "a snapshot sent while paused says so as well")
 }
 
 do {
@@ -4461,6 +4467,45 @@ do {
     check(store.isConnected, "and a message from its next launch connects it again")
 }
 
+do {
+    // A hold longer than `connectedFor`, with the copies asked to pause: the extension stays connected (#80).
+    // Silence counts for the connection as for a copy going quiet: not during a hold, nor during the pause a copy
+    // says it's in, nor, for copies not heard from since a hold, until the pause they may have missed runs out.
+    let (store, clocks, commands) = clockedStore()
+    clocks.pass(quiet + 1)
+    heartbeat(store)
+    hold(store, clocks, [.screenLocked])
+    clocks.pass(CopySilence.pauseAfter)
+    store.noteQuietCopies()
+    check(pauses(commands()).count == 1, "the copies are asked to pause")
+    clocks.pass(TabStore.connectedFor * 10)
+    store.checkConnection()
+    check(store.isConnected, "\(Int(TabStore.connectedFor * 10 + CopySilence.pauseAfter)) s at the lock screen with the copies paused: still connected")
+    hold(store, clocks, [])
+    check(store.isConnected, "the hold ending doesn't disconnect it")
+    let lastAsk = clocks.awake - TabStore.connectedFor * 10
+    let missedUntil = max(clocks.awake, lastAsk + CopySilence.pauseLength)
+    clocks.awake = missedUntil + TabStore.connectedFor - 1
+    store.checkConnection()
+    check(store.isConnected, "nor does silence before a pause the copies may have missed has run out, and \(Int(TabStore.connectedFor)) s after")
+    clocks.awake += 2
+    store.checkConnection()
+    check(!store.isConnected, "but silence after that does")
+
+    // A copy saying it's still paused: not counted until its pause runs out. The hold isn't noticed by a
+    // notification: the check reads the holds itself.
+    heartbeat(store)
+    _ = reply(store, message("heartbeat", from: instance, ["seq": 1, "heartbeatsPausedFor": 120_000]))
+    clocks.pass(120 + TabStore.connectedFor - 1)
+    store.checkConnection()
+    check(store.isConnected, "a copy that says it's paused for 2 min is connected until \(Int(TabStore.connectedFor)) s after that")
+    clocks.holds = [.displaysAsleep]
+    clocks.pass(600)
+    store.checkConnection()
+    check(store.isConnected, "a hold the store hears of only at the check isn't silence either")
+}
+
+try? FileManager.default.removeItem(at: stateFolder)
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {

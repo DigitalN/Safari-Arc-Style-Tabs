@@ -188,13 +188,15 @@ struct ExtensionMessage {
 
     private struct Head: Decodable {
         enum CodingKeys: String, CodingKey {
-            case type, instance, profile, extensionPath
+            case type, instance, profile, extensionPath, heartbeatsPausedFor
         }
 
         let type: String
         let instance: String?
         let profile: String?
         let extensionPath: String?
+        /// While a copy's heartbeats are paused, how much longer, in ms (#80).
+        let heartbeatsPausedFor: Double?
         var snapshot: Snapshot?
         var changes: SnapshotChanges?
         var error: Error?
@@ -205,6 +207,7 @@ struct ExtensionMessage {
             instance = try? container.decodeIfPresent(String.self, forKey: .instance)
             profile = try? container.decodeIfPresent(String.self, forKey: .profile)
             extensionPath = try? container.decodeIfPresent(String.self, forKey: .extensionPath)
+            heartbeatsPausedFor = try? container.decodeIfPresent(Double.self, forKey: .heartbeatsPausedFor)
             do {
                 switch type {
                 case "snapshot": snapshot = try Snapshot(from: decoder)
@@ -231,6 +234,7 @@ struct ExtensionMessage {
             object["profile"] = head.profile
             object["extensionPath"] = head.extensionPath
             object["seq"] = head.snapshot?.seq ?? head.changes?.seq
+            object["heartbeatsPausedFor"] = head.heartbeatsPausedFor
             self.object = object
         } else {
             guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }

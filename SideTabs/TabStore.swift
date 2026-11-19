@@ -1180,6 +1180,10 @@ final class TabStore {
         if silence.update(holds: held, at: now) {
             let missed = silence.missedResumeUntil.map { ", or until \(Int($0 - now + Self.quietAfter)) s from now if it isn't heard from first, since it may have missed this" } ?? ""
             log.notice("the extension's copies are no longer held back by \(CopySilence.describe(before), privacy: .public): each has \(Int(Self.quietAfter)) s to speak before it counts as quiet\(missed, privacy: .public); asking each for a snapshot\(paused ? " and to heartbeat again" : "", privacy: .public)")
+            // The connection's silence counts again, from the same moment.
+            if isConnected {
+                checkConnection()
+            }
             if paused {
                 // A copy that misses this is silent until its pause runs out, which `silence` allows for.
                 sendCommand?(["action": "resumeHeartbeats"]) {}
@@ -1393,12 +1397,20 @@ final class TabStore {
     }
 
     /// Whether the extension has been silent for `connectedFor` seconds of awake time; if not, looks again when it
-    /// would have been. Sleep doesn't count, as the awake clock stops. The checks in Tests/ call this directly.
+    /// would have been. Silence counts as for a copy going quiet (CopySilence, #80): sleep doesn't count, as the
+    /// awake clock stops, nor does a hold, a pause in heartbeats a copy said it was in, or, after a hold, the
+    /// pause a copy may have missed the end of. During a hold nothing is counted, and the hold's end looks again
+    /// (`noteHolds`). The checks in Tests/ call this directly.
     func checkConnection() {
         connectionCheck?.cancel()
         connectionCheck = nil
         guard isConnected else { return }
-        let silent = lastMessageAt.map { uptime() - $0 } ?? .infinity
+        // A hold that began or ended without a notification is noticed first.
+        noteHolds()
+        scheduleCopyCheck()
+        guard silence.holds.isEmpty else { return }
+        let paused = copies.values.compactMap(\.pausedUntil).max()
+        let silent = lastMessageAt.map { silence.silence(lastHeard: $0, pausedUntil: paused, at: uptime()) } ?? .infinity
         if silent >= Self.connectedFor {
             isConnected = false
             bridgeLog.notice("the extension has been silent for \(Int(silent)) s; it no longer counts as connected")

@@ -559,6 +559,9 @@ async function settled(page) {
     // --- #80: a heartbeat only when nothing else has been delivered for the interval, and none during a pause ---
 
     const HEARTBEAT = 10000;
+    // Past what a copy sends as it starts: the hello, the first snapshot, and the log line of the favicon sweep
+    // 4 s in (#84).
+    const STARTUP = 5000;
     // The times, on the manual clock, of the messages sent after `from`, and of the heartbeats among them.
     const sentAfter = (page, from) => page.sent.filter((entry) => entry.at > from);
     const heartbeatTimes = (page, from = -Infinity) => sentAfter(page, from).filter((entry) => entry.message.type === "heartbeat").map((entry) => entry.at);
@@ -567,7 +570,7 @@ async function settled(page) {
     {
         // Nothing happening in Safari: one message per interval, and that's the heartbeat.
         const page = load({ manualTime: true, queryDelay: 0 });
-        await page.advance(1000);
+        await page.advance(STARTUP);
         const start = page.now();
         check(sentAfter(page, -Infinity).some((entry) => entry.message.type === "hello"), "the copy says hello at once");
         check(heartbeatTimes(page).length === 0, "and sends no heartbeat with it: the hello and the first snapshot show it's running");
@@ -585,7 +588,7 @@ async function settled(page) {
         // While other messages are delivered, no heartbeat; the first one comes an interval after the last
         // delivered message.
         const page = load({ manualTime: true, queryDelay: 0 });
-        await page.advance(1000);
+        await page.advance(STARTUP);
         const start = page.now();
         for (let i = 0; i < 10; i++) {
             page.fire("activated", { tabId: (i % 3) + 1, windowId: 1 });
@@ -603,7 +606,7 @@ async function settled(page) {
         // Messages the app didn't get don't count: the app not running (no `appRunning` in the reply), or no
         // reply at all. Heartbeats go on every interval meanwhile, and no faster.
         const page = load({ manualTime: true, queryDelay: 0, quiet: true, reply: (message) => (message.type === "heartbeat" ? { appRunning: true } : message.type === "log" ? HANG : {}) });
-        await page.advance(1000);
+        await page.advance(STARTUP);
         const start = page.now();
         for (let i = 0; i < 20; i++) {
             page.fire("activated", { tabId: (i % 3) + 1, windowId: 1 });
@@ -613,7 +616,7 @@ async function settled(page) {
         check(times.length === 4, `undelivered messages every 2 s don't hold heartbeats back: 4 in 40 s (got ${times.length})`);
 
         const lost = load({ manualTime: true, queryDelay: 0, quiet: true, reply: (message) => (message.type === "heartbeat" ? HANG : { appRunning: true }) });
-        await lost.advance(1000);
+        await lost.advance(STARTUP);
         const from = lost.now();
         await lost.advance(60000);
         const beats = heartbeatTimes(lost, from);
@@ -644,7 +647,7 @@ async function settled(page) {
         // The app asks for a pause while a hold lasts: no heartbeats until the time it gave, then they go on by
         // themselves, at once, though the app never said the hold ended.
         const page = load({ manualTime: true, queryDelay: 0 });
-        await page.advance(1000);
+        await page.advance(STARTUP);
         const start = page.now();
         page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 90000, id: "L-1" });
         await page.advance(89000);
@@ -668,7 +671,7 @@ async function settled(page) {
         // While a pause lasts, every message says for how much longer, so the app doesn't count that silence and
         // can tell a copy that missed the end of the hold. Once the pause is over, they don't.
         const page = load({ manualTime: true, queryDelay: 0 });
-        await page.advance(1000);
+        await page.advance(STARTUP);
         const start = page.now();
         page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 300000, ms: 300000, id: "L-1" });
         await page.advance(100000);
@@ -688,7 +691,7 @@ async function settled(page) {
         // was delivered first. So does any other command from the app, such as its request for a snapshot.
         for (const ending of [{ action: "resumeHeartbeats" }, { action: "snapshot" }, { action: "activate", tabId: 2 }]) {
             const page = load({ manualTime: true, queryDelay: 0 });
-            await page.advance(1000);
+            await page.advance(STARTUP);
             const start = page.now();
             page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 90000, id: "L-1" });
             await page.advance(30000);
@@ -707,7 +710,7 @@ async function settled(page) {
         // A pause never lasts more than 5 min, whatever the app says, nor applies when it's already over; a pause
         // for another copy isn't this copy's.
         const page = load({ manualTime: true, queryDelay: 0 });
-        await page.advance(1000);
+        await page.advance(STARTUP);
         const start = page.now();
         page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 24 * 3600 * 1000, id: "L-1" });
         await page.advance(5 * 60 * 1000);
@@ -716,20 +719,20 @@ async function settled(page) {
         // The app says until when by the clock and for how long; whichever ends first ends the pause, so a
         // clock set back, or a command that came late, doesn't make it longer than the app counts on.
         const late = load({ manualTime: true, queryDelay: 0 });
-        await late.advance(1000);
+        await late.advance(STARTUP);
         const came = late.now();
         late.ports[0].deliver({ action: "pauseHeartbeats", until: came + 600000, ms: 90000, id: "L-1" });
         await late.advance(90000);
         check(heartbeatTimes(late, came)[0] === came + 90000, "a pause ends after the time it was given for, though its clock time is later");
         const early = load({ manualTime: true, queryDelay: 0 });
-        await early.advance(1000);
+        await early.advance(STARTUP);
         const at = early.now();
         early.ports[0].deliver({ action: "pauseHeartbeats", until: at + 60000, ms: 90000, id: "L-1" });
         await early.advance(60000);
         check(heartbeatTimes(early, at)[0] === at + 60000, "and at its clock time, if that's sooner");
 
         const other = load({ manualTime: true, queryDelay: 0 });
-        await other.advance(1000);
+        await other.advance(STARTUP);
         const from = other.now();
         other.ports[0].deliver({ action: "pauseHeartbeats", until: from + 90000, id: "L-1", instance: "another-copy" });
         other.ports[0].deliver({ action: "pauseHeartbeats", until: from - 1000, id: "L-2" });
