@@ -9,8 +9,8 @@ import os.log
 /// Outgoing: `SFSafariApplication.dispatchMessage` delivers commands to the port that
 /// background.js opened with `connectNative`.
 final class ExtensionBridge {
-    /// Handles one JSON message from the extension and returns the JSON reply.
-    var onMessage: ((_ type: String, _ payload: Data, _ object: [String: Any]) -> [String: Any])?
+    /// Handles one message from the extension and returns the JSON reply.
+    var onMessage: ((_ message: ExtensionMessage) -> [String: Any])?
 
     private(set) var isListening = false
     private var port: CFMessagePort?
@@ -47,14 +47,15 @@ final class ExtensionBridge {
     }
 
     private func handle(_ data: Data) -> Data {
-        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let type = object["type"] as? String else {
+        // Read once: a snapshot straight into its type, not parsed into a dictionary first (#81).
+        guard let message = ExtensionMessage(data: data) else {
             return Data("{}".utf8)
         }
+        let type = message.type
         if seenTypes.insert(type).inserted {
             log.notice("first “\(type, privacy: .public)” message from the extension")
         }
-        var reply = onMessage?(type, data, object) ?? [:]
+        var reply = onMessage?(message) ?? [:]
         reply["appRunning"] = true
         return (try? JSONSerialization.data(withJSONObject: reply)) ?? Data("{}".utf8)
     }

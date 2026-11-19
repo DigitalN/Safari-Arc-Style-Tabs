@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 // Checks for TabStore's handling of messages from the extension. Run with scripts/run-checks.sh,
 // which compiles this together with the real TabStore.swift and Models.swift.
@@ -3811,6 +3812,207 @@ do {
     var some = FavoritesReveal()
     some.pointerMoved(toY: 10, headerBottom: header, hasFavorites: true, draggingFolder: false)
     check(!some.isShown, "with favorites there's a grid already, and nothing changes")
+}
+
+
+// MARK: - Snapshots that change nothing, and changes in place of snapshots (#81)
+
+/// Whether anything the sidebar's views read changes while `action` runs. (`lastMessageAt`, which every message
+/// sets, isn't among them here: #83 sees to that one.)
+func sidebarChanges(_ store: TabStore, while action: () -> Void) -> Bool {
+    final class Flag: @unchecked Sendable { var raised = false }
+    let changed = Flag()
+    withObservationTracking {
+        _ = store.snapshots
+        _ = store.liveSnapshots
+        _ = store.liveInstances
+        _ = store.currentWindow
+        _ = store.shownContent
+        _ = store.displayedContent
+        _ = store.lacksWebsiteAccess
+        _ = store.activeTab
+        _ = store.bookmarkTabs
+        _ = store.customNames
+        _ = store.currentWindowProfile
+        _ = store.otherExtensionCopy
+    } onChange: {
+        changed.raised = true
+    }
+    action()
+    return changed.raised
+}
+
+func changesObject(seq: Int, base: Int, startedAt: Double? = nil, focus: [String: Any]? = nil, windowIds: [Int]? = nil,
+                   windows: [[String: Any]]? = nil, tabs: [[String: Any]]? = nil) -> [String: Any] {
+    var object: [String: Any] = ["type": "changes", "instance": instance, "seq": seq, "base": base]
+    object["startedAt"] = startedAt
+    object["focus"] = focus
+    object["windowIds"] = windowIds
+    object["windows"] = windows
+    object["tabs"] = tabs
+    return object
+}
+
+func snapshotCommands(_ sent: [[String: Any]]) -> Int {
+    sent.filter { $0["action"] as? String == "snapshot" }.count
+}
+
+do {
+    // A snapshot identical to the last one, with only a new number and time, changes nothing anything watches.
+    let (store, _) = makeStore()
+    let shown = store.displayedContent
+    check(shown != nil && store.currentWindow != nil, "the store shows the window")
+    check(!sidebarChanges(store) { send(store, snapshotObject(seq: 2, active: 1, startedAt: nowMilliseconds())) },
+          "a snapshot that shows the same as the last one causes no observation change")
+    check(!sidebarChanges(store) { send(store, snapshotObject(seq: 3, active: 1)) }, "nor one without a time")
+    check(!sidebarChanges(store) { send(store, changesObject(seq: 4, base: 3, startedAt: nowMilliseconds())) },
+          "nor changes that change nothing")
+    check(!sidebarChanges(store) { activated(store, tab: 1, seq: 5, at: nowMilliseconds()) },
+          "nor a report of a switch to the tab that's already highlighted")
+    check(sidebarChanges(store) { send(store, snapshotObject(seq: 6, active: 2)) }, "a snapshot that shows another tab does change it")
+    check(highlighted(store) == 2, "and shows it")
+    check(sidebarChanges(store) { send(store, changesObject(seq: 7, base: 6, tabs: [tab(3, active: false).merging(["title": "Renamed"]) { $1 }])) },
+          "and so do changes that rename a tab")
+
+    // The bookkeeping still moves on: a report older than the identical snapshot is ignored, and the heartbeat
+    // finds nothing missing.
+    let (other, sent) = makeStore()
+    send(other, snapshotObject(seq: 5, active: 1))
+    activated(other, tab: 3, seq: 4)
+    check(highlighted(other) == 1, "a report older than an identical snapshot is still ignored")
+    let beat = reply(other, ["type": "heartbeat", "instance": instance, "seq": 5])
+    check(beat["needSnapshot"] as? Bool == false && snapshotCommands(sent()) == 0, "and the heartbeat for it finds nothing missing")
+}
+
+do {
+    // Changes are applied to the state they're counted from.
+    let (store, sent) = makeStore()
+    _ = reply(store, changesObject(seq: 2, base: 1, tabs: [tab(3).merging(["title": "Three"]) { $1 }]))
+    check(store.tab(for: TabKey(instance: instance, tabId: 3))?.title == "Three", "changes rename the tab they carry")
+    check(store.tab(for: TabKey(instance: instance, tabId: 2))?.title == "Tab 2", "and keep the others")
+    let beat = reply(store, ["type": "heartbeat", "instance": instance, "seq": 2])
+    check(beat["needSnapshot"] as? Bool == false && snapshotCommands(sent()) == 0, "the heartbeat counts changes as delivered")
+
+    // A move: the window's new order, and each tab's index from it.
+    _ = reply(store, changesObject(seq: 3, base: 2, windows: [["id": 1, "focused": true, "incognito": false, "tabIds": [4, 1, 2, 3]]]))
+    let order = store.snapshots[instance]?.windows.first?.tabs.map(\.id)
+    check(order == [4, 1, 2, 3], "a window's new order moves its tabs (\(order ?? []))")
+    check(store.snapshots[instance]?.windows.first?.tabs.map(\.index) == [0, 1, 2, 3], "and numbers them in it")
+    check(store.tab(for: TabKey(instance: instance, tabId: 3))?.title == "Three", "keeping what changed before")
+
+    // A new window with a tab, then focus moving to it.
+    _ = reply(store, changesObject(seq: 4, base: 3, focus: ["focusedWindowId": 2, "lastFocusedWindowId": 2, "focusChangedAt": 5.0],
+                               windowIds: [1, 2],
+                               windows: [["id": 1, "focused": false, "incognito": false], ["id": 2, "focused": true, "incognito": false, "tabIds": [9]]],
+                               tabs: [tab(9, active: true, windowId: 2)]))
+    check(store.snapshots[instance]?.windows.map(\.id) == [1, 2], "a new window is added in its place")
+    check(store.currentWindow?.window.id == 2, "and focus moving to it shows it")
+    check(store.window(instance: instance, id: 1)?.tabs.count == 4, "the other window keeps its tabs")
+
+    // Focus leaving Safari: the window focused last stays.
+    _ = reply(store, changesObject(seq: 5, base: 4, focus: ["focusedWindowId": -1, "lastFocusedWindowId": 2, "focusChangedAt": 6.0],
+                               windows: [["id": 2, "focused": false, "incognito": false]]))
+    check(store.snapshots[instance]?.focusedWindowId == -1 && store.currentWindow?.window.id == 2, "focus leaving Safari keeps the window focused last")
+
+    // A window closed: left out of the windows.
+    _ = reply(store, changesObject(seq: 6, base: 5, focus: ["focusedWindowId": 1, "lastFocusedWindowId": 1, "focusChangedAt": 7.0], windowIds: [1]))
+    check(store.snapshots[instance]?.windows.map(\.id) == [1] && store.tab(for: TabKey(instance: instance, tabId: 9)) == nil,
+          "a window left out of the list is gone, with its tabs")
+    check(store.currentWindow?.window.id == 1, "and the sidebar shows the other")
+}
+
+do {
+    // Changes counted from a state the app hasn't got: nothing changes, and the copy is asked for a full snapshot.
+    let (store, sent) = makeStore()
+    let before = store.snapshots[instance]
+    var answer: [String: Any] = [:]
+    let changed = sidebarChanges(store) {
+        answer = reply(store, changesObject(seq: 5, base: 3, tabs: [tab(2).merging(["title": "Wrong"]) { $1 }]))
+    }
+    check(!changed && store.snapshots[instance]?.windows == before?.windows, "changes that don't follow from what the app has change nothing")
+    check(answer["needSnapshot"] as? Bool == true, "the reply asks for a full snapshot")
+    check(snapshotCommands(sent()) == 1 && sent().last?["instance"] as? String == instance, "and so does a command, to that copy")
+    _ = reply(store, changesObject(seq: 6, base: 5))
+    check(snapshotCommands(sent()) == 1, "a second gap right after doesn't send a second command")
+    send(store, snapshotObject(seq: 7, active: 2))
+    check(highlighted(store) == 2, "the full snapshot puts it right")
+    _ = reply(store, changesObject(seq: 8, base: 7, tabs: [tab(4).merging(["title": "Four"]) { $1 }]))
+    check(store.tab(for: TabKey(instance: instance, tabId: 4))?.title == "Four", "and changes follow from it")
+
+    // Changes older than what the app has, overtaken by a full snapshot sent after them, are dropped without asking.
+    let commands = snapshotCommands(sent())
+    let late = reply(store, changesObject(seq: 6, base: 1, tabs: [tab(4).merging(["title": "Old"]) { $1 }]))
+    check(late["needSnapshot"] == nil && snapshotCommands(sent()) == commands, "older changes are ignored without asking for anything")
+    check(store.tab(for: TabKey(instance: instance, tabId: 4))?.title == "Four", "and change nothing")
+
+    // Changes naming a tab neither they nor the state carry are a gap too.
+    _ = reply(store, changesObject(seq: 9, base: 8, windows: [["id": 1, "focused": true, "incognito": false, "tabIds": [1, 2, 77]]]))
+    check(store.snapshots[instance]?.windows.first?.tabs.count == 4, "changes listing a tab nobody sent change nothing")
+
+    // A copy the app has never heard from (the app restarted) is asked too.
+    let (fresh, freshSent) = makeStore()
+    fresh.safariDidTerminate()
+    let first = reply(fresh, changesObject(seq: 3, base: 2))
+    check(first["needSnapshot"] as? Bool == true && snapshotCommands(freshSent()) == 1, "changes from a copy the app has nothing of ask for a snapshot")
+}
+
+do {
+    // Changes are counted from the copy's own last state, not from what reports of switches have made of it since:
+    // they stand for a full snapshot, and the rules between snapshots and reports hold for them.
+    let (store, _) = makeStore(active: 2)
+    activated(store, tab: 3, seq: 2)
+    check(highlighted(store) == 3, "a report moves the highlight")
+    _ = reply(store, changesObject(seq: 4, base: 1))
+    check(highlighted(store) == 2, "changes taken after it that change nothing say Safari is on the tab of the state they're counted from")
+    activated(store, tab: 3, seq: 3)
+    check(highlighted(store) == 2, "and a report older than them, arriving late, is ignored")
+    activated(store, tab: 4, seq: 5)
+    _ = reply(store, changesObject(seq: 4, base: 1))
+    check(highlighted(store) == 4, "older changes don't undo a newer report")
+
+    // Changes started before a click, still showing the old tab, don't move its highlight back (#19, #20).
+    let (clicked, _) = makeStore()
+    let before = nowMilliseconds() - 50
+    click(clicked, tab: 3)
+    _ = reply(clicked, changesObject(seq: 2, base: 1, startedAt: before))
+    check(highlighted(clicked) == 3, "changes started before a click don't move the highlight back")
+    _ = reply(clicked, changesObject(seq: 3, base: 2, startedAt: nowMilliseconds(),
+                                 tabs: [tab(1, active: false), tab(3, active: true)]))
+    check(highlighted(clicked) == 3, "changes that show the clicked tab keep it")
+}
+
+do {
+    // A message is read once: a snapshot's fields straight into Snapshot, its `object` only who sent it.
+    let snapshot = snapshotObject(seq: 3, active: 2).merging(["extensionPath": "/Applications/Side Tabs.app/x", "profile": "P"]) { $1 }
+    let message = ExtensionMessage(data: try! JSONSerialization.data(withJSONObject: snapshot))
+    check(message?.snapshot?.seq == 3 && message?.snapshot?.windows.first?.tabs.count == 4, "a snapshot is decoded straight into its type")
+    check(message?.object["windows"] == nil, "its object leaves the windows out")
+    check(message?.object["instance"] as? String == instance && message?.object["profile"] as? String == "P"
+          && message?.object["extensionPath"] as? String == "/Applications/Side Tabs.app/x" && message?.object["seq"] as? Int == 3,
+          "and has who sent it")
+    let changes = ExtensionMessage(data: try! JSONSerialization.data(withJSONObject: changesObject(seq: 4, base: 3)))
+    check(changes?.changes?.base == 3 && changes?.object["seq"] as? Int == 4, "changes are decoded straight into theirs")
+    let heartbeat = ExtensionMessage(data: Data(#"{"type":"heartbeat","instance":"x","seq":2}"#.utf8))
+    check(heartbeat?.object["seq"] as? Int == 2 && heartbeat?.snapshot == nil, "any other message keeps all of its object")
+    let bad = ExtensionMessage(data: Data(#"{"type":"snapshot","instance":"x"}"#.utf8))
+    check(bad != nil && bad?.snapshot == nil && bad?.error != nil, "a snapshot that can't be read is still a message, with why")
+}
+
+do {
+    // A page's data: icon comes by a short name. A favorite made from its tab keeps the icon itself.
+    let (store, _) = makeStore()
+    let name = TabStore.namedIconPrefix + "abc123"
+    _ = reply(store, changesObject(seq: 2, base: 1, tabs: [tab(2).merging(["favIconUrl": name]) { $1 }]))
+    _ = reply(store, ["type": "icon", "instance": instance, "url": name, "data": "QUJD"])
+    check(store.savedIconURL(name) == "data:application/octet-stream;base64,QUJD", "the name of an icon that's here is kept as the icon")
+    check(store.savedIconURL(TabStore.namedIconPrefix + "other") == TabStore.namedIconPrefix + "other", "one that isn't stays a name")
+    check(store.savedIconURL("https://example.com/i.png") == "https://example.com/i.png", "any other icon URL stays as it is")
+    let tabTwo = store.tab(for: TabKey(instance: instance, tabId: 2))!
+    let window = store.window(instance: instance, id: 1)!
+    let profile = store.profile(of: window, instance: instance)!
+    store.addBookmark(from: tabTwo, instance: instance, to: .favorites(profile))
+    check(store.bookmarks(in: .favorites(profile)).last?.faviconURL == "data:application/octet-stream;base64,QUJD",
+          "a favorite made from the tab keeps the icon")
 }
 
 try? FileManager.default.removeItem(at: stateFolder)

@@ -174,7 +174,12 @@ separate window that the app keeps attached to Safari's window:
 
 - `WebExtension/`: the Safari web extension. `background.js` sends windows and tabs to
   the app (with retries, and a heartbeat every 5 seconds so missed updates are noticed)
-  and carries out the app's commands: switch, close, open, move, and so on. It also
+  and carries out the app's commands: switch, close, open, move, and so on. After a first
+  full snapshot it sends only what changed since the last state the app took, which the
+  app turns back into a full snapshot; when the app hasn't got the state they're counted
+  from, it asks that copy for a full snapshot again. A change of focus alone is sent
+  without asking Safari for every tab, and a page's `data:` icon goes to the app once,
+  under a short name. It also
   fetches favicons for the app, which never connects to websites itself: reaching a
   device on the local network, like a router, would make macOS ask for Local Network
   access. `content.js` reports each page's favicon URL, which Safari's tabs API doesn't

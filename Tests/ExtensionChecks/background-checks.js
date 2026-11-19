@@ -36,6 +36,7 @@ const HANG = Symbol("hang");
 // `quiet` keeps background.js's warnings out of the output, for a check that expects them.
 function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true }), timeScale = 1, hangLastFocused = false, connectFails = 0, quiet = false } = {}) {
     const sent = [];
+    let queries = 0;
     const updates = [];
     const created = [];
     const windowUpdates = [];
@@ -57,7 +58,7 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
             onCreated: event("windows.created"), onRemoved: event("windows.removed"), onFocusChanged: event("windows.focus"),
         },
         tabs: {
-            query: async () => { await sleep(queryDelay); return tabs.map((tab) => ({ ...tab })); },
+            query: async () => { queries++; await sleep(queryDelay); return tabs.map((tab) => ({ ...tab })); },
             executeScript: async () => {},
             update: async (id, props) => { updates.push({ id, props }); return { ...tabs[id - 1], ...props }; },
             create: async (props) => { created.push(props); return { id: 100 + created.length, windowId: props.windowId ?? 1, index: 0, url: props.url }; },
@@ -105,13 +106,19 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
     vm.runInContext(source.replace('"use strict";', ""), context);
     const fire = (name, ...args) => (listeners[name] || []).forEach((fn) => fn(...args));
     const ofType = (type) => sent.filter((entry) => entry.message.type === type).map((entry) => entry.message);
+    // The messages about the windows: full snapshots, and the changes since the last one (#81).
+    const states = () => sent.filter((entry) => isState(entry.message)).map((entry) => entry.message);
     // Carries out a command from the app, as the port or a reply would deliver it.
     const run = (command) => context.runCommand({ instance: "test-instance", ...command });
     const heartbeat = () => intervals.filter((entry) => entry.ms === 5000).forEach((entry) => entry.fn());
     // Reads one of background.js's top-level variables.
     const state = (name) => vm.runInContext(name, context);
-    return { sent, tabs, updates, created, windowUpdates, windowsCreated, intervals, ports, fire, ofType, run, heartbeat, state };
+    // How many times Safari was asked for every tab.
+    const queryCount = () => queries;
+    return { sent, tabs, updates, created, windowUpdates, windowsCreated, intervals, ports, fire, ofType, states, run, heartbeat, state, queryCount };
 }
+
+const isState = (message) => message.type === "snapshot" || message.type === "changes";
 
 // Waits for the first startup snapshot and forgets what was sent so far.
 async function settled(page) {
@@ -132,7 +139,7 @@ async function settled(page) {
         check(reports.length === 2, "each activation is reported");
         check(reports.every((report) => Number.isInteger(report.seq)), "activated reports carry a seq");
         check(reports[0].seq < reports[1].seq, "activated reports are numbered in the order they happened");
-        const snapshots = page.ofType("snapshot");
+        const snapshots = page.states();
         check(snapshots.length >= 1, "a snapshot follows an activation");
         const numbers = [...reports, ...snapshots].map((message) => message.seq);
         check(new Set(numbers).size === numbers.length, "snapshots and reports never reuse a number");
@@ -144,16 +151,16 @@ async function settled(page) {
         const page = load({ queryDelay: 60 });
         await settled(page);
 
-        page.fire("windows.focus", 1);               // starts a snapshot build (60 ms query)
+        page.run({ action: "snapshot" });            // starts a snapshot build (60 ms query)
         await sleep(10);
         page.fire("activated", { tabId: 2, windowId: 1 });
         await sleep(400);
         const report = page.ofType("activated")[0];
-        const first = page.ofType("snapshot")[0];
+        const first = page.states()[0];
         check(report && first, "both a report and a snapshot were sent");
         if (report && first) {
             check(first.seq < report.seq, "a snapshot started before an activation is numbered before it");
-            const later = page.ofType("snapshot").find((snapshot) => snapshot.seq > report.seq);
+            const later = page.states().find((snapshot) => snapshot.seq > report.seq);
             check(!!later, "the snapshot the activation asks for is numbered after it");
         }
     }
@@ -165,7 +172,7 @@ async function settled(page) {
         await settled(page);
         page.fire("activated", { tabId: 2, windowId: 1 });
         await sleep(200);
-        const snapshots = page.ofType("snapshot");
+        const snapshots = page.states();
         check(snapshots.every((snapshot, i) => i === 0 || snapshot.seq > snapshots[i - 1].seq), "snapshots are numbered in build order");
     }
 
@@ -196,11 +203,11 @@ async function settled(page) {
         await settled(page);
 
         const before = Date.now();
-        page.fire("windows.focus", 1);               // starts a snapshot build (80 ms query)
+        page.run({ action: "snapshot" });            // starts a snapshot build (80 ms query)
         await sleep(20);
         page.fire("activated", { tabId: 2, windowId: 1 });
         await sleep(400);
-        const entry = page.sent.find((item) => item.message.type === "snapshot");
+        const entry = page.sent.find((item) => isState(item.message));
         const report = page.ofType("activated")[0];
         check(!!entry && !!report, "a snapshot and a report were sent");
         if (entry && report) {
@@ -211,7 +218,7 @@ async function settled(page) {
                 check(entry.at - snapshot.startedAt >= 60,
                     `it is when the build started, not when it finished: the queries took 80 ms (sent ${entry.at - snapshot.startedAt} ms later)`);
                 check(snapshot.startedAt < report.at, "a snapshot started before an activation is stamped before it");
-                const next = page.ofType("snapshot").find((item) => item.seq > report.seq);
+                const next = page.states().find((item) => item.seq > report.seq);
                 check(!next || next.startedAt >= report.at, "and the one the activation asks for is stamped after it");
             }
         }
@@ -225,7 +232,7 @@ async function settled(page) {
             page.sent.length = 0;
             action();
             await sleep(450);
-            return page.ofType("snapshot").length;
+            return page.states().length;
         };
         const unchanged = { ...page.tabs[0] };
 
@@ -277,7 +284,7 @@ async function settled(page) {
             await sleep(10);
         }
         await sleep(700);
-        const count = page.ofType("snapshot").length;
+        const count = page.states().length;
         check(count > 0 && count <= 6, `40 title updates over ~0.4 s sent ${count} snapshots`);
     }
 
@@ -288,12 +295,12 @@ async function settled(page) {
         await page.run({ action: "mute", tabId: 2, muted: true });
         await sleep(200);
         check(page.updates.length === 1 && page.updates[0].props.muted === true, "the mute command mutes the tab");
-        check(page.ofType("snapshot").length >= 1, "and a snapshot follows it, without Safari reporting any update");
+        check(page.states().length >= 1, "and a snapshot follows it, without Safari reporting any update");
 
         page.sent.length = 0;
         await page.run({ action: "mute", tabId: 2, muted: false });
         await sleep(200);
-        check(page.ofType("snapshot").length >= 1, "and one follows an unmute");
+        check(page.states().length >= 1, "and one follows an unmute");
     }
 
     {
@@ -304,7 +311,7 @@ async function settled(page) {
         await page.run({ action: "activate", tabId: 2 });
         await sleep(100);
         check(page.updates.length === 1 && page.updates[0].props.active === true, "the activate command switches the tab");
-        check(page.ofType("snapshot").length === 0, "and sends no snapshot of its own: Safari reports the switch");
+        check(page.states().length === 0, "and sends no snapshot of its own: Safari reports the switch");
     }
 
     // --- #27: a tab reopened from cleanup's list in another profile's window brings that window forward ---
@@ -347,14 +354,14 @@ async function settled(page) {
         } });
         await sleep(LIMIT * 3);
         check(lost === 1, "the first snapshot's reply was lost");
-        check(page.ofType("snapshot").length >= 2, "a snapshot whose reply never comes is sent again");
+        check(page.states().length >= 2, "a snapshot whose reply never comes is sent again");
         check(page.state("sending") === false, "and the copy isn't left waiting for that reply");
         const logs = page.ofType("log").map((message) => message.message);
         check(logs.some((line) => line.startsWith(`no reply within 4000 ms to "snapshot"`)), "and the app's log hears of the lost reply");
         page.sent.length = 0;
         page.fire("windows.removed", 1);
         await sleep(50);
-        check(page.ofType("snapshot").length === 1, "a later change is still sent");
+        check(page.states().length === 1, "a later change is still sent");
     }
 
     {
@@ -366,7 +373,7 @@ async function settled(page) {
             page.fire("updated", 1, { title: "x" }, { ...page.tabs[0], title: `x${Date.now()}` });
             await sleep(10);
         }
-        const times = page.sent.filter((entry) => entry.message.type === "snapshot").map((entry) => entry.at);
+        const times = page.sent.filter((entry) => isState(entry.message)).map((entry) => entry.at);
         check(times.length >= 5, `snapshots keep going out while their replies are lost (${times.length} in ${LIMIT * 8} ms)`);
         const gaps = times.slice(1).map((at, i) => at - times[i]);
         check(gaps.every((gap) => gap >= LIMIT - 10), `one at a time, each after the last one's time limit (gaps ${gaps.join(", ")} ms)`);
@@ -380,7 +387,7 @@ async function settled(page) {
         const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => (message.type === "hello" ? HANG : { appRunning: true }) });
         await sleep(LIMIT / 2);
         check(page.ofType("hello").length === 1, "the hello was sent");
-        check(page.ofType("snapshot").length >= 1, "the first snapshot doesn't wait for the hello's reply");
+        check(page.states().length >= 1, "the first snapshot doesn't wait for the hello's reply");
         check(page.intervals.some((entry) => entry.ms === 5000), "heartbeats are started without waiting for it either");
         page.heartbeat();
         check(page.ofType("heartbeat").length === 1, "and they go out");
@@ -396,7 +403,7 @@ async function settled(page) {
         check(hellos.length === 6, `with no reply to anything, the hello is sent again 5 times (sent ${hellos.length})`);
         const gaps = hellos.slice(1).map((at, i) => at - hellos[i]);
         check(gaps.every((gap, i) => i === 0 || gap > gaps[i - 1]), `further and further apart (gaps ${gaps.join(", ")} ms)`);
-        check(page.ofType("snapshot").length >= 3, "and snapshots keep being tried");
+        check(page.states().length >= 3, "and snapshots keep being tried");
         check(page.intervals.some((entry) => entry.ms === 5000), "and heartbeats run");
     }
 
@@ -404,7 +411,7 @@ async function settled(page) {
         // Safari never answers which window was focused last: the copy starts anyway.
         const stuck = load({ timeScale: FAST, queryDelay: 2, hangLastFocused: true });
         await sleep(150);
-        check(stuck.ofType("hello").length === 1 && stuck.ofType("snapshot").length >= 1,
+        check(stuck.ofType("hello").length === 1 && stuck.states().length >= 1,
             "a copy whose question about the focused window is never answered still says hello and sends snapshots");
     }
 
@@ -422,7 +429,7 @@ async function settled(page) {
         answerLate({ appRunning: true, needSnapshot: true, commands: [{ action: "activate", tabId: 3 }] });
         await sleep(50);
         check(page.updates.length === 0, "a command in a reply that came after the time limit isn't run");
-        check(page.ofType("snapshot").length === 1, "but its request for a snapshot is");
+        check(page.states().length === 1, "but its request for a snapshot is");
         check(page.ofType("log").some((message) => message.message.startsWith(`the reply to "snapshot" came`)),
             "and the app's log hears of the late reply");
         check(page.state("sending") === false, "and nothing is left waiting");
@@ -455,7 +462,7 @@ async function settled(page) {
         await settled(page);
         page.fire("activated", { tabId: 3, windowId: 1 });
         await sleep(30);
-        check(page.ofType("snapshot").length === 1, "a switch report waiting for its reply doesn't hold up the snapshot after it");
+        check(page.states().length === 1, "a switch report waiting for its reply doesn't hold up the snapshot after it");
         await sleep(LIMIT * 2);
         page.updates.length = 0;
         answerLate({ appRunning: true, commands: [{ action: "activate", tabId: 4 }] });
@@ -595,6 +602,255 @@ async function settled(page) {
         await sleep(20);
         check(activations(page).length === 0 && !logLines(page).some((line) => line.startsWith("skipped")),
             "a command for another copy isn't run, and isn't counted as a repeat");
+    }
+
+
+    // --- #81: changes, not everything ---
+
+    // What one tab in the stand-in looks like to Safari's tabs.onUpdated.
+    const updateTab = (page, id, change) => {
+        const tab = page.tabs.find((item) => item.id === id);
+        Object.assign(tab, change);
+        page.fire("updated", id, change, { ...tab });
+    };
+    const lastState = (page) => page.states().at(-1);
+
+    {
+        // After the first snapshot, a change sends only the tab that changed, counted from the last state the app took.
+        const page = load();
+        await settled(page);
+        const base = page.state("sentSeq");
+        check(base > 0, "the first snapshot was delivered");
+        updateTab(page, 2, { title: "Renamed" });
+        await sleep(400);
+        const states = page.states();
+        check(states.length === 1 && states[0].type === "changes", `a title change sends changes, not a snapshot (sent ${states.map((m) => m.type)})`);
+        const changes = states[0];
+        if (changes) {
+            check(changes.base === base, "counted from the last state the app took");
+            check(changes.seq > base, "and numbered after it");
+            check(Number.isInteger(changes.startedAt), "stamped with when it was taken, like a snapshot");
+            check(changes.tabs?.length === 1 && changes.tabs[0].id === 2 && changes.tabs[0].title === "Renamed",
+                `with only the changed tab, whole (${JSON.stringify(changes.tabs)})`);
+            check(!changes.windows && !changes.windowIds && !changes.focus, "and nothing about windows or focus");
+            check(page.state("sentSeq") === changes.seq, "the heartbeat names the changes once they're delivered");
+        }
+
+        // The next change is counted from those changes.
+        page.sent.length = 0;
+        updateTab(page, 3, { status: "loading" });
+        await sleep(400);
+        const next = lastState(page);
+        check(next?.type === "changes" && next.base === changes?.seq && next.tabs?.length === 1 && next.tabs[0].loading === true,
+            "the next changes are counted from the last ones");
+
+        // A change that ends where it began sends only a number and a time.
+        page.sent.length = 0;
+        updateTab(page, 3, { status: "complete" });
+        updateTab(page, 3, { status: "loading" });
+        await sleep(400);
+        const same = lastState(page);
+        check(same?.type === "changes" && JSON.stringify(Object.keys(same).sort()) === JSON.stringify(["base", "instance", "seq", "startedAt", "type"]),
+            `a state that matches the last one sends only its number and time (${JSON.stringify(same)})`);
+        check(JSON.stringify(same ?? {}).length < 150, "which is a few bytes");
+    }
+
+    {
+        // Moving or closing a tab sends the window's new list of tabs, and no tab.
+        const page = load();
+        await settled(page);
+        page.tabs[0].index = 2;
+        page.tabs[2].index = 0;
+        page.fire("moved", 1, { windowId: 1, fromIndex: 0, toIndex: 2 });
+        await sleep(200);
+        const moved = lastState(page);
+        check(moved?.type === "changes" && JSON.stringify(moved.windows) === JSON.stringify([{ id: 1, focused: true, incognito: false, tabIds: [3, 2, 1, 4, 5] }]),
+            `a move sends the window's tabs in their new order (${JSON.stringify(moved?.windows)})`);
+        check(moved && !moved.tabs, "and no tab: a tab's place isn't part of it");
+
+        page.sent.length = 0;
+        page.tabs.splice(1, 1);
+        page.tabs.forEach((tab) => { if (tab.index > 1) tab.index -= 1; });
+        page.fire("removed", 2, { windowId: 1 });
+        await sleep(200);
+        const closed = lastState(page);
+        check(closed?.type === "changes" && JSON.stringify(closed.windows?.[0]?.tabIds) === JSON.stringify([3, 1, 4, 5]) && !closed.tabs,
+            `a closed tab is left out of its window's list, and no other tab is sent (${JSON.stringify(closed)})`);
+
+        // A new window with a tab: the windows in order, the new window, and its tab.
+        page.sent.length = 0;
+        page.tabs.push({ id: 20, windowId: 2, index: 0, title: "Other", url: "https://example.com/other", active: true });
+        page.fire("windows.created", { id: 2 });
+        await sleep(200);
+        const opened = lastState(page);
+        check(opened?.type === "changes" && JSON.stringify(opened.windowIds) === "[1,2]", "a new window sends the windows in order");
+        check(JSON.stringify(opened?.windows) === JSON.stringify([{ id: 2, focused: false, incognito: false, tabIds: [20] }]), "and the new window with its tabs");
+        check(opened?.tabs?.length === 1 && opened.tabs[0].id === 20, "and its tab");
+    }
+
+    {
+        // Focus moving, in or out of Safari, sends the new focus without asking Safari for every tab again, in every
+        // profile's copy. Switching away from Safari and back sends no full snapshot.
+        const page = load();
+        await settled(page);
+        const queries = page.queryCount();
+        page.fire("windows.focus", -1);
+        await sleep(100);
+        const away = lastState(page);
+        check(away?.type === "changes", "focus leaving Safari sends changes");
+        check(away?.focus?.focusedWindowId === -1 && away.focus.lastFocusedWindowId === 1 && Number.isFinite(away.focus.focusChangedAt),
+            `with the new focus (${JSON.stringify(away?.focus)})`);
+        check(JSON.stringify(away?.windows) === JSON.stringify([{ id: 1, focused: false, incognito: false }]), "and the window that lost it, without its tabs");
+        check(away && !away.tabs, "and no tab");
+        page.fire("windows.focus", 1);
+        await sleep(100);
+        const back = lastState(page);
+        check(back?.type === "changes" && back.focus?.focusedWindowId === 1 && back.base === away?.seq, "focus coming back sends changes too");
+        check(page.queryCount() === queries, `and Safari wasn't asked for its tabs for either (${page.queryCount() - queries} times)`);
+        check(page.states().every((message) => message.type === "changes"), "no full snapshot was sent");
+        check(!!back && !!away && back.startedAt === away.startedAt && back.startedAt < away.focus.focusChangedAt,
+            "its time is that of the tabs it carries, from before focus moved");
+
+        // Focus moving to a window the app hasn't been told of asks Safari: it restores windows without saying so.
+        page.sent.length = 0;
+        page.tabs.push({ id: 40, windowId: 4, index: 0, title: "Restored", url: "https://example.com/restored", active: true });
+        page.fire("windows.focus", 4);
+        await sleep(100);
+        check(page.queryCount() === queries + 1, "focus moving to a window the app hasn't got asks Safari");
+        check(JSON.stringify(lastState(page)?.windowIds) === "[1,4]" && lastState(page)?.focus?.focusedWindowId === 4,
+            "and sends the window with the focus");
+        page.fire("windows.focus", 1);
+        await sleep(100);
+
+        // A focus change with a change to a tab still on its way asks Safari.
+        page.sent.length = 0;
+        updateTab(page, 4, { title: "Busy" });
+        page.fire("windows.focus", -1);
+        await sleep(100);
+        check(page.queryCount() === queries + 2, "a focus change after a tab change asks Safari");
+        const both = lastState(page);
+        check(both?.focus?.focusedWindowId === -1 && both.tabs?.some((tab) => tab.id === 4 && tab.title === "Busy"),
+            "and sends both");
+    }
+
+    {
+        // A full snapshot again: for a snapshot command, when a reply asks for one, and after a message that wasn't
+        // delivered.
+        let refuse = 0;
+        let askAgain = 0;
+        const page = load({ reply: (message) => {
+            if (message.type === "changes" && refuse > 0) { refuse--; return { appRunning: false }; }
+            if (message.type === "changes" && askAgain > 0) { askAgain--; return { appRunning: true, needSnapshot: true }; }
+            return { appRunning: true };
+        } });
+        await settled(page);
+        await page.run({ action: "snapshot" });
+        await sleep(100);
+        check(lastState(page)?.type === "snapshot", "a snapshot command sends a full snapshot, even with nothing changed");
+
+        page.sent.length = 0;
+        refuse = 1;
+        updateTab(page, 2, { title: "Lost" });
+        await sleep(800);
+        const afterLoss = page.states().map((message) => message.type);
+        check(JSON.stringify(afterLoss) === JSON.stringify(["changes", "snapshot"]), `changes that weren't delivered are followed by a full snapshot (${afterLoss})`);
+
+        page.sent.length = 0;
+        askAgain = 1;
+        updateTab(page, 2, { title: "Gap" });
+        await sleep(400);
+        const afterGap = page.states().map((message) => message.type);
+        check(JSON.stringify(afterGap) === JSON.stringify(["changes", "snapshot"]), `a reply that asks for a snapshot gets a full one (${afterGap})`);
+        check(page.state("sentSeq") === lastState(page)?.seq, "and the heartbeat names the full one, not the changes the app didn't take");
+
+        page.sent.length = 0;
+        page.heartbeat();
+        await sleep(10);
+        page.sent.length = 0;
+        updateTab(page, 2, { title: "Fine" });
+        await sleep(400);
+        check(lastState(page)?.type === "changes", "after that, changes again");
+    }
+
+    {
+        // Now and then a change goes out as a full snapshot, in case the app's copy has drifted; a state with nothing
+        // new doesn't.
+        const page = load();
+        await settled(page);
+        page.state("lastFullSnapshotAt = Date.now() - FULL_SNAPSHOT_MS - 1");
+        page.fire("updated", 1, { status: "complete" }, { ...page.tabs[0] });
+        await sleep(400);
+        check(lastState(page)?.type === "changes", "a state with nothing new isn't made a full snapshot");
+        page.sent.length = 0;
+        updateTab(page, 1, { title: "Later" });
+        await sleep(400);
+        check(lastState(page)?.type === "snapshot", "a change long after the last full snapshot is sent as one");
+        page.sent.length = 0;
+        updateTab(page, 1, { title: "Later still" });
+        await sleep(400);
+        check(lastState(page)?.type === "changes", "and the next one as changes");
+    }
+
+    {
+        // A page's icon in a data: URL goes to the app once, by a short name, never in the snapshots.
+        const page = load();
+        await settled(page);
+        const dataURL = "data:image/png;base64," + "QUJD".repeat(500);
+        page.fire("runtime.message", { type: "favicon", url: dataURL }, { tab: { id: 2 } });
+        await sleep(200);
+        const withIcon = lastState(page);
+        const name = withIcon?.tabs?.find((tab) => tab.id === 2)?.favIconUrl;
+        check(typeof name === "string" && name.startsWith("sidetabs-icon:") && name.length < 40, `the snapshot carries a short name for the icon (${name?.slice(0, 40)})`);
+        check(!JSON.stringify(page.states()).includes("data:"), "and never the data: URL");
+        const icons = page.ofType("icon");
+        check(icons.length === 1 && icons[0].url === name && icons[0].data === "QUJD".repeat(500), "the icon goes to the app once, under that name");
+        updateTab(page, 2, { title: "Again" });
+        await page.run({ action: "snapshot" });
+        await sleep(400);
+        check(page.ofType("icon").length === 1, "and isn't sent again with later changes or snapshots");
+        check(page.states().filter((message) => message.type === "snapshot").at(-1)?.windows[0].tabs[1].favIconUrl === name,
+            "full snapshots carry the same name");
+        await page.run({ action: "fetchIcons", urls: [name] });
+        await sleep(50);
+        check(page.ofType("icon").length === 2 && page.ofType("icon")[1].data === "QUJD".repeat(500), "the app can ask for it by name");
+        await page.run({ action: "fetchIcons", urls: ["sidetabs-icon:unknown"] });
+        await sleep(50);
+        check(page.ofType("icon").length === 3 && page.ofType("icon")[2].data === null, "a name this copy doesn't know gets no icon");
+    }
+
+    {
+        // Changes in a window the sidebar isn't showing wait longer: about a second after the last state, rather than
+        // a quarter of one.
+        const page = load();
+        await settled(page);
+        page.tabs.push({ id: 30, windowId: 2, index: 0, title: "Back", url: "https://example.com/back", active: true });
+        page.fire("windows.created", { id: 2 });
+        await sleep(100);
+        const flushed = page.sent.filter((entry) => isState(entry.message)).at(-1)?.at;
+        page.sent.length = 0;
+        const tab = page.tabs.find((item) => item.id === 30);
+        tab.title = "Back loading";
+        page.fire("updated", 30, { title: tab.title }, { ...tab });
+        await sleep(1300);
+        const late = page.sent.find((entry) => isState(entry.message));
+        check(!!late && late.at - flushed >= 950, `a change in an unfocused window waits about a second (${late && late.at - flushed} ms)`);
+
+        page.sent.length = 0;
+        updateTab(page, 1, { title: "Front" });
+        const fired = Date.now();
+        await sleep(600);
+        const soon = page.sent.find((entry) => isState(entry.message));
+        check(!!soon && soon.at - fired <= 400, `one in the focused window doesn't (${soon && soon.at - fired} ms)`);
+
+        // With Safari in the background, the window focused last is the one the sidebar shows.
+        page.fire("windows.focus", -1);
+        await sleep(100);
+        page.sent.length = 0;
+        updateTab(page, 1, { title: "Still shown" });
+        const firedAgain = Date.now();
+        await sleep(600);
+        const shown = page.sent.find((entry) => isState(entry.message));
+        check(!!shown && shown.at - firedAgain <= 400, `nor in the window focused last, with Safari in the background (${shown && shown.at - firedAgain} ms)`);
     }
 
     if (failures === 0) {
