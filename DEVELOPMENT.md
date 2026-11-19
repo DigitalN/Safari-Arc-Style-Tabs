@@ -33,8 +33,8 @@ copy in `/Applications` is the only one.
 scripts/run-checks.sh
 ```
 
-Runs what can be checked without Safari: `background.js` against a stand-in `browser`
-(`Tests/ExtensionChecks`), the Swift logic compiled with small test programs (`TabStore`'s
+Runs what can be checked without Safari: `background.js` against a stand-in `browser`, and
+`content.js` against a stand-in page and its `MutationObserver` (`Tests/ExtensionChecks`), the Swift logic compiled with small test programs (`TabStore`'s
 handling of messages, its favorites and pinned items, and the folders in Pinned: the tree, the rows it shows,
 where a drop lands and how it's saved; where Safari's tab bar is in a window's Accessibility tree and which
 of its buttons a tab matches and which one Safari has selected, checked against trees kept as data in

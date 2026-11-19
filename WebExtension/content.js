@@ -5,11 +5,11 @@
 (() => {
     if (window.top !== window) return;
 
-    // Injected twice (manifest + executeScript at startup): just report again.
-    if (window.__sideTabsReportFavicon) {
-        window.__sideTabsReportFavicon(true);
-        return;
-    }
+    // Run again in a page that already has a copy: background.js's startup sweep injects one into a tab
+    // whose report it never got (see collectExistingFavicons). The new copy takes over, so the page has one
+    // observer, and the reports go through the extension that's running now, even if the older copy
+    // belonged to a copy of the extension that has since been reloaded.
+    if (window.__sideTabsFavicons) window.__sideTabsFavicons.stop();
 
     let lastReported = null;
     let timer = null;
@@ -64,15 +64,64 @@
         browser.runtime.sendMessage({ type: "favicon", url }).catch(() => {});
     }
 
-    window.__sideTabsReportFavicon = report;
-    report(false);
+    // Sites like Gmail and Slack swap their favicon to show unread counts, and single-page apps add,
+    // remove or replace icon links as they move between pages. Meanwhile scripts add <script> and <style>
+    // nodes to <head> all the time, in background tabs too. Only <link>s pick the icon, so only a change to
+    // one leads to a rescan: <head>'s own children are watched (icon links are children of <head>, so not
+    // their subtrees), each <link> among them for the attributes the choice depends on, and <html>'s
+    // children in case the page replaces <head> itself.
+    const LINK_ATTRIBUTES = ["href", "rel", "sizes", "type"];
+    const isElement = (node, name) => node.nodeType === 1 && node.localName === name;
+    let head = null;
 
-    // Sites like Gmail and Slack swap their favicon to show unread counts.
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver((records) => {
+        let changed = false;
+        for (const record of records) {
+            if (record.type === "attributes") {
+                if (isElement(record.target, "link")) changed = true;
+            } else if (record.target === document.documentElement) {
+                if (document.head !== head) {
+                    watch();
+                    changed = true;
+                }
+            } else {
+                for (const node of record.addedNodes) {
+                    if (isElement(node, "link")) {
+                        watchLink(node);
+                        changed = true;
+                    }
+                }
+                for (const node of record.removedNodes) {
+                    if (isElement(node, "link")) changed = true;
+                }
+            }
+        }
+        if (!changed) return;
         clearTimeout(timer);
         timer = setTimeout(() => report(false), 400);
     });
-    if (document.head) {
-        observer.observe(document.head, { childList: true, subtree: true, attributes: true, attributeFilter: ["href", "rel"] });
+
+    function watchLink(link) {
+        observer.observe(link, { attributes: true, attributeFilter: LINK_ATTRIBUTES });
     }
+
+    function watch() {
+        observer.disconnect();
+        if (document.documentElement) observer.observe(document.documentElement, { childList: true });
+        head = document.head;
+        if (!head) return;
+        observer.observe(head, { childList: true });
+        for (const child of head.children) {
+            if (isElement(child, "link")) watchLink(child);
+        }
+    }
+
+    window.__sideTabsFavicons = {
+        stop() {
+            observer.disconnect();
+            clearTimeout(timer);
+        },
+    };
+    watch();
+    report(false);
 })();
