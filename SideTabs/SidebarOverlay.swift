@@ -121,8 +121,9 @@ nonisolated struct OverlayLayout: Equatable {
     }
 }
 
-/// Whether the overlay is out, and what puts it away. DockController asks it about the pointer 30
-/// times a second while there is an overlay, and when the toolbar button or its shortcut is used.
+/// Whether the overlay is out, and what puts it away. DockController asks it about the pointer when
+/// the pointer moves or a mouse button comes up over Safari, at the few moments listed under
+/// `watchesPointer`, and when the toolbar button or its shortcut is used. Nothing runs on a timer (#79).
 nonisolated struct OverlayReveal: Equatable {
     enum Action: Equatable {
         case none
@@ -147,7 +148,7 @@ nonisolated struct OverlayReveal: Equatable {
     /// - `holding`: something needs the sidebar to stay out wherever the pointer is: a rename, a
     ///   context menu or drag in progress, a mouse button held down.
     /// - `mayReveal`: asked only when the pointer has reached the strip, for checks too slow to make
-    ///   30 times a second, such as whether Safari's window is on the Space being shown.
+    ///   on every movement, such as whether Safari's window is on the Space being shown.
     mutating func poll(
         pointer: CGPoint,
         strip: RevealStrip,
@@ -171,6 +172,24 @@ nonisolated struct OverlayReveal: Equatable {
             return .none
         }
         return holding || inside ? .none : conceal()
+    }
+
+    /// Whether the pointer is watched at all: only while there is an overlay and Safari is the active
+    /// app, since the sidebar only ever shows over Safari. Then every movement, drag and mouse-up,
+    /// over any app's window or the sidebar, is a look; a pointer that stays still wakes nothing.
+    /// It's also looked at once when the watching starts (the overlay starts, or Safari comes to the
+    /// front), whenever the layout is done again, when a rename ends and when a menu closes, since the
+    /// pointer may already be on the strip or away from the sidebar then. When Safari stops being the
+    /// active app, one last look with `safariInFront` false puts the sidebar away before the watching ends.
+    static func watchesPointer(overlay: Bool, safariInFront: Bool) -> Bool {
+        overlay && safariInFront
+    }
+
+    /// Whether a movement to `pointer` needs a look. While the sidebar is away only the strip can bring
+    /// it out, so a movement anywhere else is passed over with this one rectangle check, before
+    /// anything else is read. Whenever this is false, `poll` with Safari in front would do nothing.
+    func needsLook(at pointer: CGPoint, strip: RevealStrip) -> Bool {
+        isRevealed || strip.contains(pointer)
     }
 
     /// The toolbar button or its shortcut: bring the sidebar out, or put it away.
