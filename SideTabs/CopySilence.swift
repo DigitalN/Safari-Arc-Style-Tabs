@@ -66,6 +66,8 @@ nonisolated struct CopySilence: Equatable, Sendable {
     private(set) var waitingSince: TimeInterval?
     /// When the copies were last asked to stop heartbeating, on the awake clock. Nil if they never were.
     private(set) var pauseAskedAt: TimeInterval?
+    /// When it was last time to ask, whether or not there were copies to ask.
+    private(set) var pauseAskDueAt: TimeInterval?
 
     /// Until when a copy may still be silent because it was asked to be, if it missed the end of the hold.
     var pausedUntil: TimeInterval? {
@@ -82,12 +84,16 @@ nonisolated struct CopySilence: Equatable, Sendable {
     /// `pauseAfter` after that while it lasts. Nil when nothing holds them back.
     var nextPauseAsk: TimeInterval? {
         guard let heldSince else { return nil }
-        return max(heldSince, pauseAskedAt ?? -.infinity) + Self.pauseAfter
+        return max(heldSince, pauseAskDueAt ?? -.infinity) + Self.pauseAfter
     }
 
-    /// The copies were asked at `now` to stop heartbeating for `pauseLength`.
-    mutating func notePauseAsked(at now: TimeInterval) {
-        pauseAskedAt = now
+    /// It was time at `now` to ask the copies to stop heartbeating for `pauseLength`, and they were asked, or
+    /// there were none to ask (`asked` false).
+    mutating func notePauseAsk(at now: TimeInterval, asked: Bool) {
+        pauseAskDueAt = now
+        if asked {
+            pauseAskedAt = now
+        }
     }
 
     /// Listening starts at `now`, when Side Tabs starts.

@@ -2777,6 +2777,23 @@ do {
     check(store.liveInstances.isEmpty, "but once its pause would have run out, \(Int(quiet)) s of silence does")
     check(clocks.awake - ended <= CopySilence.pauseLength + quiet, "within the pause and the allowance of the hold's end")
 
+    // With Safari not running there's nobody to ask, but the holds are still looked at as often.
+    let (empty, emptyClocks, emptyCommands) = clockedStore()
+    let emptyNext = { (empty.nextCopyCheck ?? -1) - emptyClocks.awakeBase }
+    emptyClocks.pass(quiet + 1)
+    empty.noteQuietCopies()
+    empty.safariDidTerminate()
+    hold(empty, emptyClocks, [.screenLocked])
+    emptyClocks.pass(CopySilence.pauseAfter)
+    empty.noteQuietCopies()
+    check(pauses(emptyCommands()).isEmpty, "with no copy known, a long hold sends no ask")
+    check(abs(emptyNext() - (emptyClocks.awake + CopySilence.pauseAfter)) < 0.01, "and the holds are looked at again \(Int(CopySilence.pauseAfter)) s later")
+    emptyClocks.holds = []
+    emptyClocks.pass(CopySilence.pauseAfter)
+    empty.noteQuietCopies()
+    check(resumes(emptyCommands()) == 0 && broadcastSnapshots(emptyCommands()) == 1, "a hold that ends without a notification is noticed then, and nothing asked to start again")
+    check(empty.nextCopyCheck == nil, "after which there's nothing to look at")
+
     // The next short hold asks for no pause, and says nothing at its end; the pause asked during the last
     // one has run out.
     heartbeat(store)

@@ -1180,12 +1180,17 @@ final class TabStore {
     /// heartbeating for `CopySilence.pauseLength`, while their silence doesn't count anyway (#80). The ask says
     /// until when on the wall clock and for how long, and a copy stops at whichever comes first, so a copy
     /// never stays silent past `pauseLength` after the ask (the Mac sleeping in between only shortens it), nor
-    /// long past it if the command was delivered late. A copy that misses an ask goes on heartbeating.
+    /// long past it if the command was delivered late. A copy that misses an ask goes on heartbeating. With no
+    /// copy known (Safari not running, say) nothing is sent, but the holds are still looked at as often.
     private func askCopiesToPause(at now: TimeInterval) {
+        guard !copies.isEmpty else {
+            silence.notePauseAsk(at: now, asked: false)
+            return
+        }
         if !silence.pauseAskedDuringHold {
             log.notice("the extension's copies have been held back by \(CopySilence.describe(self.silence.holds), privacy: .public) for \(Int(CopySilence.pauseAfter)) s; asking them to stop heartbeating until that ends")
         }
-        silence.notePauseAsked(at: now)
+        silence.notePauseAsk(at: now, asked: true)
         let milliseconds = Int(CopySilence.pauseLength * 1000)
         let until = Int(clock().timeIntervalSince1970 * 1000) + milliseconds
         sendCommand?(["action": "pauseHeartbeats", "until": until, "ms": milliseconds]) {}
