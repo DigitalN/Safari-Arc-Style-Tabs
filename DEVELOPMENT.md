@@ -48,7 +48,8 @@ of Safari's bars (against trees in `Tests/SidebarOverlayChecks/trees`), and what
 brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
 and where they reopen; with *Minimize other profiles' windows* on, which windows a change of profile
 minimizes and brings back, which window a switch brings forward, the list of windows Side Tabs minimized
-and how it's matched after a restart, and when a click on Safari's Dock icon opens a window; what the
+and how it's matched after a restart, and when a click on Safari's Dock icon opens a window and which presses
+the Dock is asked about at all; what the
 sidebar shows while a switch's window comes back from the Dock, and when Safari's report ends it, or another window
 coming to the front does, and what clicks act on meanwhile; swiping between profiles (which way a gesture goes, the
 halfway-or-flick rule, the ends, what the incoming page shows, which window comes forward, and what the sidebar shows

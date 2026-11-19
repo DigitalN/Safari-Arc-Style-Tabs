@@ -144,7 +144,9 @@ swiftc -o "$WORK/unseen-checks" \
 # A click on Safari's Dock icon (#42): Safari's item found in the Dock's tree by its bundle, never its
 # title or a minimized window's tile, wherever the Dock is; and only a plain click on it counts, not a
 # press held long enough for the icon's menu, a choice in that menu, a drag, or a press that starts or
-# ends elsewhere. Against constructed trees in Tests/DockIconChecks/trees.
+# ends elsewhere. And the Dock is only asked about presses in its strip along the screen's edge or near
+# where Safari's icon was, never every click on the screen (#85). Against constructed trees in
+# Tests/DockIconChecks/trees.
 echo "== Dock icon"
 swiftc -o "$WORK/dock-icon-checks" \
     Tests/DockIconChecks/main.swift SideTabs/SafariDockIconWatcher.swift SideTabs/AccessibilityQuery.swift Shared/Bridge.swift
