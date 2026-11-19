@@ -177,7 +177,8 @@ separate window that the app keeps attached to Safari's window:
 ```
 
 - `WebExtension/`: the Safari web extension. `background.js` sends windows and tabs to
-  the app (with retries, and a heartbeat every 5 seconds so missed updates are noticed)
+  the app (with retries, and a heartbeat after 10 seconds without any other message, so missed
+  updates are noticed and the app knows it's still running)
   and carries out the app's commands: switch, close, open, move, and so on. After a first
   full snapshot it sends only what changed since the last state the app took, which the
   app turns back into a full snapshot; when the app hasn't got the state they're counted
@@ -189,12 +190,16 @@ separate window that the app keeps attached to Safari's window:
   access. `content.js` reports each page's favicon URL, which Safari's tabs API doesn't
   provide. Safari can lose a native message's reply, so `background.js` gives up on each
   message after 4 seconds and counts it as not delivered. Each Safari profile runs its own
-  copy of `background.js`; the app hides a copy's windows after 30 seconds without a
+  copy of `background.js`; the app hides a copy's windows after 40 seconds without a
   message from it, and drops the copy once a newer copy of the same profile reports (after
-  the extension reloads or is reinstalled). Those 30 seconds are awake time in which the copy
+  the extension reloads or is reinstalled). Those 40 seconds are awake time in which the copy
   could have spoken: sleep, a locked screen, the screen saver, a switched-away session and
-  Safari hidden don't count, and each copy gets 30 seconds again when they end
-  (`CopySilence`, `HoldWatcher`). Every command from the app carries an id, and
+  Safari hidden don't count, and each copy gets 40 seconds again when they end
+  (`CopySilence`, `HoldWatcher`). When one of those lasts 30 seconds, the app asks the
+  copies to stop heartbeating for 5 minutes, again every 4 minutes while it lasts, and to
+  start again when it ends. A copy heard from after that counts as usual; one that says its
+  heartbeats are still paused, or isn't heard from at all, counts only once its pause has
+  run out, since it may have missed the word. Every command from the app carries an id, and
   `background.js` skips one it has already run, since Safari has delivered commands twice.
 - `SideTabsExtension/`: the extension's native handler. It passes messages to the app
   over a CFMessagePort named after the app group, which is what lets the sandboxed

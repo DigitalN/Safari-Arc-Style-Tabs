@@ -76,7 +76,7 @@ final class ExtensionBridge {
     /// reloads, Safari has delivered commands to a copy twice (#37).
     ///
     /// A command that fails isn't sent again some other way, such as in the reply to a heartbeat, though
-    /// background.js would still run `commands` from a reply: heartbeats come 5 s apart, replies are lost for
+    /// background.js would still run `commands` from a reply: heartbeats come 10 s apart, replies are lost for
     /// minutes after the extension reloads (#31, #37), and a command run late is what #20 was about. The
     /// window goes back to what its copy last reported instead (#67).
     func send(_ command: [String: Any], failed: (() -> Void)? = nil) {

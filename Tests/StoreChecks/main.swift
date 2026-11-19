@@ -2125,23 +2125,26 @@ func reply(_ store: TabStore, _ object: [String: Any]) -> [String: Any] {
     return store.handleMessage(type: object["type"] as! String, payload: data, object: object)
 }
 
+/// How long a copy can be silent before it's quiet (40 s since #80).
+let quiet = CopySilence.allowance
+
 do {
-    // A copy that sends nothing for 30 s is quiet: its windows are hidden until it speaks again.
+    // A copy that sends nothing for the allowance (`quiet`) is quiet: its windows are hidden until it speaks again.
     let (store, _) = makeStore()
     var ahead: TimeInterval = 0
     store.uptime = { ProcessInfo.processInfo.systemUptime + ahead }
     check(store.liveInstances == [instance], "a copy that has sent a snapshot is live")
     check(store.hasLiveCopy(profile: nil), "so its profile, the default one, has a live copy")
-    ahead = 29
+    ahead = quiet - 1
     store.noteQuietCopies()
-    check(store.currentWindow?.window.id == 1, "29 s without a message isn't quiet yet")
+    check(store.currentWindow?.window.id == 1, "\(Int(quiet) - 1) s without a message isn't quiet yet")
     _ = reply(store, message("heartbeat", from: instance, ["seq": 1]))
-    ahead = 29 + 25
+    ahead = quiet - 1 + quiet - 5
     store.noteQuietCopies()
     check(store.currentWindow?.window.id == 1, "a heartbeat counts as a message: 25 s after it the copy isn't quiet")
-    ahead = 29 + 31
+    ahead = quiet - 1 + quiet + 1
     store.noteQuietCopies()
-    check(store.liveInstances.isEmpty, "after 30 s without any message the copy is quiet")
+    check(store.liveInstances.isEmpty, "after \(Int(quiet)) s without any message the copy is quiet")
     check(store.currentWindow == nil, "and its window isn't shown")
     check(store.snapshots[instance] != nil, "but its snapshot is kept")
     check(!store.hasLiveCopy(profile: nil), "and its profile has no live copy")
@@ -2167,7 +2170,7 @@ do {
     check(store.currentWindow?.window.id == 5, "the docked window's title picks the work window")
     ahead = 20
     _ = reply(store, message("heartbeat", from: instance, ["seq": 1]))
-    ahead = 31
+    ahead = quiet + 1
     store.noteQuietCopies()
     check(store.liveInstances == [instance], "the copy that went silent is quiet, the other isn't")
     check(!store.hasLiveCopy(profile: work) && store.hasLiveCopy(profile: nil), "so only the default profile has a live copy")
@@ -2193,7 +2196,7 @@ do {
     check(!store.lacksWebsiteAccess, "while one copy's tabs show URLs, there's website access")
     ahead = 20
     _ = reply(store, message("heartbeat", from: "bare-copy", ["seq": 1]))
-    ahead = 31
+    ahead = quiet + 1
     store.noteQuietCopies()
     check(store.lacksWebsiteAccess, "once that copy is quiet, the live copy's tabs without URLs say there isn't")
 }
@@ -2237,7 +2240,7 @@ do {
 }
 
 do {
-    // A replaced copy that keeps sending for 30 s is running after all (a second Safari, say). It's taken back,
+    // A replaced copy that keeps sending for the allowance is running after all (a second Safari, say). It's taken back,
     // and doesn't replace the newer copy in turn.
     let (store, _) = makeStore()
     var ahead: TimeInterval = 0
@@ -2247,9 +2250,9 @@ do {
     ahead = 10
     _ = reply(store, message("heartbeat", from: instance, ["seq": 1]))
     check(!store.liveInstances.contains(instance), "its heartbeat soon after is taken for one that was on its way")
-    ahead = 31
+    ahead = quiet + 1
     let answer = reply(store, message("heartbeat", from: instance, ["seq": 1]))
-    check(store.liveInstances == [instance, "second-copy"], "still sending 30 s after it was replaced, it's taken back")
+    check(store.liveInstances == [instance, "second-copy"], "still sending \(Int(quiet)) s after it was replaced, it's taken back")
     check(answer["needSnapshot"] as? Bool == true, "and asked for a snapshot")
     send(store, snapshotObject(seq: 2, active: 1))
     check(store.snapshots[instance] != nil, "which is applied")
@@ -2284,7 +2287,7 @@ do {
     check(store.cleanup.lastViewed[old(1)] != nil && store.cleanup.lastViewed[old(10)] != nil, "the tabs have clocks")
     check(store.hasCustomName(old(1)), "and a tab has a custom name")
 
-    ahead = 31
+    ahead = quiet + 1
     store.noteQuietCopies()
     check(store.currentWindow == nil, "the copy is quiet")
     check(store.bookmarkTabs.owners[old(10)] == saved.id, "a quiet copy's bookmark's tab stays the bookmark's")
@@ -2303,7 +2306,7 @@ do {
     check(store.openTab(for: saved)?.id == 10, "with the bookmark's tab still its own")
 
     // Side Tabs is turned off in the profile, and later on again: a newer copy of the profile starts.
-    ahead = 70
+    ahead = 2 * quiet + 10
     store.noteQuietCopies()
     send(store, pagesSnapshot(seq: 1, from: "newer-copy", focused: 8, [(8, [(81, "https://example.com/1"), (82, news)])], active: [81]))
     check(store.snapshots[instance] == nil, "once a newer copy of its profile reports, the old copy is gone")
@@ -2340,7 +2343,7 @@ do {
     check(snapshotCommands(commands(), to: "work-copy") == 1, "a copy the app has no snapshot from is sent a snapshot command")
 
     // A copy that loses every reply never learns its snapshots were delivered, so its heartbeats say 0. The
-    // app has its snapshot, so it doesn't make the copy build one every 5 s.
+    // app has its snapshot, so it doesn't make the copy build one on every heartbeat.
     _ = reply(store, message("heartbeat", from: instance, ["seq": 0]))
     check(snapshotCommands(commands(), to: instance) == 1, "a heartbeat saying 0 from a copy whose snapshot the app has sends no command")
 }
@@ -2350,7 +2353,7 @@ do {
     let (store, commands) = makeStore()
     var ahead: TimeInterval = 0
     store.uptime = { ProcessInfo.processInfo.systemUptime + ahead }
-    ahead = 31
+    ahead = quiet + 1
     store.noteQuietCopies()
     _ = reply(store, message("activated", from: instance, ["windowId": 1, "tabId": 2, "seq": 2]))
     check(snapshotCommands(commands(), to: instance) == 1, "a copy that speaks again after going quiet is sent a snapshot command")
@@ -2385,7 +2388,7 @@ func clockedStore() -> (TabStore, Clocks, sent: () -> [[String: Any]]) {
     let clocks = Clocks()
     storeCount += 1
     let store = TabStore(stateURL: stateFolder.appending(path: "state-\(storeCount).json"))
-    // After the store has started listening, so its first 30 s are over at `awake` 30.
+    // After the store has started listening, so its first `quiet` seconds are over at `awake` == `quiet`.
     clocks.awakeBase = ProcessInfo.processInfo.systemUptime
     store.clock = { clocks.wallBase.addingTimeInterval(clocks.wall) }
     store.uptime = { clocks.awakeBase + clocks.awake }
@@ -2405,6 +2408,15 @@ func hold(_ store: TabStore, _ clocks: Clocks, _ holds: Set<CopySilence.Hold>) {
 /// The `snapshot` commands sent to every copy at once.
 func broadcastSnapshots(_ commands: [[String: Any]]) -> Int {
     commands.filter { $0["action"] as? String == "snapshot" && $0["instance"] == nil }.count
+}
+
+/// The asks to stop heartbeating during a hold, and to start again when it ends (#80), sent to every copy.
+func pauses(_ commands: [[String: Any]]) -> [[String: Any]] {
+    commands.filter { $0["action"] as? String == "pauseHeartbeats" && $0["instance"] == nil }
+}
+
+func resumes(_ commands: [[String: Any]]) -> Int {
+    commands.filter { $0["action"] as? String == "resumeHeartbeats" && $0["instance"] == nil }.count
 }
 
 func heartbeat(_ store: TabStore, from copy: String = instance, in profile: String? = nil) {
@@ -2430,15 +2442,21 @@ do {
     clocks.pass(120)
     store.noteQuietCopies()
     check(store.liveInstances == [instance], "nor are 120 s of awake time in dark wakes, while asleep")
+    check(pauses(commands()).count == 1, "a check in a dark wake, the hold having lasted \(Int(CopySilence.pauseAfter)) s, asks the copies to stop heartbeating")
     let asked = broadcastSnapshots(commands())
     hold(store, clocks, [])
     check(broadcastSnapshots(commands()) == asked + 1, "waking asks every copy for a snapshot at once")
-    clocks.pass(29)
+    check(resumes(commands()) == 1, "and to heartbeat again")
+    clocks.pass(quiet - 1)
     store.noteQuietCopies()
-    check(store.liveInstances == [instance], "29 s after waking, though silent for 154 s of awake time, the copy isn't quiet")
+    check(store.liveInstances == [instance], "\(Int(quiet) - 1) s after waking, though silent for \(Int(quiet) + 124) s of awake time, the copy isn't quiet")
+    // A copy that missed being told stays silent until its pause runs out, `pauseLength` after the last ask.
+    clocks.pass(CopySilence.pauseLength)
+    store.noteQuietCopies()
+    check(store.liveInstances == [instance], "nor within \(Int(quiet)) s of when a pause it missed the end of would run out")
     clocks.pass(2)
     store.noteQuietCopies()
-    check(store.liveInstances.isEmpty, "but a copy that hasn't spoken 31 s after waking is quiet: Side Tabs may really be off in its profile")
+    check(store.liveInstances.isEmpty, "but a copy that still hasn't spoken then is quiet: Side Tabs may really be off in its profile")
     check(broadcastSnapshots(commands()) == asked + 1, "and a check after waking doesn't ask again")
 }
 
@@ -2458,22 +2476,23 @@ do {
     clocks.pass(4)
     hold(store, clocks, [.asleep, .displaysAsleep])
     clocks.sleep(7200)
-    clocks.pass(40)
+    // (Less than `CopySilence.pauseAfter` of awake time in all, so the copies aren't asked to pause.)
+    clocks.pass(20)
     hold(store, clocks, [.displaysAsleep])
     clocks.pass(5)
     store.noteQuietCopies()
     check(store.liveInstances == [instance, "work-copy"], "the Mac awake but its displays still asleep: still held")
     hold(store, clocks, [])
-    clocks.pass(29)
+    clocks.pass(quiet - 1)
     store.noteQuietCopies()
     check(store.hasLiveCopy(profile: nil) && store.hasLiveCopy(profile: work),
-          "29 s after the displays woke, both profiles still have a live copy, so neither counts as off")
+          "\(Int(quiet) - 1) s after the displays woke, both profiles still have a live copy, so neither counts as off")
     check(store.copiesHaveHadTheirChance, "and the copies' chance isn't started over by a wake: profiles off before it stay off")
     heartbeat(store)
     clocks.pass(2)
     store.noteQuietCopies()
     check(store.hasLiveCopy(profile: nil) && !store.hasLiveCopy(profile: work),
-          "the copy that spoke is live; the one silent for 31 s since waking is quiet, so its profile can count as off")
+          "the copy that spoke is live; the one silent for \(Int(quiet) + 1) s since waking is quiet, so its profile can count as off")
 }
 
 do {
@@ -2486,15 +2505,33 @@ do {
         clocks.pass(600)
         store.noteQuietCopies()
         check(store.liveInstances == [instance], "10 min of \(held.rawValue) isn't silence")
+        check(pauses(commands()).count == 1, "and the copies are asked to stop heartbeating meanwhile")
         let asked = broadcastSnapshots(commands())
         hold(store, clocks, [])
         check(broadcastSnapshots(commands()) == asked + 1, "when \(held.rawValue) ends, every copy is asked for a snapshot")
-        clocks.pass(29)
+        check(resumes(commands()) == 1, "and to heartbeat again")
+        clocks.pass(CopySilence.pauseLength + quiet - 1)
         store.noteQuietCopies()
-        check(store.liveInstances == [instance], "29 s after \(held.rawValue) ends, the copy isn't quiet")
+        check(store.liveInstances == [instance], "a copy that missed that isn't quiet until its pause has run out and \(Int(quiet)) s more")
         clocks.pass(2)
         store.noteQuietCopies()
-        check(store.liveInstances.isEmpty, "but 31 s after, a copy that hasn't spoken is")
+        check(store.liveInstances.isEmpty, "then a copy that hasn't spoken is")
+
+        // A short hold: no pause is asked for, and silence counts from its end.
+        let (short, shortClocks, shortCommands) = clockedStore()
+        shortClocks.pass(10)
+        hold(short, shortClocks, [held])
+        shortClocks.pass(CopySilence.pauseAfter - 1)
+        short.noteQuietCopies()
+        hold(short, shortClocks, [])
+        check(pauses(shortCommands()).isEmpty && resumes(shortCommands()) == 0,
+              "\(Int(CopySilence.pauseAfter) - 1) s of \(held.rawValue): the copies aren't asked to stop heartbeating")
+        shortClocks.pass(quiet - 1)
+        short.noteQuietCopies()
+        check(short.liveInstances == [instance], "\(Int(quiet) - 1) s after a short \(held.rawValue) ends, the copy isn't quiet")
+        shortClocks.pass(2)
+        short.noteQuietCopies()
+        check(short.liveInstances.isEmpty, "but \(Int(quiet) + 1) s after, a copy that hasn't spoken is")
     }
 }
 
@@ -2513,9 +2550,9 @@ do {
     check(store.liveInstances == [instance], "5 min at the lock screen isn't silence")
     hold(store, clocks, [])
     check(broadcastSnapshots(commands()) == asked + 1, "unlocking asks every copy for a snapshot")
-    clocks.pass(29)
+    clocks.pass(quiet - 1)
     store.noteQuietCopies()
-    check(store.liveInstances == [instance], "and gives each copy 30 s from then")
+    check(store.liveInstances == [instance], "and gives each copy \(Int(quiet)) s from then")
 
     // A hold that never ends wouldn't let a copy that stopped go quiet: HoldWatcher reads the holds afresh at
     // every check, and the store takes them as they are.
@@ -2525,9 +2562,9 @@ do {
     clocks.holds = []
     store.noteQuietCopies()
     check(store.liveInstances == [instance], "a hold that ends without a notification is noticed at the next check")
-    clocks.pass(31)
+    clocks.pass(quiet + 1)
     store.noteQuietCopies()
-    check(store.liveInstances.isEmpty, "and 31 s later a copy that stopped is quiet")
+    check(store.liveInstances.isEmpty, "and \(Int(quiet) + 1) s later a copy that stopped is quiet")
 }
 
 do {
@@ -2536,12 +2573,12 @@ do {
     let (store, clocks, _) = clockedStore()
     store.safariIsFrontmost = true
     heartbeat(store)
-    clocks.pass(29)
+    clocks.pass(quiet - 1)
     store.noteQuietCopies()
-    check(store.liveInstances == [instance], "29 s of silence while awake: not quiet yet")
+    check(store.liveInstances == [instance], "\(Int(quiet) - 1) s of silence while awake: not quiet yet")
     clocks.pass(2)
     store.noteQuietCopies()
-    check(store.liveInstances.isEmpty && store.currentWindow == nil, "31 s: quiet, and its window hidden")
+    check(store.liveInstances.isEmpty && store.currentWindow == nil, "\(Int(quiet) + 1) s: quiet, and its window hidden")
     store.safariIsFrontmost = false
     clocks.pass(5)
     store.safariIsFrontmost = true
@@ -2553,12 +2590,12 @@ do {
     // have one that's late, so none counts as off until they've had the allowance.
     let (store, clocks, _) = clockedStore()
     check(!store.copiesHaveHadTheirChance, "just after Side Tabs starts, the copies haven't had their chance to speak")
-    clocks.pass(29)
+    clocks.pass(quiet - 1)
     store.noteQuietCopies()
-    check(!store.copiesHaveHadTheirChance, "nor 29 s after")
+    check(!store.copiesHaveHadTheirChance, "nor \(Int(quiet) - 1) s after")
     clocks.pass(1.5)
     store.noteQuietCopies()
-    check(store.copiesHaveHadTheirChance, "30 s after, they have")
+    check(store.copiesHaveHadTheirChance, "\(Int(quiet)) s after, they have")
 
     store.safariDidTerminate()
     clocks.pass(60)
@@ -2566,12 +2603,12 @@ do {
     check(!store.copiesHaveHadTheirChance, "Safari launching starts it over: its copies are all new")
     clocks.pass(3)
     _ = reply(store, message("hello", from: "relaunched-copy", ["launchApp": true]))
-    clocks.pass(26)
+    clocks.pass(quiet - 4)
     store.noteQuietCopies()
-    check(!store.copiesHaveHadTheirChance && store.hasLiveCopy(profile: nil), "29 s after the launch: still waiting, one copy has spoken")
+    check(!store.copiesHaveHadTheirChance && store.hasLiveCopy(profile: nil), "\(Int(quiet) - 1) s after the launch: still waiting, one copy has spoken")
     clocks.pass(1.5)
     store.noteQuietCopies()
-    check(store.copiesHaveHadTheirChance, "30 s after the launch, every copy has had its chance")
+    check(store.copiesHaveHadTheirChance, "\(Int(quiet)) s after the launch, every copy has had its chance")
 
     // A hold that begins before they've had it gives them a whole new chance when it ends.
     clocks.pass(10)
@@ -2579,16 +2616,16 @@ do {
     clocks.pass(10)
     hold(store, clocks, [.asleep])
     clocks.sleep(3600)
-    clocks.pass(30)
+    clocks.pass(CopySilence.pauseAfter - 1)
     store.noteQuietCopies()
     check(!store.copiesHaveHadTheirChance, "a launch 10 s before the Mac slept: no chance had while asleep")
     hold(store, clocks, [])
-    clocks.pass(29)
+    clocks.pass(quiet - 1)
     store.noteQuietCopies()
-    check(!store.copiesHaveHadTheirChance, "nor within 30 s of waking")
+    check(!store.copiesHaveHadTheirChance, "nor within \(Int(quiet)) s of waking")
     clocks.pass(1.5)
     store.noteQuietCopies()
-    check(store.copiesHaveHadTheirChance, "but 30 s after waking, yes")
+    check(store.copiesHaveHadTheirChance, "but \(Int(quiet)) s after waking, yes")
 }
 
 do {
@@ -2597,31 +2634,31 @@ do {
     // comes to the front, its windows shown meanwhile, and is asked for a snapshot.
     let (store, clocks, commands) = clockedStore()
     store.safariIsFrontmost = false
-    clocks.pass(31)
+    clocks.pass(quiet + 1)
     store.noteQuietCopies()
-    check(store.liveInstances.isEmpty, "31 s of silence with Safari in the background: quiet")
+    check(store.liveInstances.isEmpty, "\(Int(quiet) + 1) s of silence with Safari in the background: quiet")
     let asked = snapshotCommands(commands(), to: instance)
     store.safariIsFrontmost = true
     check(store.liveInstances == [instance] && store.currentWindow?.window.id == 1,
           "Safari coming to the front shows its window again at once")
     check(snapshotCommands(commands(), to: instance) == asked + 1, "and asks that copy for a snapshot")
-    clocks.pass(29)
+    clocks.pass(quiet - 1)
     store.noteQuietCopies()
-    check(store.liveInstances == [instance], "it has 30 s from then")
+    check(store.liveInstances == [instance], "it has \(Int(quiet)) s from then")
     heartbeat(store)
-    clocks.pass(29)
+    clocks.pass(quiet - 1)
     store.noteQuietCopies()
     check(store.liveInstances == [instance], "and once it speaks, it's live as usual")
 
     // A copy that stopped gets that chance once per silence, so it still goes quiet.
     store.safariIsFrontmost = false
-    clocks.pass(31)
+    clocks.pass(quiet + 1)
     store.noteQuietCopies()
     store.safariIsFrontmost = true
     check(store.liveInstances == [instance], "silent again, quiet in the background, and back on Safari coming to the front")
-    clocks.pass(31)
+    clocks.pass(quiet + 1)
     store.noteQuietCopies()
-    check(store.liveInstances.isEmpty, "but still silent 31 s later, it's quiet")
+    check(store.liveInstances.isEmpty, "but still silent \(Int(quiet) + 1) s later, it's quiet")
     store.safariIsFrontmost = false
     clocks.pass(5)
     store.safariIsFrontmost = true
@@ -2644,8 +2681,199 @@ do {
             quietAt = clocks.awake
         }
     }
-    check(quietAt.map { $0 <= 60 } == true, "Safari in front every 20 s, a copy that stopped is still quiet within 60 s")
+    check(quietAt.map { $0 <= quiet + 20 } == true, "Safari in front every 20 s, a copy that stopped is still quiet within \(Int(quiet) + 20) s")
     check(store.liveInstances.isEmpty, "and stays quiet")
+}
+
+// MARK: - One timer for the copies, and no heartbeats asked for during a long hold (#80)
+
+do {
+    // The copies are looked at when the first live copy could go quiet, and only then: each message moves that
+    // moment, and a copy that stops is quiet when the timer fires, the allowance after its last message.
+    let (store, clocks, _) = clockedStore()
+    let work = "WORK-PROFILE"
+    let next = { (store.nextCopyCheck ?? -1) - clocks.awakeBase }
+    check(abs(next() - quiet) < 0.5, "a copy heard from at 0: the copies are looked at \(Int(quiet)) s later (\(next()))")
+    clocks.pass(quiet - 5)
+    heartbeat(store)
+    clocks.pass(6)
+    store.noteQuietCopies()
+    check(store.copiesHaveHadTheirChance && store.liveInstances == [instance], "every copy has had its chance, and the copy is live")
+    check(abs(next() - (2 * quiet - 5)) < 0.01, "the next look is when the copy could go quiet: \(Int(quiet)) s after its last message (\(next()))")
+    heartbeat(store)
+    check(abs(next() - (2 * quiet + 1)) < 0.01, "a message moves it")
+    clocks.pass(2)
+    send(store, pagesSnapshot(seq: 1, from: "work-copy", in: work, focused: 5, [(5, [(50, "https://example.com/5")])], active: [50]))
+    check(abs(next() - (2 * quiet + 1)) < 0.01, "another copy heard from later doesn't: the first copy could go quiet first")
+
+    // Both stop. The timer fires when it's set for.
+    clocks.awake = next()
+    store.noteQuietCopies()
+    check(store.liveInstances == ["work-copy"], "when the timer fires, the copy that stopped first is quiet, \(Int(quiet)) s after its last message")
+    check(abs(next() - (2 * quiet + 3)) < 0.01, "and the next look is for the other copy")
+    clocks.awake = next()
+    store.noteQuietCopies()
+    check(store.liveInstances.isEmpty, "which is quiet then too")
+    check(store.nextCopyCheck == nil, "with no live copy, no hold and every copy having had its chance, there's nothing to look at: no timer")
+    heartbeat(store)
+    check(store.liveInstances == [instance] && abs(next() - (clocks.awake + quiet)) < 0.01, "a copy back from quiet shows its windows, and the timer is set again")
+    store.safariDidTerminate()
+    check(store.nextCopyCheck == nil, "Safari quitting leaves nothing to look at")
+}
+
+do {
+    // A hold that lasts `pauseAfter` has the copies asked to stop heartbeating for `pauseLength`, and asked again
+    // every `pauseRenewal` while it lasts, before the last ask runs out: through a night at the lock screen the
+    // copies are looked at, and asked, once every 4 min.
+    let (store, clocks, commands) = clockedStore()
+    let next = { (store.nextCopyCheck ?? -1) - clocks.awakeBase }
+    clocks.pass(quiet - 1)
+    heartbeat(store)
+    clocks.pass(2)
+    store.noteQuietCopies()
+    hold(store, clocks, [.screenLocked])
+    let heldAt = clocks.awake
+    check(abs(next() - (heldAt + CopySilence.pauseAfter)) < 0.01,
+          "during a hold no copy can go quiet: the copies are next looked at \(Int(CopySilence.pauseAfter)) s into it")
+    clocks.pass(CopySilence.pauseAfter - 1)
+    store.noteQuietCopies()
+    check(pauses(commands()).isEmpty, "a check before then asks for no pause")
+    clocks.pass(1)
+    clocks.wall += 7
+    store.noteQuietCopies()
+    let ask = pauses(commands())
+    check(ask.count == 1, "\(Int(CopySilence.pauseAfter)) s into the hold, the copies are asked to stop heartbeating")
+    let wall = (clocks.wallBase.timeIntervalSince1970 + clocks.wall) * 1000
+    check(ask.first?["ms"] as? Int == 300_000 && abs(Double(ask.first?["until"] as? Int ?? 0) - wall - 300_000) < 2,
+          "for 5 min, the most the extension allows, by the wall clock and from when it comes")
+    check(CopySilence.pauseRenewal < CopySilence.pauseLength && abs(next() - (clocks.awake + CopySilence.pauseRenewal)) < 0.01,
+          "and are asked again \(Int(CopySilence.pauseRenewal)) s later, before that runs out")
+    heartbeat(store)
+    check(abs(next() - (clocks.awake + CopySilence.pauseRenewal)) < 0.01, "a message during the hold doesn't change that")
+
+    // Eight hours at the lock screen, the timer firing when it's set for.
+    var looks = 0
+    while clocks.awake < heldAt + 8 * 3600 {
+        clocks.awake = next()
+        store.noteQuietCopies()
+        looks += 1
+    }
+    let asks = pauses(commands()).count
+    check(asks == looks + 1 && asks <= Int(8 * 3600 / CopySilence.pauseRenewal) + 2,
+          "8 hours of hold: \(asks) asks, one every \(Int(CopySilence.pauseRenewal / 60)) min, and no other looks (\(looks) looks)")
+    check(store.liveInstances == [instance], "and nothing is quiet")
+    clocks.pass(CopySilence.pauseRenewal * 10)
+    store.noteQuietCopies()
+    check(pauses(commands()).count == asks + 1, "a timer that comes late asks once")
+}
+
+do {
+    // When a long hold ends the copies are told to start again. A copy heard from after that has had the word, or
+    // its pause has run out: if it then stops, it's quiet `quiet` after its last message. A copy not heard from
+    // since may have missed it and be silent until its pause runs out: only its silence after that counts.
+    let (store, clocks, commands) = clockedStore()
+    let work = "WORK-PROFILE"
+    let next = { (store.nextCopyCheck ?? -1) - clocks.awakeBase }
+    send(store, pagesSnapshot(seq: 1, from: "work-copy", in: work, focused: 5, [(5, [(50, "https://example.com/5")])], active: [50]))
+    clocks.pass(quiet - 1)
+    heartbeat(store)
+    heartbeat(store, from: "work-copy", in: work)
+    clocks.pass(2)
+    store.noteQuietCopies()
+    hold(store, clocks, [.screenLocked])
+    clocks.pass(CopySilence.pauseAfter)
+    store.noteQuietCopies()
+    let lastAsk = clocks.awake
+    check(pauses(commands()).count == 1, "the copies were asked to pause")
+    clocks.pass(60)
+    let snapshotsAsked = broadcastSnapshots(commands())
+    hold(store, clocks, [])
+    let ended = clocks.awake
+    check(resumes(commands()) == 1 && broadcastSnapshots(commands()) == snapshotsAsked + 1,
+          "when the hold ends, the copies are told to heartbeat again, and asked for snapshots")
+    check(abs(next() - (lastAsk + CopySilence.pauseLength + quiet)) < 0.01,
+          "neither copy has been heard from since: each may be silent until the pause runs out, and the allowance after")
+    clocks.pass(1)
+    heartbeat(store)
+    check(abs(next() - (ended + 1 + quiet)) < 0.01, "a copy heard from after the hold counts as usual")
+    clocks.awake = next()
+    store.noteQuietCopies()
+    check(store.liveInstances == ["work-copy"],
+          "so if it then stops, it's quiet \(Int(quiet)) s after its last message, though the pause it was asked for lasts longer")
+    check(abs(next() - (lastAsk + CopySilence.pauseLength + quiet)) < 0.01, "the copy not heard from since is looked at when its pause has run out")
+    clocks.awake = next() - 1
+    store.noteQuietCopies()
+    check(store.liveInstances == ["work-copy"], "until then, silence it was asked for doesn't count")
+    clocks.awake += 1.5
+    store.noteQuietCopies()
+    check(store.liveInstances.isEmpty, "after that, \(Int(quiet)) s of silence does")
+
+    // The next short hold asks for nothing, and says nothing at its end.
+    heartbeat(store)
+    hold(store, clocks, [.safariHidden])
+    clocks.pass(5)
+    store.noteQuietCopies()
+    hold(store, clocks, [])
+    check(pauses(commands()).count == 1 && resumes(commands()) == 1, "a short hold asks the copies for nothing")
+    check(abs(next() - (clocks.awake + quiet)) < 0.01, "and silence counts from its end")
+}
+
+do {
+    // A copy that missed the word that the hold ended says in every message that its heartbeats are still
+    // paused, and for how long. Its silence doesn't count until then, and it's told again to start, once.
+    let (store, clocks, commands) = clockedStore()
+    let next = { (store.nextCopyCheck ?? -1) - clocks.awakeBase }
+    let toldThis = { commands().filter { $0["action"] as? String == "resumeHeartbeats" && $0["instance"] as? String == instance }.count }
+    clocks.pass(quiet + 1)
+    heartbeat(store)
+    hold(store, clocks, [.screenLocked])
+    clocks.pass(CopySilence.pauseAfter)
+    store.noteQuietCopies()
+    _ = reply(store, message("heartbeat", from: instance, ["seq": 1, "heartbeatsPausedFor": 290_000]))
+    check(toldThis() == 0, "a copy saying it's paused during the hold isn't told anything")
+    clocks.pass(60)
+    hold(store, clocks, [])
+    clocks.pass(1)
+    _ = reply(store, message("activated", from: instance, ["windowId": 1, "tabId": 2, "seq": 2, "heartbeatsPausedFor": 200_000]))
+    check(toldThis() == 1, "still paused after the hold ended: it's told to start heartbeating again")
+    check(abs(next() - (clocks.awake + 200 + quiet)) < 0.01, "and its silence counts only from the end of the pause it says it's in")
+    clocks.pass(2)
+    _ = reply(store, message("log", from: instance, ["message": "x", "heartbeatsPausedFor": 198_000]))
+    check(toldThis() == 1, "once per pause")
+    clocks.awake = clocks.awake + 198 + quiet - 1
+    store.noteQuietCopies()
+    check(store.liveInstances == [instance], "silence it said it was asked for doesn't count")
+    _ = reply(store, message("heartbeat", from: instance, ["seq": 2]))
+    check(abs(next() - (clocks.awake + quiet)) < 0.01, "a message without it: the copy heartbeats again, and counts as usual")
+    _ = reply(store, message("heartbeat", from: instance, ["seq": 2, "heartbeatsPausedFor": 24 * 3600 * 1000]))
+    check(abs(next() - (clocks.awake + CopySilence.pauseLength + quiet)) < 0.01, "a pause is never taken for longer than \(Int(CopySilence.pauseLength)) s")
+    check(toldThis() == 2, "and a new pause after the copy heartbeated again is told again")
+
+    // Snapshots and changes are read without the rest of their fields (#81), but say so too.
+    var paused = snapshotObject(seq: 5, active: 1)
+    paused["heartbeatsPausedFor"] = 100_000
+    send(store, paused)
+    check(abs(next() - (clocks.awake + 100 + quiet)) < 0.01, "a snapshot sent while paused says so as well")
+}
+
+do {
+    // With no copy known (Safari not running) there's nobody to ask, and no timer runs during a hold: its end
+    // comes from HoldWatcher's notifications. A copy that turns up during it is asked when it's time.
+    let (store, clocks, commands) = clockedStore()
+    clocks.pass(quiet + 1)
+    store.noteQuietCopies()
+    store.safariDidTerminate()
+    hold(store, clocks, [.screenLocked])
+    check(store.nextCopyCheck == nil, "with no copy known, no timer runs during a hold")
+    clocks.pass(CopySilence.pauseAfter * 4)
+    store.noteQuietCopies()
+    check(pauses(commands()).isEmpty && store.nextCopyCheck == nil, "and nothing is asked")
+    send(store, pagesSnapshot(seq: 1, from: "late-copy", focused: 3, [(3, [(30, "https://example.com/1")])], active: [30]))
+    check(store.nextCopyCheck.map { $0 <= clocks.awakeBase + clocks.awake } == true, "a copy turning up during a long hold has the copies looked at at once")
+    store.noteQuietCopies()
+    check(pauses(commands()).count == 1, "and asked to pause")
+    hold(store, clocks, [])
+    check(resumes(commands()) == 1, "and to start again when the hold ends")
 }
 
 // MARK: - What the sidebar shows while a switch's window comes back from the Dock (#44)
@@ -4239,6 +4467,45 @@ do {
     check(store.isConnected, "and a message from its next launch connects it again")
 }
 
+do {
+    // A hold longer than `connectedFor`, with the copies asked to pause: the extension stays connected (#80).
+    // Silence counts for the connection as for a copy going quiet: not during a hold, nor during the pause a copy
+    // says it's in, nor, for copies not heard from since a hold, until the pause they may have missed runs out.
+    let (store, clocks, commands) = clockedStore()
+    clocks.pass(quiet + 1)
+    heartbeat(store)
+    hold(store, clocks, [.screenLocked])
+    clocks.pass(CopySilence.pauseAfter)
+    store.noteQuietCopies()
+    check(pauses(commands()).count == 1, "the copies are asked to pause")
+    clocks.pass(TabStore.connectedFor * 10)
+    store.checkConnection()
+    check(store.isConnected, "\(Int(TabStore.connectedFor * 10 + CopySilence.pauseAfter)) s at the lock screen with the copies paused: still connected")
+    hold(store, clocks, [])
+    check(store.isConnected, "the hold ending doesn't disconnect it")
+    let lastAsk = clocks.awake - TabStore.connectedFor * 10
+    let missedUntil = max(clocks.awake, lastAsk + CopySilence.pauseLength)
+    clocks.awake = missedUntil + TabStore.connectedFor - 1
+    store.checkConnection()
+    check(store.isConnected, "nor does silence before a pause the copies may have missed has run out, and \(Int(TabStore.connectedFor)) s after")
+    clocks.awake += 2
+    store.checkConnection()
+    check(!store.isConnected, "but silence after that does")
+
+    // A copy saying it's still paused: not counted until its pause runs out. The hold isn't noticed by a
+    // notification: the check reads the holds itself.
+    heartbeat(store)
+    _ = reply(store, message("heartbeat", from: instance, ["seq": 1, "heartbeatsPausedFor": 120_000]))
+    clocks.pass(120 + TabStore.connectedFor - 1)
+    store.checkConnection()
+    check(store.isConnected, "a copy that says it's paused for 2 min is connected until \(Int(TabStore.connectedFor)) s after that")
+    clocks.holds = [.displaysAsleep]
+    clocks.pass(600)
+    store.checkConnection()
+    check(store.isConnected, "a hold the store hears of only at the check isn't silence either")
+}
+
+try? FileManager.default.removeItem(at: stateFolder)
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {
