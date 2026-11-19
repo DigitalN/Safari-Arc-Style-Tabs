@@ -41,7 +41,8 @@ of its buttons a tab matches and which one Safari has selected, checked against 
 `Tests/TabBarFinderChecks/trees`; which of Safari's windows are browser windows the sidebar
 docks to, and never Settings, against the same trees; what a press on a row turns into; which row is under a
 middle click; which queued
-Accessibility requests are still wanted; which notifications the docked window is watched for;
+Accessibility requests are still wanted; which notifications the docked window is watched for; when the docked
+sidebar's shadow is worked out again and when it's ordered behind Safari's window again;
 where the sidebar slides out over the page in full screen or when it hides automatically, below which
 of Safari's bars (against trees in `Tests/SidebarOverlayChecks/trees`), and what
 brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, its list of closed tabs

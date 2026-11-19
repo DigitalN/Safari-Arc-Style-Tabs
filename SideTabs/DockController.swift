@@ -31,6 +31,9 @@ final class DockController {
     /// Width + gap the last layout used, to keep Safari flush when the width changes.
     private var appliedInset: Double?
 
+    /// What the panel's shadow was last worked out for (`shapePanel`).
+    private var shadowShape: PanelShadowShape?
+
     /// Below this, narrowing Safari to fit the sidebar would make it unusable.
     private let minimumSafariWidth: CGFloat = 480
 
@@ -195,13 +198,10 @@ final class DockController {
         }
         stopOverlay()
 
-        let target = dockedFrame(beside: axFrame)
-        panel.style.attached = true
-        if panel.frame != target {
-            panel.setFrame(target, display: true)
-            panel.invalidateShadow()
+        shapePanel(dockedFrame(beside: axFrame), attached: true)
+        if panel.level != .normal {
+            panel.level = .normal
         }
-        panel.level = .normal
         orderPanel(below: window)
         mode = .docked
         appliedInset = settings.width
@@ -291,11 +291,38 @@ final class DockController {
         if panel.isVisible && !tracker.isOnActiveSpace(windowNumber: panel.windowNumber) {
             panel.orderOut(nil)
         }
-        if let number = tracker.windowNumber(of: window) {
+        // Already directly behind Safari's window, it stays there (#85): ordering it again on every
+        // move while Safari's window is dragged would ask the window server to re-order windows that
+        // are where they should be. Anything between the two windows still puts it back.
+        if let number = tracker.windowNumber(of: window), !(panel.isVisible && isDirectlyBehind(number)) {
             panel.order(.below, relativeTo: number)
         }
         if !panel.isVisible {
             panel.orderFrontRegardless()
+        }
+    }
+
+    /// Whether the panel is directly behind the window with this number, with nothing between them,
+    /// from the window server's order of the windows on screen (numbers only, no window details).
+    private func isDirectlyBehind(_ number: Int) -> Bool {
+        let frontToBack = NSWindow.windowNumbers(options: [.allApplications])?.map(\.intValue) ?? []
+        return DockedPanelRules.isDirectlyBehind(panel: panel.windowNumber, window: number, frontToBack: frontToBack)
+    }
+
+    /// Gives the panel its style and frame. Its shadow follows the outline it draws, which changes with
+    /// its size and style but not its position, so the window server only works the shadow out again
+    /// then, not on every move while Safari's window is dragged (#85).
+    private func shapePanel(_ frame: NSRect, attached: Bool) {
+        if panel.style.attached != attached {
+            panel.style.attached = attached
+        }
+        if panel.frame != frame {
+            panel.setFrame(frame, display: true)
+        }
+        let shape = PanelShadowShape(size: panel.frame.size, attached: attached, scale: panel.backingScaleFactor)
+        if DockedPanelRules.needsNewShadow(shape, last: shadowShape) {
+            shadowShape = shape
+            panel.invalidateShadow()
         }
     }
 
@@ -409,13 +436,11 @@ final class DockController {
         if !overlayReveal.isRevealed && panel.isVisible {
             panel.orderOut(nil)
         }
-        panel.style.attached = false
         // Sized as soon as the place is known, so revealing it later is instant.
-        if panel.frame != layout.panel {
-            panel.setFrame(layout.panel, display: true)
-            panel.invalidateShadow()
+        shapePanel(layout.panel, attached: false)
+        if panel.level != .floating {
+            panel.level = .floating
         }
-        panel.level = .floating
         if overlayReveal.isRevealed && !panel.isVisible {
             panel.orderFrontRegardless()
         }
@@ -456,7 +481,10 @@ final class DockController {
         overlayTimer = nil
         overlayLayout = nil
         overlayReveal = OverlayReveal()
-        panel.alphaValue = 1
+        // Every docked update comes through here, each move of Safari's window included (#85).
+        if panel.alphaValue != 1 {
+            panel.alphaValue = 1
+        }
     }
 
     /// Whether the toolbar button, its shortcut and the menu bar item slide the sidebar out or
