@@ -102,6 +102,16 @@ final class SafariTracker {
     private var queuedRefresh: RefreshRequest?
     /// Bumped when attaching or detaching, so a read that started before can be told apart.
     private var attachment = 0
+    /// Attaching again after Safari refused to report its notifications (it was still starting up). The
+    /// dock's periodic look only runs while the sidebar is on and Safari in front (#78), and the profiles
+    /// need the tracker attached either way.
+    private var attachRetry: DispatchWorkItem?
+    private var attachRetries = 0
+    /// Picking the window again after a read Safari didn't answer in time, which kept what was known. The
+    /// notification that asked for it won't come again, and the dock's periodic look may not be running.
+    private var timedOutRetry: DispatchWorkItem?
+    private var timedOutRetries = 0
+    private static let retryDelays: [TimeInterval] = [1, 2, 4, 8]
 
     private static let appNotifications = [
         kAXFocusedWindowChangedNotification,
@@ -141,6 +151,7 @@ final class SafariTracker {
         observe(NSWorkspace.didLaunchApplicationNotification) { tracker, app in
             guard let app, app.bundleIdentifier == Self.safariBundleID else { return }
             tracker.app = app
+            tracker.attachRetries = 0
             // Give Safari a moment to create its accessibility hierarchy.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 tracker.attach(app)
@@ -149,6 +160,9 @@ final class SafariTracker {
         }
         observe(NSWorkspace.didTerminateApplicationNotification) { tracker, app in
             guard app?.bundleIdentifier == Self.safariBundleID else { return }
+            tracker.attachRetry?.cancel()
+            tracker.attachRetry = nil
+            tracker.attachRetries = 0
             tracker.detach()
             tracker.app = nil
             tracker.onEvent?(.terminated)
@@ -206,6 +220,7 @@ final class SafariTracker {
         let createError = AXObserverCreate(app.processIdentifier, callback, &created)
         guard createError == .success, let created else {
             log.error("AXObserverCreate failed: \(createError.rawValue)")
+            scheduleAttachRetry()
             return
         }
 
@@ -227,15 +242,36 @@ final class SafariTracker {
             reader.use(observer: registration.observer, refcon: registration.refcon)
             let failures = reader.register(names, on: element, observer: registration.observer, refcon: registration.refcon)
             log.notice("attached to Safari pid \(pid); notification failures: \(failures.isEmpty ? "none" : failures.joined(separator: ", "), privacy: .public)")
-            guard failures.count >= names.count else { return }
+            let refused = failures.count >= names.count
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if let self, self.attachment == epoch {
+                    guard let self, self.attachment == epoch else { return }
+                    if refused {
                         self.detach()
+                        self.scheduleAttachRetry()
+                    } else {
+                        self.attachRetries = 0
                     }
                 }
             }
         }
+    }
+
+    /// Tries attaching again after a moment, backing off to every 8 s, for as long as Safari runs and the
+    /// tracker isn't attached.
+    private func scheduleAttachRetry() {
+        guard attachRetry == nil, isTrusted else { return }
+        let delay = Self.retryDelays[min(attachRetries, Self.retryDelays.count - 1)]
+        attachRetries += 1
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.attachRetry = nil
+            guard !self.isAttached, let app = self.app, !app.isTerminated else { return }
+            self.log.notice("attaching to Safari again, attempt \(self.attachRetries + 1)")
+            self.attachIfNeeded()
+        }
+        attachRetry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// An observer and the pointer its callback gets back, which can cross to the reader's queue.
@@ -255,6 +291,9 @@ final class SafariTracker {
         reading = WindowReading()
         focusedWindow = nil
         clickActions.forgetMenuItem()
+        timedOutRetry?.cancel()
+        timedOutRetry = nil
+        timedOutRetries = 0
         let reader = windowReader
         reader.queue.async(qos: .userInitiated, flags: .enforceQoS) { reader.stopWatching() }
     }
@@ -358,11 +397,39 @@ final class SafariTracker {
             window = outcome.window
             reading = outcome.reading
         }
+        if request.full && epoch == attachment {
+            if outcome.keepPrevious {
+                scheduleTimedOutRetry()
+            } else {
+                timedOutRetry?.cancel()
+                timedOutRetry = nil
+                timedOutRetries = 0
+            }
+        }
         request.completions.forEach { $0(changed) }
         if let next = queuedRefresh {
             queuedRefresh = nil
             beginRefresh(next)
         }
+    }
+
+    /// Picks the window again after a read Safari didn't answer in time: after 1, 2, 4 and 8 s, then not until
+    /// a read succeeds, so a Safari that stays busy isn't asked over and over.
+    private func scheduleTimedOutRetry() {
+        guard timedOutRetry == nil, timedOutRetries < Self.retryDelays.count else { return }
+        let delay = Self.retryDelays[timedOutRetries]
+        timedOutRetries += 1
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.timedOutRetry = nil
+            self.refreshWindow(urgent: false) { [weak self] changed in
+                if changed {
+                    self?.onEvent?(.windowChanged)
+                }
+            }
+        }
+        timedOutRetry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     // MARK: - Window geometry (AX coordinates: origin top-left of the main display, y down)
