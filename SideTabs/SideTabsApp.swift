@@ -64,6 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // The gear in the sidebar's bottom bar (#43).
             .environment(\.showSideTabsSettings, ShowSettingsAction { [weak self] in self?.showSettings() }))
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
+        // No looks at Safari's window while it's held back (#78).
+        dock.currentHolds = { [holdWatcher] in holdWatcher.holds }
         self.dock = dock
 
         bridge.onMessage = { [store, favicons] message in
@@ -85,7 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ExtensionRegistration.repair(reported: reported, done: done)
         }
         store.currentHolds = { [holdWatcher] in holdWatcher.holds }
-        holdWatcher.onChange = { [store] in store.holdsMayHaveChanged() }
+        holdWatcher.onChange = { [store, weak self] in
+            store.holdsMayHaveChanged()
+            self?.dock?.holdsMayHaveChanged()
+        }
         holdWatcher.start()
         store.holdsMayHaveChanged()
         favicons.requestIcons = { [weak self] urls in

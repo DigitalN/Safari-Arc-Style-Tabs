@@ -19,8 +19,18 @@ final class DockController {
 
     private var mode: Mode = .hidden
     private var settleWork: DispatchWorkItem?
-    private var healthTimer: Timer?
     private var isEditing = false
+
+    /// Looks again at Safari's window for changes macOS doesn't announce (HealthCheck.swift), while there's
+    /// something to keep in place: how often, or why not.
+    private var healthTimer: Timer?
+    private var healthCadence = HealthCheck.Cadence.off("not started")
+    private var healthSchedule = HealthCheck.Schedule()
+    /// Looks at the holds again a moment after one may have changed, in case macOS reports the change
+    /// before it can say so.
+    private var holdRecheck: DispatchWorkItem?
+    /// What holds Safari back now: asleep, the screen locked and the like (HoldWatcher). No looks run then.
+    var currentHolds: () -> Set<CopySilence.Hold> = { [] }
 
     /// The pointer monitors and the menu observer, while the overlay watches the pointer (`watchPointer`).
     private var overlayMonitors: [Any] = []
@@ -67,31 +77,83 @@ final class DockController {
         observeSettings()
         observeActivation()
         update(makeRoom: true)
+        refreshHealthTimer()
+    }
 
-        // Picks up Accessibility access being granted, Safari windows appearing, etc., and
-        // puts the sidebar right after changes macOS didn't announce, including a switch to
-        // another Safari window that the window notifications missed.
-        // The reads of Safari's windows happen off the main thread; this runs when they're in. If
+    /// A hold may have begun or ended (HoldWatcher).
+    func holdsMayHaveChanged() {
+        refreshHealthTimer()
+        holdRecheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.holdRecheck = nil
+            self?.refreshHealthTimer()
+        }
+        holdRecheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+
+    // MARK: - Looking again
+
+    /// Starts, stops or changes the looks for what's true now: the sidebar on or off, Safari running and in
+    /// front, the holds. Called on everything that can change one of those.
+    private func refreshHealthTimer() {
+        let cadence = HealthCheck.cadence(
+            sidebarVisible: settings.sidebarVisible,
+            safariRunning: tracker.app.map { !$0.isTerminated } ?? false,
+            holds: currentHolds(),
+            safariInFront: tracker.isSafariFrontmost
+        )
+        guard cadence != healthCadence else { return }
+        let wasRunning = healthCadence.isRunning
+        healthCadence = cadence
+        log.notice("looking again for changes macOS doesn't announce: \(cadence.summary, privacy: .public)")
+        healthTimer?.invalidate()
+        healthTimer = nil
+        guard let interval = cadence.interval else { return }
+        if !wasRunning {
+            healthSchedule.resume()
+        }
+        // The reads of Safari's windows happen off the main thread; the look finishes when they're in. If
         // Safari is slow to answer, that is later, and the sidebar stays as it was meanwhile.
-        healthTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                let wasAttached = self.tracker.isAttached
-                self.tracker.attachIfNeeded()
-                self.tracker.refreshWindow { [weak self] windowChanged in
-                    guard let self else { return }
-                    if !wasAttached && self.tracker.isAttached || self.mode == .hidden || windowChanged {
-                        self.update(makeRoom: true)
-                    } else if let problem = self.placementProblem() {
-                        self.log.notice("fixing: \(problem, privacy: .public)")
-                        self.update(makeRoom: NSEvent.pressedMouseButtons == 0)
-                    }
-                }
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.look() }
+        }
+        timer.tolerance = cadence.tolerance
+        RunLoop.main.add(timer, forMode: .default)
+        healthTimer = timer
+    }
+
+    /// Puts the sidebar right after changes macOS didn't announce (HealthCheck.swift).
+    private func look() {
+        guard let look = healthSchedule.next(cadence: healthCadence, hasWindow: tracker.window != nil) else { return }
+        let wasAttached = tracker.isAttached
+        if look.attaches {
+            tracker.attachIfNeeded(readingWindow: false)
+        }
+        let check = { [weak self] (windowChanged: Bool) in
+            guard let self else { return }
+            if !wasAttached && self.tracker.isAttached || self.mode == .hidden || windowChanged {
+                self.update(makeRoom: true)
+            } else if let problem = self.placementProblem(checksStacking: look.checksStacking) {
+                self.log.notice("fixing: \(problem, privacy: .public)")
+                self.update(makeRoom: NSEvent.pressedMouseButtons == 0)
             }
+        }
+        switch look.read {
+        case .none:
+            check(false)
+        case .geometry, .full:
+            // At `.utility`: nobody waits on a look.
+            tracker.refreshWindow(full: look.read == .full, urgent: false, bars: look.readsBars, then: check)
         }
     }
 
     private func handle(_ event: SafariTracker.Event) {
+        defer {
+            if event.mayChangeHealthCheck {
+                refreshHealthTimer()
+            }
+        }
         switch event {
         case .moved, .resized:
             update(makeRoom: false)
@@ -133,6 +195,7 @@ final class DockController {
     }
 
     private func settingsChanged() {
+        refreshHealthTimer()
         if tracker.readsToolbarInWindows != settings.hidesAutomatically {
             tracker.readsToolbarInWindows = settings.hidesAutomatically
             // The overlay starts below the toolbar, which a normal window's last read didn't include.
@@ -236,7 +299,10 @@ final class DockController {
     /// Why the sidebar isn't where `update` would put it, if it isn't. macOS doesn't announce
     /// every change: a swipe toward another Space that's taken back never changes Spaces, and
     /// leaving full screen can finish after the last event about it.
-    private func placementProblem() -> String? {
+    ///
+    /// `checksStacking`: also copy the window server's list of windows to see whether another one is between
+    /// Safari's window and the sidebar. Only while Safari is in front (HealthCheck.swift).
+    private func placementProblem(checksStacking: Bool) -> String? {
         guard mode != .hidden else { return nil }
         guard settings.sidebarVisible, tracker.app?.isHidden == false,
               let window = tracker.window, let frame = tracker.frame(of: window) else {
@@ -274,7 +340,7 @@ final class DockController {
         if panel.frame != dockedFrame(beside: frame) {
             return "sidebar isn't beside Safari"
         }
-        if let number = tracker.windowNumber(of: window) {
+        if checksStacking, let number = tracker.windowNumber(of: window) {
             let behind = normalWindows(.optionOnScreenBelowWindow, relativeTo: number).first
             if let behind, behind[kCGWindowNumber as String] as? Int != panel.windowNumber {
                 let inFront = normalWindows(.optionOnScreenAboveWindow, relativeTo: number)
@@ -746,4 +812,15 @@ final class DockController {
 
 private extension CGRect {
     var area: CGFloat { isNull ? 0 : width * height }
+}
+
+private extension SafariTracker.Event {
+    /// Safari coming to the front or going behind, hidden or shown, launched or quit: what decides whether
+    /// the dock looks again at Safari's window, and how often (HealthCheck.swift).
+    var mayChangeHealthCheck: Bool {
+        switch self {
+        case .focusChanged, .visibilityChanged, .launched, .terminated: true
+        case .moved, .resized, .windowChanged, .titleChanged: false
+        }
+    }
 }
