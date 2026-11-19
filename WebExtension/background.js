@@ -798,8 +798,10 @@ browser.windows.onFocusChanged.addListener((windowId) => {
     if (windowId !== WINDOW_ID_NONE) lastFocusedWindowId = windowId;
     focusChangedAt = Date.now();
     // Only the focus changed: what's sent is the state the app has with the new focus, without asking Safari
-    // for every tab again, in every profile's copy (#81).
-    scheduleSnapshot(0, false);
+    // for every tab again, in every profile's copy (#81). Unless the window is one that state doesn't have:
+    // Safari restores windows without telling extensions.
+    const known = windowId === WINDOW_ID_NONE || (sentState && sentState.state.windows.some((w) => w.id === windowId));
+    scheduleSnapshot(0, !known);
 });
 
 browser.runtime.onMessage.addListener((message, sender) => {

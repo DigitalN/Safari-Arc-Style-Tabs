@@ -711,12 +711,23 @@ async function settled(page) {
         check(!!back && !!away && back.startedAt === away.startedAt && back.startedAt < away.focus.focusChangedAt,
             "its time is that of the tabs it carries, from before focus moved");
 
+        // Focus moving to a window the app hasn't been told of asks Safari: it restores windows without saying so.
+        page.sent.length = 0;
+        page.tabs.push({ id: 40, windowId: 4, index: 0, title: "Restored", url: "https://example.com/restored", active: true });
+        page.fire("windows.focus", 4);
+        await sleep(100);
+        check(page.queryCount() === queries + 1, "focus moving to a window the app hasn't got asks Safari");
+        check(JSON.stringify(lastState(page)?.windowIds) === "[1,4]" && lastState(page)?.focus?.focusedWindowId === 4,
+            "and sends the window with the focus");
+        page.fire("windows.focus", 1);
+        await sleep(100);
+
         // A focus change with a change to a tab still on its way asks Safari.
         page.sent.length = 0;
         updateTab(page, 4, { title: "Busy" });
         page.fire("windows.focus", -1);
         await sleep(100);
-        check(page.queryCount() === queries + 1, "a focus change after a tab change asks Safari");
+        check(page.queryCount() === queries + 2, "a focus change after a tab change asks Safari");
         const both = lastState(page);
         check(both?.focus?.focusedWindowId === -1 && both.tabs?.some((tab) => tab.id === 4 && tab.title === "Busy"),
             "and sends both");
