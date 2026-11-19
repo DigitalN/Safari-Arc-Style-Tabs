@@ -85,7 +85,18 @@ final class SafariTracker {
     /// that starts when it finishes, so a burst of window events costs Safari two reads at most.
     private struct RefreshRequest {
         var full: Bool
+        /// Something the user waits on: read at `.userInitiated` rather than the reader's `.utility`.
+        var urgent: Bool
+        /// Read Safari's bars above the page, where they're read at all.
+        var bars: Bool
         var completions: [(Bool) -> Void]
+
+        mutating func merge(_ other: RefreshRequest) {
+            full = full || other.full
+            urgent = urgent || other.urgent
+            bars = bars || other.bars
+            completions += other.completions
+        }
     }
     private var refreshRunning = false
     private var queuedRefresh: RefreshRequest?
@@ -158,8 +169,9 @@ final class SafariTracker {
         attachIfNeeded()
     }
 
-    /// Attaches to a running Safari once Accessibility access is granted. Safe to call often.
-    func attachIfNeeded() {
+    /// Attaches to a running Safari once Accessibility access is granted. Safe to call often. With
+    /// `readingWindow`, also picks the window to dock to if none is known.
+    func attachIfNeeded(readingWindow: Bool = true) {
         if app == nil || app?.isTerminated == true {
             app = NSRunningApplication.runningApplications(withBundleIdentifier: Self.safariBundleID).first
         }
@@ -167,7 +179,7 @@ final class SafariTracker {
         if observer == nil {
             attach(app)
         }
-        if window == nil {
+        if readingWindow && window == nil {
             refreshWindow { [weak self] changed in
                 if changed {
                     self?.onEvent?(.windowChanged)
@@ -211,7 +223,7 @@ final class SafariTracker {
         let names = Self.appNotifications
         let reader = windowReader
         let epoch = attachment
-        reader.queue.async { [weak self, log] in
+        reader.queue.async(qos: .userInitiated, flags: .enforceQoS) { [weak self, log] in
             reader.use(observer: registration.observer, refcon: registration.refcon)
             let failures = reader.register(names, on: element, observer: registration.observer, refcon: registration.refcon)
             log.notice("attached to Safari pid \(pid); notification failures: \(failures.isEmpty ? "none" : failures.joined(separator: ", "), privacy: .public)")
@@ -244,7 +256,7 @@ final class SafariTracker {
         focusedWindow = nil
         clickActions.forgetMenuItem()
         let reader = windowReader
-        reader.queue.async { reader.stopWatching() }
+        reader.queue.async(qos: .userInitiated, flags: .enforceQoS) { reader.stopWatching() }
     }
 
     private func handle(_ name: String, element: AXUIElement) {
@@ -283,12 +295,15 @@ final class SafariTracker {
     /// Only one read runs at a time. Requests made while it does are merged into the next.
     /// `full: false` only looks at the docked window's frame and the like, which is all a move or
     /// resize needs.
-    func refreshWindow(full: Bool = true, then completion: ((Bool) -> Void)? = nil) {
-        let request = RefreshRequest(full: full || window == nil, completions: completion.map { [$0] } ?? [])
+    ///
+    /// `urgent: false` is for the dock's periodic look (#78), which nobody waits on: it reads at the
+    /// reader queue's `.utility`. Without `bars`, Safari's bars above the page aren't read, and the last
+    /// answer is kept.
+    func refreshWindow(full: Bool = true, urgent: Bool = true, bars: Bool = true, then completion: ((Bool) -> Void)? = nil) {
+        let request = RefreshRequest(full: full || window == nil, urgent: urgent, bars: bars, completions: completion.map { [$0] } ?? [])
         guard !refreshRunning else {
             if var queued = queuedRefresh {
-                queued.full = queued.full || request.full
-                queued.completions += request.completions
+                queued.merge(request)
                 queuedRefresh = queued
             } else {
                 queuedRefresh = request
@@ -314,8 +329,12 @@ final class SafariTracker {
         let previous = reading
         let reader = windowReader
         let toolbarInWindows = readsToolbarInWindows
-        reader.queue.async { [weak self] in
-            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full, toolbarInWindows: toolbarInWindows)
+        // Unspecified, the block runs at the queue's own `.utility`.
+        let qos: DispatchQoS = request.urgent ? .userInitiated : .unspecified
+        let flags: DispatchWorkItemFlags = request.urgent ? .enforceQoS : []
+        reader.queue.async(qos: qos, flags: flags) { [weak self] in
+            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full,
+                                      toolbarInWindows: toolbarInWindows, bars: request.bars)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self?.finish(request, outcome: outcome, epoch: epoch)
@@ -383,7 +402,7 @@ final class SafariTracker {
         let previous = reading
         let reader = windowReader
         let toolbarInWindows = readsToolbarInWindows
-        reader.queue.async { [weak self] in
+        reader.queue.async(qos: .userInitiated, flags: .enforceQoS) { [weak self] in
             let reading = reader.setFrame(frame, of: window, previous: previous, toolbarInWindows: toolbarInWindows)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
