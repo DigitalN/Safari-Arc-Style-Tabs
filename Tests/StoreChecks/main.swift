@@ -3817,12 +3817,26 @@ do {
 
 // MARK: - Snapshots that change nothing, and changes in place of snapshots (#81)
 
-/// Whether anything the sidebar's views read changes while `action` runs. (`lastMessageAt`, which every message
-/// sets, isn't among them here: #83 sees to that one.)
+/// Whether anything observed in the store changes while `action` runs: what the sidebar's views read, the menu bar
+/// menu's `isConnected` (#83), and every other property that isn't `@ObservationIgnored`.
 func sidebarChanges(_ store: TabStore, while action: () -> Void) -> Bool {
     final class Flag: @unchecked Sendable { var raised = false }
     let changed = Flag()
     withObservationTracking {
+        _ = store.isConnected
+        _ = store.bookmarkLists
+        _ = store.renaming
+        _ = store.safariIsFrontmost
+        _ = store.dockedWindowTitle
+        _ = store.dockedWindowProfile
+        _ = store.dockedWindowIsPrivate
+        _ = store.dockedLikeWindowCount
+        _ = store.dockedWindowSettled
+        _ = store.profileToTurnOn
+        _ = store.switchPreview
+        _ = store.sidebarFade
+        _ = store.fadingOutContent
+        _ = store.copiesHaveHadTheirChance
         _ = store.snapshots
         _ = store.liveSnapshots
         _ = store.liveInstances
@@ -3862,6 +3876,7 @@ do {
     let (store, _) = makeStore()
     let shown = store.displayedContent
     check(shown != nil && store.currentWindow != nil, "the store shows the window")
+    check(store.isConnected, "and counts the extension as connected, so the messages below change nothing observed")
     check(!sidebarChanges(store) { send(store, snapshotObject(seq: 2, active: 1, startedAt: nowMilliseconds())) },
           "a snapshot that shows the same as the last one causes no observation change")
     check(!sidebarChanges(store) { send(store, snapshotObject(seq: 3, active: 1)) }, "nor one without a time")
