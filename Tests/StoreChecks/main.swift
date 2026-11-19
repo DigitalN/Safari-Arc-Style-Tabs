@@ -210,6 +210,8 @@ withPresser { store, presses, commands in
     wait(1.2)
     check(activations(commands()).isEmpty, "a press Safari doesn't confirm in time is not followed by a command that could pull Safari back (#20 item 3)")
     check(snapshotRequests(commands()) == 1, "Safari is asked where it is instead")
+    check(commands().filter { $0["action"] as? String == "snapshot" }.allSatisfy { $0["instance"] as? String == instance },
+          "and only the clicked tab's copy is asked (#47)")
 }
 
 withPresser { store, presses, commands in
@@ -909,7 +911,9 @@ do {
     store.dockedWindowTitle = "Personal — Tab 2"
     check(snapshotRequests(commands()) == 0, "so is one titled with its profile's name in front")
     store.dockedWindowTitle = "Personal — Something else"
-    check(snapshotRequests(commands()) == 1, "a title that fits no window still asks for a snapshot")
+    check(snapshotRequests(commands()) == 0, "a title that fits no window doesn't ask at once: the extension's report may be on its way (#82)")
+    wait(TabStore.dockedAskWait + 0.1)
+    check(snapshotRequests(commands()) == 1, "but once it has fitted nothing for a while, it asks for a snapshot")
 }
 
 do {
@@ -920,6 +924,7 @@ do {
     send(store, windowsSnapshot(seq: 5, focused: 1, [(1, "Test tab 29", false), (2, "Test tab 30", false)]))
     store.dockedWindowTitle = "Personal — Untitled"
     check(store.currentWindow?.window.id == 1, "with a title that fits no window, the window the extension focused is listed")
+    wait(TabStore.dockedAskWait + 0.1)
     check(snapshotRequests(commands()) == 1, "and Safari is asked for a snapshot")
     store.dockedWindowTitle = "Personal — Test tab 30"
     check(store.currentWindow?.window.id == 2, "as soon as the docked window's title is updated, its own window is listed")
@@ -943,6 +948,7 @@ do {
     let (store, commands) = makeStore()
     send(store, windowsSnapshot(seq: 5, focused: 1, [(1, "Home", false)]))
     store.dockedWindowTitle = "My Home"
+    wait(TabStore.dockedAskWait + 0.1)
     check(snapshotRequests(commands()) == 1, "\"My Home\" is not the window titled \"Home\"")
 }
 
@@ -1170,6 +1176,164 @@ do {
     let muted = store.tab(for: TabKey(instance: instance, tabId: 2))!
     store.setMuted(false, tab: muted, instance: instance)
     check(store.tab(for: TabKey(instance: instance, tabId: 2))?.muted == false, "unmuting shows it at once too")
+}
+
+// MARK: - Asking about the docked window (#82, #47)
+
+/// The `snapshot` commands among `commands`, by whom they went to: a copy's instance, or "every copy".
+func snapshotAsks(_ commands: [[String: Any]]) -> [String] {
+    commands.filter { $0["action"] as? String == "snapshot" }.map { $0["instance"] as? String ?? "every copy" }
+}
+
+let homeProfile = "HHHHHHHH-0000-0000-0000-000000000000"
+
+/// Three copies: the default profile's (A, window 1 on "Mail"), Work's (B, its windows as given) and Home's (C,
+/// window 9 on "Recipes"), docked to a Work window titled `title`, as SafariProfiles would say it.
+func threeCopies(_ title: String, work windows: [(id: Int, tabs: [String], incognito: Bool)], likeWindows: Int?, settled: Bool) -> (TabStore, sent: () -> [[String: Any]]) {
+    let store = storeWithoutCopies()
+    var commands: [[String: Any]] = []
+    store.sendCommand = { command, _ in commands.append(command) }
+    send(store, windowsOf("A", profile: nil, seq: 1, focused: 1, at: 300, [(1, ["Mail"], false)]))
+    send(store, windowsOf("B", profile: workProfile, seq: 1, at: 200, windows))
+    send(store, windowsOf("C", profile: homeProfile, seq: 1, at: 100, [(9, ["Recipes"], false)]))
+    store.dockedWindowChanged()
+    store.dockedWindowProfile = workProfile
+    store.dockedLikeWindowCount = likeWindows
+    store.dockedWindowSettled = settled
+    store.dockedWindowTitle = title
+    return (store, { commands })
+}
+
+do {
+    // #47: 3 copies, a Work window its copy can't see (after an update, #41), on a page that retitles itself every
+    // second. Asking never helps there, so nothing is asked, however long it goes on.
+    let (store, commands) = threeCopies("Work — Inbox (1)", work: [(8, ["New"], false)], likeWindows: 2, settled: true)
+    check(store.unseenDockedWindow?.instance == "B", "the docked window is one Work's copy can't see")
+    for unread in 2...4 {
+        wait(1)
+        store.dockedWindowTitle = "Work — Inbox (\(unread))"
+    }
+    wait(1)
+    check(snapshotAsks(commands()).isEmpty, "an unseen docked window retitled every second asks no copy for a snapshot")
+}
+
+do {
+    // #47: a tab switch made in Safari (its tab bar, ⌘1–9): the window's title changes, and the copy's report of
+    // the switch arrives 50 ms later, which makes the title fit.
+    let (store, commands) = makeStore(active: 1)
+    store.dockedWindowTitle = "Tab 1"
+    store.dockedWindowTitle = "Tab 3"
+    wait(0.05)
+    activated(store, tab: 3, seq: 2, at: nowMilliseconds())
+    wait(TabStore.dockedAskWait + 0.5)
+    check(snapshotAsks(commands()).isEmpty, "a switch whose report arrives 50 ms after the title asks for no snapshot")
+    // The same with the report 300 ms late, as it can be when Safari is busy.
+    store.dockedWindowTitle = "Tab 4"
+    wait(0.3)
+    activated(store, tab: 4, seq: 3, at: nowMilliseconds())
+    wait(TabStore.dockedAskWait + 0.5)
+    check(snapshotAsks(commands()).isEmpty, "nor one whose report arrives 300 ms after it")
+}
+
+do {
+    // #82: a page that changes its title every second (a timer), in a Work window its copy lists. The copy's own
+    // snapshot of each change comes about 100 ms after Accessibility's title.
+    let (store, commands) = threeCopies("Work — 0:00", work: [(7, ["0:00"], false)], likeWindows: 1, settled: true)
+    for second in 1...3 {
+        wait(0.9)
+        store.dockedWindowTitle = "Work — 0:0\(second)"
+        wait(0.1)
+        send(store, windowsOf("B", profile: workProfile, seq: 1 + second, focused: 7, at: 400, [(7, ["0:0\(second)"], false)]))
+    }
+    wait(1)
+    check(snapshotAsks(commands()).isEmpty, "a title changing every second asks for no snapshot when the copy keeps up")
+
+    // Safari busy: the copy's snapshots come 2 s late. It lists every Work window, so it's only behind on a title.
+    for second in 4...6 {
+        store.dockedWindowTitle = "Work — 0:0\(second)"
+        wait(1)
+    }
+    check(snapshotAsks(commands()).isEmpty, "nor when its reports lag, while it lists every window like the docked one")
+}
+
+do {
+    // A title that never fits (Safari titles the window otherwise than its page), with nothing to tell the copy is
+    // only behind (a Safari without profiles): its copy is asked, once more, and then not again every second.
+    let (store, commands) = makeStore(active: 1)
+    for second in 0...4 {
+        store.dockedWindowTitle = "Countdown \(second)"
+        wait(1)
+    }
+    check(snapshotAsks(commands()) == [instance, instance],
+          "a title that never fits asks its copy twice, not every second (asked: \(snapshotAsks(commands())))")
+    store.dockedWindowChanged()
+    store.dockedWindowTitle = "Elsewhere"
+    wait(TabStore.dockedAskWait + 0.1)
+    check(snapshotAsks(commands()).count == 3, "another window docked is asked about afresh")
+}
+
+do {
+    // #82: a window brought back with Reopen Last Closed Window, which Safari hasn't told Work's copy about. It
+    // hasn't been open long enough to count as unseen. Its copy, and only its copy, is asked.
+    let (store, commands) = threeCopies("Work — Docs", work: [(7, ["Docs"], false)], likeWindows: 1, settled: false)
+    store.dockedWindowChanged()
+    store.dockedLikeWindowCount = 2
+    store.dockedWindowTitle = "Work — Recipes for later"
+    check(snapshotAsks(commands()).isEmpty, "a window just restored isn't asked about at once")
+    wait(TabStore.dockedAskWait + 0.1)
+    check(snapshotAsks(commands()) == ["B"], "but soon after, its copy is asked, and only its copy (asked: \(snapshotAsks(commands())))")
+    wait(TabStore.dockedAskWait)
+    check(snapshotAsks(commands()) == ["B", "B"], "once more if the window still fits nothing")
+    send(store, windowsOf("B", profile: workProfile, seq: 2, focused: 8, at: 500, [(7, ["Docs"], false), (8, ["Recipes for later"], false)]))
+    check(store.currentWindow?.instance == "B" && store.currentWindow?.window.id == 8, "the copy's answer lists the restored window's tabs")
+    wait(TabStore.dockedAskWait + 0.1)
+    check(snapshotAsks(commands()).count == 2, "and nothing more is asked")
+
+    // The count of Work windows can come after the title: a copy that seemed to list them all is asked once it doesn't.
+    let (late, lateCommands) = threeCopies("Work — Docs", work: [(7, ["Docs"], false)], likeWindows: 1, settled: false)
+    late.dockedWindowChanged()
+    late.dockedWindowTitle = "Work — Restored"
+    wait(TabStore.dockedAskWait + 0.1)
+    check(snapshotAsks(lateCommands()).isEmpty, "while Work's copy lists every Work window Safari has, it's only behind on a title")
+    late.dockedLikeWindowCount = 2
+    wait(TabStore.dockedAskWait + 0.1)
+    check(snapshotAsks(lateCommands()) == ["B"], "once Safari has one more, the copy is asked")
+}
+
+do {
+    // A private window restored: the default profile's copy is the one asked.
+    let (store, commands) = threeCopies("Work — Docs", work: [(7, ["Docs"], false)], likeWindows: 1, settled: false)
+    store.dockedWindowChanged()
+    store.dockedWindowProfile = nil
+    store.dockedWindowIsPrivate = true
+    store.dockedLikeWindowCount = 1
+    store.dockedWindowTitle = "Secret, Private Browsing"
+    wait(TabStore.dockedAskWait + 0.1)
+    check(snapshotAsks(commands()) == ["A"], "a private window that fits nothing asks the default profile's copy")
+}
+
+do {
+    // A docked window whose profile isn't known yet asks the copy of the window the sidebar shows; with no copy at
+    // all (Side Tabs or Safari starting), every copy.
+    let (store, commands) = makeStore(active: 1)
+    store.dockedWindowTitle = "Somewhere"
+    wait(TabStore.dockedAskWait + 0.1)
+    check(snapshotAsks(commands()) == [instance], "without the docked window's profile, the shown window's copy is asked")
+
+    let empty = storeWithoutCopies()
+    var sent: [[String: Any]] = []
+    empty.sendCommand = { command, _ in sent.append(command) }
+    empty.dockedWindowTitle = "Somewhere"
+    wait(TabStore.dockedAskWait + 0.1)
+    check(snapshotAsks(sent) == ["every copy"], "with no copy known yet, every copy is asked")
+
+    // The docked window's profile has no copy yet (it's starting): it sends a snapshot when it starts.
+    let (waiting, waitingCommands) = threeCopies("Work — Docs", work: [(7, ["Docs"], false)], likeWindows: 2, settled: false)
+    waiting.dockedWindowChanged()
+    waiting.dockedWindowProfile = homeProfile.replacingOccurrences(of: "H", with: "J")
+    waiting.dockedWindowTitle = "Starting — Page"
+    wait(TabStore.dockedAskWait + 0.1)
+    check(snapshotAsks(waitingCommands()).isEmpty, "a profile whose copy hasn't spoken yet asks no other copy")
 }
 
 // MARK: - An open bookmark's tab stays under its bookmark (#25)
@@ -2011,6 +2175,7 @@ do {
     let before = commands().filter { $0["action"] as? String == "snapshot" }.count
     store.dockedWindowTitle = "Work — Page 51"
     store.dockedWindowTitle = "Work — Page 50"
+    wait(TabStore.dockedAskWait + 0.1)
     check(commands().filter { $0["action"] as? String == "snapshot" }.count > before,
         "a docked window only a quiet copy reports counts as unknown, so Safari is asked for snapshots")
 }

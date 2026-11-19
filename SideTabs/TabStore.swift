@@ -130,12 +130,11 @@ final class TabStore {
         didSet {
             if dockedWindowTitle != oldValue {
                 refreshShown()
-                requestSnapshotIfUnknown(title: dockedWindowTitle)
+                dockedTitleChanged(from: oldValue)
                 logShownSpace()
             }
         }
     }
-    @ObservationIgnored private var lastSnapshotRequest = Date.distantPast
     /// The docked window's profile, read from its toolbar by SafariProfiles (#33), as `ProfileKey.rawValue`:
     /// "default", or the profile's UUID as its copy's snapshots carry it. Nil while it isn't known, in a private
     /// window, and where Safari has no profiles. `currentWindow` takes the docked window from that profile's copy.
@@ -157,6 +156,8 @@ final class TabStore {
         didSet {
             refreshShown()
             settleSwitchPreview()
+            // A window like it opened: a title that fits nothing may now be a window its copy hasn't listed.
+            if dockedLikeWindowCount != oldValue { scheduleDockedWindowCheck(restart: false) }
         }
     }
     /// The docked window has been open long enough for its copy to have reported it: about 2 s, and longer
@@ -726,29 +727,152 @@ final class TabStore {
         copies.removeAll()
         replacedCopies.removeAll()
         replacedIds.removeAll()
+        dockedAsks.removeAll()
+        dockedCheck?.cancel()
+        dockedCheck = nil
+        dockedUnknownSince = nil
         if !liveInstances.isEmpty {
             liveInstances.removeAll()
         }
     }
 
-    func requestSnapshot() {
-        lastSnapshotRequest = Date()
-        sendCommand?(["action": "snapshot"]) {}
+    /// Asks the extension for a full snapshot: only copy `copy` (#47), or every copy when it's nil, which is
+    /// for when none can be told apart: Side Tabs starting, Safari launching, the Mac waking.
+    func requestSnapshot(of copy: String? = nil) {
+        if let copy {
+            send(["action": "snapshot"], to: copy)
+        } else {
+            sendCommand?(["action": "snapshot"]) {}
+        }
     }
 
-    /// Safari doesn't always tell extensions about windows it restores (Reopen Last Closed
-    /// Window, relaunch), so when the docked window matches nothing we know, ask again.
-    private func requestSnapshotIfUnknown(title: String?) {
-        guard let title, !title.isEmpty else { return }
-        guard dockedWindows(title: title).isEmpty, Date().timeIntervalSince(lastSnapshotRequest) > 0.5 else { return }
-        requestSnapshot()
-        // Titles can lag behind while a page loads; check once more shortly after.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self, self.dockedWindowTitle == title else { return }
-            if self.dockedWindows(title: title).isEmpty {
-                self.requestSnapshot()
-            }
+    // MARK: - Asking about the docked window (#82, #47)
+    //
+    // Safari doesn't always tell extensions about windows it restores (Reopen Last Closed Window, a relaunch),
+    // so when the docked window's title fits no window the copies list, its copy may have to be asked for a
+    // snapshot. But a title nearly always fits nothing only for a moment: Accessibility reports a new title
+    // before the extension reports the change (its lazy snapshot, 30–250 ms after the change and longer under
+    // load), and before a copy's `activated` report of a tab switch made in Safari. A full snapshot costs Safari
+    // a query of every window and tab, the app a decode, and the sidebar a redraw, and a page can change its
+    // title every second. So the docked window's copy is asked only:
+    //
+    // - once the title has fitted nothing for `dockedAskWait`, longer than those reports take to arrive (and
+    //   no later than `dockedAskLatest` after the docked window's title stopped fitting, however often it
+    //   changes, so a restored window is asked about before it counts as unseen);
+    // - while the docked window isn't one its copy can't see (`unseenDockedWindow`, #41): asking never helps;
+    // - while its copy doesn't list as many windows as Safari has like it (`dockedLikeWindowCount`): a copy
+    //   that does can see them all, and is only behind on a title;
+    // - of the docked window's copy alone (`dockedCopiesToAsk`): every copy only when none can be told;
+    // - at most `dockedAsksPerListing` times while the copy lists the same windows and the window stays docked,
+    //   so a title that never fits (Safari titles the window other than its page) doesn't ask again and again.
+
+    /// How long the docked window's title has to fit nothing before its copy is asked: longer than the
+    /// extension's lazy snapshot of a change and a copy's `activated` report take to arrive. Also how long
+    /// after an ask its copy is asked once more, if the window still fits nothing.
+    static let dockedAskWait: TimeInterval = 0.7
+    /// The longest the docked window's titles can go on fitting nothing before its copy is asked, counted from
+    /// the first of them: under `ProfileRules.offAfter`, when a window its copy doesn't list counts as unseen.
+    static let dockedAskLatest: TimeInterval = 1.3
+    /// How many times a copy is asked about the docked window while it lists the same windows: once, and
+    /// once more in case Safari was still restoring the window.
+    static let dockedAsksPerListing = 2
+
+    /// The pending look at whether to ask about the docked window.
+    @ObservationIgnored private var dockedCheck: DispatchWorkItem?
+    /// Since when the docked window's title has fitted no window, through any changes to it.
+    @ObservationIgnored private var dockedUnknownSince: Date?
+    /// The asks about the docked window since it was docked, by copy ("" for every copy): the windows the copy
+    /// listed when it was last asked, and how many times it was asked while it listed them.
+    @ObservationIgnored private var dockedAsks: [String: (listing: Set<String>, count: Int)] = [:]
+
+    /// Another window is docked, or none (SafariProfiles): its copy may be asked about it afresh.
+    func dockedWindowChanged() {
+        dockedAsks.removeAll()
+        dockedUnknownSince = nil
+        scheduleDockedWindowCheck(restart: true)
+    }
+
+    private func dockedTitleChanged(from oldTitle: String?) {
+        // The wait starts afresh unless the title before this one still fits nothing either.
+        let wasUnknown = oldTitle.map { !$0.isEmpty && dockedWindows(title: $0).isEmpty } ?? false
+        if !wasUnknown {
+            dockedUnknownSince = nil
         }
+        scheduleDockedWindowCheck(restart: true)
+    }
+
+    /// Looks at whether to ask about the docked window once its title has fitted nothing for `dockedAskWait`.
+    /// A new title (`restart`) puts the look off until it has waited that long too, but no later than
+    /// `dockedAskLatest` after the titles stopped fitting; anything else leaves a pending look where it is.
+    private func scheduleDockedWindowCheck(restart: Bool) {
+        guard let title = dockedWindowTitle, !title.isEmpty, dockedWindows(title: title).isEmpty else {
+            dockedCheck?.cancel()
+            dockedCheck = nil
+            dockedUnknownSince = nil
+            return
+        }
+        let now = Date()
+        let since = dockedUnknownSince ?? now
+        dockedUnknownSince = since
+        if dockedCheck != nil, !restart { return }
+        var wait = Self.dockedAskWait
+        if restart {
+            wait = max(0, min(wait, since.addingTimeInterval(Self.dockedAskLatest).timeIntervalSince(now)))
+        }
+        dockedCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.dockedCheck = nil
+            self.askAboutDockedWindowIfUnknown()
+        }
+        dockedCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
+    }
+
+    private func askAboutDockedWindowIfUnknown() {
+        guard let title = dockedWindowTitle, !title.isEmpty, dockedWindows(title: title).isEmpty else {
+            dockedUnknownSince = nil
+            return
+        }
+        guard unseenDockedWindow == nil, !dockedCopyListsEveryLikeWindow else { return }
+        var asked: [String] = []
+        for copy in dockedCopiesToAsk.map({ $0 as [String?] }) ?? [nil] {
+            let key = copy ?? ""
+            let listing = Set(snapshots.values.filter { copy == nil || $0.instance == copy }.flatMap { snapshot in
+                snapshot.windows.map { "\(snapshot.instance)/\($0.id)" }
+            })
+            let before = dockedAsks[key].flatMap { $0.listing == listing ? $0.count : nil } ?? 0
+            guard before < Self.dockedAsksPerListing else { continue }
+            dockedAsks[key] = (listing, before + 1)
+            requestSnapshot(of: copy)
+            asked.append(copy.map { "copy \($0.prefix(8))" } ?? "every copy")
+        }
+        guard !asked.isEmpty else { return }
+        let waited = Int(Date().timeIntervalSince(dockedUnknownSince ?? Date()) * 1000)
+        log.notice("the docked window has fitted no window the extension lists for \(waited) ms; asked \(asked.joined(separator: ", "), privacy: .public) for a snapshot")
+        // In case Safari was still restoring the window, its copy is asked once more if it still fits nothing.
+        scheduleDockedWindowCheck(restart: false)
+    }
+
+    /// The copies to ask about the docked window: its profile's (the default profile's for a private window),
+    /// else the copy of the window the sidebar shows (#47). Empty when its profile's copy hasn't spoken yet: it
+    /// sends a snapshot when it starts. Nil when no copy can be told: Side Tabs or Safari starting.
+    private var dockedCopiesToAsk: [String]? {
+        if let profile = dockedWindowIsPrivate ? "default" : dockedWindowProfile {
+            let own = snapshots.values.filter { Self.isCopy($0, of: profile) }.map(\.instance).sorted()
+            return own.isEmpty && snapshots.isEmpty ? nil : own
+        }
+        return currentWindow.map { [$0.instance] }
+    }
+
+    /// The docked window's live copy lists as many windows as Safari has like it (`dockedLikeWindowCount`): it
+    /// can see them all, and is only behind on a title.
+    private var dockedCopyListsEveryLikeWindow: Bool {
+        guard let likeWindows = dockedLikeWindowCount, let profile = dockedWindowIsPrivate ? "default" : dockedWindowProfile else {
+            return false
+        }
+        let windows = liveSnapshots.values.filter { Self.isCopy($0, of: profile) }.flatMap(\.windows)
+        return windows.filter { $0.incognito == dockedWindowIsPrivate }.count >= max(likeWindows, 1)
     }
 
     // MARK: - Copies of the extension
@@ -1600,7 +1724,8 @@ final class TabStore {
         DispatchQueue.main.asyncAfter(deadline: .now() + PendingActivation.lifetime) { [weak self] in
             guard let self, self.pendingActivation?.id == request.id else { return }
             self.log.notice("tab switch wasn't confirmed within a second; asking Safari where it is")
-            self.requestSnapshot()
+            // Only the clicked tab's copy can say (#47).
+            self.requestSnapshot(of: request.key.instance)
             // The extension may be too starved to answer (under load its snapshots came back seconds old,
             // or not at all), so Safari's tab bar is asked too, and settles the highlight and the wait.
             self.checkSelectedTab(
