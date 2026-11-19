@@ -92,6 +92,21 @@ echo "== update control"
 swiftc -o "$WORK/update-control-checks" Tests/UpdateControlChecks/main.swift SideTabs/UpdateControl.swift
 "$WORK/update-control-checks"
 
+# When the dock looks again at Safari's window for changes macOS doesn't announce (#78): never with the sidebar
+# off, Safari not running, Safari behind another app, or while something holds Safari back (asleep, the screen
+# locked and the like); and often enough while it's in front that each case is caught within about two seconds.
+# With the timer's tolerance.
+echo "== looking again at Safari's window"
+swiftc -o "$WORK/health-check-checks" Tests/HealthCheckChecks/main.swift SideTabs/HealthCheck.swift SideTabs/CopySilence.swift
+"$WORK/health-check-checks"
+# The reader's queue is at .utility for the dock's periodic looks. Anything else sent to it is something the user
+# waits on and has to raise itself to .userInitiated, or it runs on the efficiency cores behind a look.
+if grep -nE 'reader\.queue\.async *(\{|\(execute)' SideTabs/SafariTracker.swift; then
+    echo "FAIL: a read of Safari's windows is sent at the queue's .utility; use qos: .userInitiated, flags: .enforceQoS"
+    exit 1
+fi
+echo "reads the user waits on are .userInitiated"
+
 echo "== docked window notifications"
 swiftc -o "$WORK/docked-window-checks" Tests/DockedWindowChecks/main.swift SideTabs/DockedWindowNotifications.swift
 "$WORK/docked-window-checks"

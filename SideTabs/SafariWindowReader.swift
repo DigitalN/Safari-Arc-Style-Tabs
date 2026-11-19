@@ -24,7 +24,7 @@ nonisolated struct WindowReading {
 /// Reads Safari's windows through the Accessibility API, off the main thread.
 ///
 /// Every Accessibility call waits for Safari's main thread, which can be busy for seconds. The
-/// sidebar's own main thread asks for these reads every second and after every window event, so
+/// sidebar's own main thread asks for these reads periodically and after every window event, so
 /// it must never be the one waiting: SafariTracker asks this reader to do it and uses the
 /// answer when it arrives. When Safari doesn't answer in time, the outcome says so, and the
 /// tracker keeps what it knew, so a slow Safari can't make the sidebar hide or jump.
@@ -40,7 +40,11 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
         var keepPrevious = false
     }
 
-    let queue = DispatchQueue(label: "com.digitaln.sidetabs.accessibility-read", qos: .userInitiated)
+    /// At `.utility`, which the periodic reads run at (#78): they're for changes macOS doesn't announce, and
+    /// nobody is waiting on them. Reads the user waits on, a click or a window event the sidebar follows, are
+    /// submitted with `qos: .userInitiated, flags: .enforceQoS`, which raises them (a block's QoS can raise a
+    /// queue's, never lower it).
+    let queue = DispatchQueue(label: "com.digitaln.sidetabs.accessibility-read", qos: .utility)
     /// How long any one read waits for Safari. After a timeout a read gives up on the rest.
     private let query = AXQuery(timeout: 0.5)
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "tracker")
@@ -151,7 +155,7 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
             assign(&reading, value)
             return true
         }
-        // In one round trip: this runs every second and after every window event, docked or not.
+        // In one round trip: this runs periodically and after every window event, docked or not.
         guard step({ basics(of: window) }, { $0.frame = $1.frame; $0.title = $1.title; $0.isFullScreen = $1.isFullScreen }) else {
             return (reading, false)
         }
