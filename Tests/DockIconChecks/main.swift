@@ -2,7 +2,8 @@ import CoreGraphics
 import Foundation
 
 // Checks for noticing a click on Safari's Dock icon (DockIconRules in SafariDockIconWatcher.swift, #42):
-// finding Safari's item in the Dock's Accessibility tree, and whether a press was a plain click on it.
+// finding Safari's item in the Dock's Accessibility tree, whether a press was a plain click on it, and
+// which presses the Dock is asked about at all (#85).
 // Run against trees of the Dock kept as data in trees/. No Dock or Safari involved.
 //
 //   constructed-*.json    Made up, in the format of Tests/TabBarFinderChecks/trees, with a `url` (AXURL)
@@ -110,12 +111,11 @@ func dockSample(_ name: String, dockSays: Bool? = nil) -> DockSample? {
                       dockSaysOnItem: dockSays)
 }
 
-func press(_ down: CGPoint, to up: CGPoint? = nil, held: TimeInterval = 0.12, farthest: CGFloat? = nil,
+func press(_ down: CGPoint, to up: CGPoint? = nil, held: TimeInterval = 0.12,
            command: Bool = false, control: Bool = false) -> DockPress {
     let up = up ?? CGPoint(x: down.x + 1, y: down.y)
-    let moved = hypot(up.x - down.x, up.y - down.y)
     return DockPress(downPoint: down, downTime: 1000, upPoint: up, upTime: 1000 + held, upSeenAt: 5000 + held,
-                     farthest: farthest ?? moved, withCommand: command, withControl: control)
+                     withCommand: command, withControl: control)
 }
 
 /// What the watcher makes of a press, the way DockItemReader goes about it: the Dock is asked about
@@ -301,8 +301,10 @@ do {
 
     check(refusal(press(icon, to: CGPoint(x: icon.x + 6, y: icon.y)), in: bottom) == nil, "a click that wobbled 6 points")
     check(refusal(press(icon, to: CGPoint(x: icon.x + 6.5, y: icon.y)), in: bottom) == .moved, "a press that moved further is a drag")
-    check(refusal(press(icon, to: CGPoint(x: icon.x + 1, y: icon.y), farthest: 20), in: bottom) == .moved,
-          "even one that came back to where it started")
+    check(refusal(press(icon, to: CGPoint(x: icon.x + 4, y: icon.y + 5)), in: bottom) == .moved,
+          "measured as a straight line from the mouse-down to the mouse-up, 6.4 points here")
+    check(DockIconRules.moved(press(icon, to: CGPoint(x: icon.x - 3, y: icon.y + 4))) == 5,
+          "the distance from the mouse-down to the mouse-up, whichever way")
 
     check(refusal(press(icon, command: true), in: bottom) == .withModifier, "a Command-click shows Safari in the Finder")
     check(refusal(press(icon, control: true), in: bottom) == .withModifier, "a Control-click opens the menu")
@@ -354,6 +356,135 @@ do {
           "but the Dock's own answer does, if Accessibility gives the frame without magnification")
     check(refusal(press(CGPoint(x: 520, y: 940)), down: dockSample("constructed-dock-bottom"), up: dockSample(magnified)) == nil,
           "the icon grew between the mouse-down and the mouse-up")
+}
+
+// MARK: - Which presses the Dock is asked about (#85)
+
+// Displays, in AppKit's coordinates as NSScreen gives them. The main display is 1512 x 982 with a 33-point
+// menu bar; the second is 1920 x 1080, to the right of it (its top level with the main display's in
+// Accessibility's coordinates) or above it.
+func display(_ frame: CGRect, keeps edge: DockEdge? = nil, _ reserved: CGFloat = 0) -> DockScreen {
+    var visible = CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: frame.height - 33)
+    switch edge {
+    case .left?: visible.origin.x += reserved; visible.size.width -= reserved
+    case .right?: visible.size.width -= reserved
+    case .bottom?: visible.origin.y += reserved; visible.size.height -= reserved
+    case nil: break
+    }
+    return DockScreen(frame: frame, visibleFrame: visible)
+}
+let mainFrame = CGRect(x: 0, y: 0, width: 1512, height: 982)
+let rightFrame = CGRect(x: 1512, y: -98, width: 1920, height: 1080)
+let aboveFrame = CGRect(x: 0, y: 982, width: 1920, height: 1080)
+let mainHeight: CGFloat = 982
+
+/// Whether the watcher asks the Dock about a press at `point`, the way DockItemReader decides it.
+func asks(_ point: CGPoint, orientation: String? = nil, screens: [DockScreen], lastFrames: [CGRect] = []) -> Bool {
+    let edges = DockIconRules.dockEdges(orientation: DockIconRules.edge(orientation: orientation), screens: screens)
+    let inStrip = DockIconRules.isInDockStrip(point, edges: edges, screens: screens, primaryScreenHeight: mainHeight)
+    return DockIconRules.shouldAsk(point, inDockStrip: inStrip, lastFrames: lastFrames)
+}
+
+do {
+    check(DockIconRules.quartzRect(cocoa: rightFrame, primaryScreenHeight: mainHeight) == CGRect(x: 1512, y: 0, width: 1920, height: 1080),
+          "a display to the right, in Accessibility's coordinates")
+    check(DockIconRules.quartzRect(cocoa: aboveFrame, primaryScreenHeight: mainHeight) == CGRect(x: 0, y: -1080, width: 1920, height: 1080),
+          "a display above the main one")
+
+    check(DockIconRules.edge(orientation: nil) == .bottom, "the Dock is at the bottom when its preference isn't set")
+    check(DockIconRules.edge(orientation: "left") == .left && DockIconRules.edge(orientation: "right") == .right
+          && DockIconRules.edge(orientation: "bottom") == .bottom, "or where its preference says")
+    check(DockIconRules.edge(orientation: "top") == nil, "and nowhere known for a value it doesn't have")
+
+    let shown = display(mainFrame, keeps: .bottom, 70)
+    check(DockIconRules.reserved(.bottom, on: shown) == 70 && DockIconRules.reserved(.left, on: shown) == 0
+          && DockIconRules.reserved(.right, on: shown) == 0, "a display keeps room for the Dock on its edge only, not for the menu bar")
+    check(DockIconRules.dockEdges(orientation: .bottom, screens: [display(mainFrame)]) == [.bottom], "the edge the preference names")
+    check(DockIconRules.dockEdges(orientation: .bottom, screens: [display(mainFrame, keeps: .left, 70)]) == [.bottom, .left],
+          "and the edge a display keeps room on, when the Dock has just moved there")
+    check(DockIconRules.dockEdges(orientation: nil, screens: [display(mainFrame)]) == [.left, .bottom, .right],
+          "all three when neither says")
+    check(DockIconRules.stripDepth(reserved: 4) == 256 && DockIconRules.stripDepth(reserved: 70) == 256,
+          "the strip is as deep as the largest Dock and a magnified icon")
+    check(DockIconRules.stripDepth(reserved: 200) == 328, "deeper for a Dock thicker than that")
+}
+
+do {
+    // A click on Safari's icon is asked about wherever the Dock is, even before its frames are known.
+    let cases: [(tree: String, orientation: String?, screens: [DockScreen])] = [
+        ("constructed-dock-bottom", nil, [display(mainFrame, keeps: .bottom, 70)]),
+        ("constructed-dock-left-localized", "left", [display(mainFrame, keeps: .left, 70)]),
+        ("constructed-dock-right-second-display", "right", [display(mainFrame), display(rightFrame, keeps: .right, 70)]),
+        ("constructed-dock-bottom-display-above", "bottom", [display(mainFrame), display(aboveFrame, keeps: .bottom, 70)]),
+        ("constructed-dock-magnified", "bottom", [display(mainFrame, keeps: .bottom, 70)]),
+        ("constructed-dock-nested", nil, [display(mainFrame, keeps: .bottom, 70)]),
+    ]
+    for (name, orientation, screens) in cases {
+        let items = safariItems(name)
+        check(!items.isEmpty, "\(name): has Safari's item")
+        for item in items {
+            check(asks(center(item.frame), orientation: orientation, screens: screens), "\(name): a press on Safari's icon is asked about")
+            check(asks(center(item.frame), orientation: orientation, screens: screens, lastFrames: [CGRect(x: 1400, y: 10, width: 56, height: 66)]),
+                  "\(name): even when the icon was somewhere else entirely at the last reading")
+        }
+        // Everything else on the Dock is in the strip too, so a click on it reads the Dock afresh: the
+        // icon next to it may be Safari's now.
+        for other in tree(name).allItems {
+            if let frame = other.frame, frame.width > 0 {
+                check(asks(center(frame), orientation: orientation, screens: screens), "\(name): a press on \(other.title ?? "?") is asked about")
+            }
+        }
+    }
+}
+
+do {
+    let bottom = [display(mainFrame, keeps: .bottom, 70)]
+    let safariFrame = CGRect(x: 496, y: 916, width: 56, height: 66)
+    let last = [safariFrame]
+    check(!asks(CGPoint(x: 756, y: 400), screens: bottom, lastFrames: last), "a click in the middle of the screen isn't asked about")
+    check(!asks(CGPoint(x: 1200, y: 700), screens: bottom, lastFrames: last), "nor one above the Dock's strip, far from Safari's icon")
+    check(!asks(CGPoint(x: 10, y: 400), screens: bottom, lastFrames: last), "nor one at the left edge, with the Dock at the bottom")
+    check(!asks(CGPoint(x: 1505, y: 400), screens: bottom, lastFrames: last), "nor at the right edge")
+    check(asks(CGPoint(x: 1200, y: 760), screens: bottom, lastFrames: last), "one low on the screen, far from the icon, is: the Dock may have grown")
+    check(asks(CGPoint(x: 1128, y: 949), screens: bottom, lastFrames: last),
+          "one in the Dock where Safari's icon wasn't: apps opening and quitting move it along")
+    check(asks(CGPoint(x: 534, y: 850), screens: bottom, lastFrames: last), "high on a magnified icon")
+    check(asks(CGPoint(x: 524, y: 981), screens: bottom, lastFrames: last), "at the very bottom of the screen")
+
+    // Hidden: the display keeps a sliver, and Safari's frame was read below the screen.
+    let hidden = [display(mainFrame, keeps: .bottom, 4)]
+    let hiddenFrames = dockSample("constructed-dock-hidden")?.frames ?? []
+    check(asks(CGPoint(x: 524, y: 950), screens: hidden, lastFrames: hiddenFrames), "on the icon of a Dock that came out from hiding")
+    check(asks(CGPoint(x: 524, y: 950), screens: [display(mainFrame)], lastFrames: hiddenFrames),
+          "even with no room kept for it: the preference says the bottom")
+    check(!asks(CGPoint(x: 524, y: 700), screens: hidden, lastFrames: hiddenFrames), "not well above it")
+
+    // The Dock moved to the left while hiding itself, and its preference hasn't been read again yet.
+    let leftNow = [display(mainFrame, keeps: .left, 4)]
+    check(asks(CGPoint(x: 33, y: 384), orientation: "bottom", screens: leftNow, lastFrames: last),
+          "the Dock's new edge, from the room the display keeps, before the preference says so")
+    check(asks(CGPoint(x: 33, y: 384), orientation: "left", screens: [display(mainFrame)], lastFrames: last),
+          "or from the preference, without the room")
+    check(!asks(CGPoint(x: 33, y: 384), orientation: "bottom", screens: [display(mainFrame)], lastFrames: last),
+          "with neither saying so, the left edge isn't the Dock's")
+    check(asks(CGPoint(x: 33, y: 384), orientation: "top", screens: [display(mainFrame)], lastFrames: last),
+          "but a preference that says nothing known leaves every edge in")
+
+    // The bottom Dock goes to whichever display the pointer is at the bottom of.
+    let twoDisplays = [display(mainFrame, keeps: .bottom, 70), display(aboveFrame)]
+    check(asks(CGPoint(x: 784, y: -33), screens: twoDisplays, lastFrames: last), "the Dock on the other display, where it wasn't at the last reading")
+    check(!asks(CGPoint(x: 784, y: -600), screens: twoDisplays, lastFrames: last), "not the middle of the other display")
+    let rightDock = [display(mainFrame), display(rightFrame, keeps: .right, 70)]
+    check(asks(CGPoint(x: 1500, y: 240), orientation: "right", screens: rightDock, lastFrames: last),
+          "a right-hand Dock can show at the right edge of either display")
+
+    check(asks(CGPoint(x: 524, y: 800), orientation: "left", screens: [display(mainFrame, keeps: .left, 70)], lastFrames: last),
+          "outside the strip, but near where Safari's icon was")
+    check(asks(CGPoint(x: 756, y: 400), screens: [], lastFrames: last), "with no displays to go by, every press is asked about")
+    check(asks(CGPoint(x: 10, y: 400), screens: [display(mainFrame, keeps: .left, 200)], lastFrames: last),
+          "a Dock thicker than the largest icons")
+    check(!asks(CGPoint(x: 340, y: 400), screens: [display(mainFrame, keeps: .left, 200)], lastFrames: last),
+          "but not beyond it and a magnified icon")
 }
 
 check(Set([DockClickRefusal.startedElsewhere, .endedElsewhere, .menuOpen, .noAnswer, .heldTooLong, .moved, .withModifier, .late].map(\.rawValue)).count == 8,

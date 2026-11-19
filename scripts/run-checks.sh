@@ -79,6 +79,12 @@ echo "== docked window notifications"
 swiftc -o "$WORK/docked-window-checks" Tests/DockedWindowChecks/main.swift SideTabs/DockedWindowNotifications.swift
 "$WORK/docked-window-checks"
 
+# Dragging Safari's window moves the docked sidebar without working its shadow out again or ordering it
+# behind Safari's window again when it's already directly behind (#85).
+echo "== docked panel"
+swiftc -o "$WORK/docked-panel-checks" Tests/DockedPanelChecks/main.swift SideTabs/DockedPanelRules.swift
+"$WORK/docked-panel-checks"
+
 echo "== sidebar overlay"
 swiftc -o "$WORK/overlay-checks" Tests/SidebarOverlayChecks/main.swift SideTabs/SidebarOverlay.swift \
     SideTabs/SafariBars.swift SideTabs/TabBarFinder.swift SideTabs/TabBarMatcher.swift
@@ -138,7 +144,9 @@ swiftc -o "$WORK/unseen-checks" \
 # A click on Safari's Dock icon (#42): Safari's item found in the Dock's tree by its bundle, never its
 # title or a minimized window's tile, wherever the Dock is; and only a plain click on it counts, not a
 # press held long enough for the icon's menu, a choice in that menu, a drag, or a press that starts or
-# ends elsewhere. Against constructed trees in Tests/DockIconChecks/trees.
+# ends elsewhere. And the Dock is only asked about presses in its strip along the screen's edge or near
+# where Safari's icon was, never every click on the screen (#85). Against constructed trees in
+# Tests/DockIconChecks/trees.
 echo "== Dock icon"
 swiftc -o "$WORK/dock-icon-checks" \
     Tests/DockIconChecks/main.swift SideTabs/SafariDockIconWatcher.swift SideTabs/AccessibilityQuery.swift Shared/Bridge.swift
