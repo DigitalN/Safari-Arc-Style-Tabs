@@ -44,7 +44,7 @@ middle click; which queued
 Accessibility requests are still wanted; which notifications the docked window is watched for;
 where the sidebar slides out over the page in full screen or when it hides automatically, below which
 of Safari's bars (against trees in `Tests/SidebarOverlayChecks/trees`), and what
-brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
+brings it out and puts it away, and which pointer movements it needs to look at; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
 and where they reopen; with *Minimize other profiles' windows* on, which windows a change of profile
 minimizes and brings back, which window a switch brings forward, the list of windows Side Tabs minimized
 and how it's matched after a restart, and when a click on Safari's Dock icon opens a window; what the
