@@ -34,9 +34,14 @@ const HANG = Symbol("hang");
 // for the app's commands, oldest first: `deliver(command)` sends one through a port as Safari would, and
 // `drop()` has Safari report it disconnected. The first `connectFails` attempts to connect throw.
 // `quiet` keeps background.js's warnings out of the output, for a check that expects them.
-function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true }), timeScale = 1, hangLastFocused = false, connectFails = 0, quiet = false } = {}) {
+// `tabList` replaces the tabs with these (each needs an id and a windowId), and `lastFocused` is the window
+// Safari says was focused last. `injected` lists the tabs.executeScript calls, and `inject(tabId)` answers
+// each one: a promise to finish later, or HANG.
+function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true }), timeScale = 1, hangLastFocused = false, connectFails = 0, quiet = false,
+    tabList = null, lastFocused = 1, inject = () => undefined } = {}) {
     const sent = [];
     let queries = 0;
+    const injected = [];
     const updates = [];
     const created = [];
     const windowUpdates = [];
@@ -45,21 +50,25 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
     const ports = [];
     const listeners = {};
     const event = (name) => ({ addListener: (fn) => (listeners[name] ||= []).push(fn) });
-    const tabs = Array.from({ length: tabCount }, (_, i) => ({
+    const tabs = tabList ? tabList.map((tab) => ({ title: `Tab ${tab.id}`, url: `https://example.com/${tab.id}`, ...tab })) : Array.from({ length: tabCount }, (_, i) => ({
         id: i + 1, windowId: 1, index: i, title: `Tab ${i + 1}`, url: `https://example.com/${i + 1}`, active: i === 0,
     }));
     const browser = {
         windows: {
             WINDOW_ID_NONE: -1,
             getAll: async () => [{ id: 1, focused: true }],
-            getLastFocused: () => (hangLastFocused ? new Promise(() => {}) : Promise.resolve({ id: 1, focused: true })),
+            getLastFocused: () => (hangLastFocused ? new Promise(() => {}) : Promise.resolve({ id: lastFocused, focused: true })),
             update: async (id, props) => { windowUpdates.push({ id, props }); return { id, ...props }; },
             create: async (props) => { windowsCreated.push(props); return { id: 9, focused: !!props.focused, tabs: [{ id: 900, windowId: 9 }] }; },
             onCreated: event("windows.created"), onRemoved: event("windows.removed"), onFocusChanged: event("windows.focus"),
         },
         tabs: {
             query: async () => { queries++; await sleep(queryDelay); return tabs.map((tab) => ({ ...tab })); },
-            executeScript: async () => {},
+            executeScript: (tabId, details) => {
+                injected.push({ at: Date.now(), tabId, file: details.file });
+                const answer = inject(tabId);
+                return answer === HANG ? new Promise(() => {}) : Promise.resolve(answer);
+            },
             update: async (id, props) => { updates.push({ id, props }); return { ...tabs[id - 1], ...props }; },
             create: async (props) => { created.push(props); return { id: 100 + created.length, windowId: props.windowId ?? 1, index: 0, url: props.url }; },
             onCreated: event("created"), onActivated: event("activated"), onMoved: event("moved"),
@@ -115,7 +124,7 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
     const state = (name) => vm.runInContext(name, context);
     // How many times Safari was asked for every tab.
     const queryCount = () => queries;
-    return { sent, tabs, updates, created, windowUpdates, windowsCreated, intervals, ports, fire, ofType, states, run, heartbeat, state, queryCount };
+    return { sent, tabs, updates, created, windowUpdates, windowsCreated, intervals, ports, injected, fire, ofType, states, run, heartbeat, state, queryCount };
 }
 
 const isState = (message) => message.type === "snapshot" || message.type === "changes";
@@ -851,6 +860,101 @@ async function settled(page) {
         await sleep(600);
         const shown = page.sent.find((entry) => isState(entry.message));
         check(!!shown && shown.at - firedAgain <= 400, `nor in the window focused last, with Safari in the background (${shown && shown.at - firedAgain} ms)`);
+    }
+
+    // --- #84 p2: a few seconds after start, content.js goes only into tabs whose icon hasn't come ---
+    // At FAST, the 4 s wait is 80 ms, an injection's 3 s time limit 60 ms, and the 2 s wait after a load 40 ms.
+    const SWEEP = 4000 * FAST;
+    const injectedTabs = (page) => page.injected.map((entry) => entry.tabId);
+    const iconFrom = (page, tabId, url = `https://example.com/${tabId}.png`) => page.fire("runtime.message", { type: "favicon", url }, { tab: { id: tabId } });
+
+    {
+        const tabList = [
+            { id: 1, windowId: 1, index: 0, active: true },
+            { id: 2, windowId: 1, index: 1 },
+            { id: 3, windowId: 1, index: 2 },                                   // ran the manifest's copy
+            { id: 4, windowId: 1, index: 3, discarded: true },
+            { id: 5, windowId: 1, index: 4, url: "about:blank" },
+            { id: 6, windowId: 1, index: 5, status: "loading" },               // reports nothing when done
+            { id: 10, windowId: 1, index: 6, status: "loading" },              // runs the manifest's copy when done
+            { id: 7, windowId: 2, index: 0 },
+            { id: 8, windowId: 2, index: 1, active: true },
+            { id: 9, windowId: 2, index: 2, url: "http://router.local/" },
+        ];
+        const page = load({ timeScale: FAST, queryDelay: 2, tabList });
+        iconFrom(page, 3);
+        await sleep(SWEEP / 2);
+        check(page.injected.length === 0, "nothing is injected right after start");
+        await sleep(SWEEP + 60);
+        check(page.injected.every((entry) => entry.file === "content.js"), "the sweep injects content.js");
+        check(JSON.stringify(injectedTabs(page)) === "[1,2,8,7,9]",
+            `only tabs without an icon, focused window first, active tab first (injected ${JSON.stringify(injectedTabs(page))})`);
+        check(!injectedTabs(page).includes(3), "a tab that ran the manifest's copy gets no second run");
+        check(!injectedTabs(page).includes(4), "a discarded tab is left alone");
+        check(!injectedTabs(page).includes(5), "a page that isn't http(s) is left alone");
+        check(!injectedTabs(page).includes(6) && !injectedTabs(page).includes(10), "a tab still loading isn't injected yet");
+        const line = page.ofType("log").map((message) => message.message).find((message) => message.startsWith("favicon sweep:"));
+        check(!!line && line.includes("9 web tabs, 1 had reported, 1 discarded, 2 still loading, injected 5"),
+            `the app's log hears what the sweep did (${line})`);
+
+        // A loading tab whose page started before the extension: when it's done and no icon has come, it's injected.
+        page.fire("updated", 6, { status: "complete" }, { ...page.tabs[5], status: "complete" });
+        // One that runs the manifest's copy when it's done isn't.
+        page.fire("updated", 10, { status: "complete" }, { ...page.tabs[6], status: "complete" });
+        iconFrom(page, 10);
+        await sleep(20);
+        check(!injectedTabs(page).includes(6), "a tab that finished loading gets a moment for the manifest's copy to report");
+        await sleep(4000 * FAST);
+        check(injectedTabs(page).filter((id) => id === 6).length === 1, "then, with no icon, it's injected once");
+        check(!injectedTabs(page).includes(10), "a tab whose manifest copy reported after loading isn't");
+        page.fire("updated", 6, { status: "complete" }, { ...page.tabs[5], status: "complete" });
+        await sleep(4000 * FAST);
+        check(injectedTabs(page).filter((id) => id === 6).length === 1, "and a later load of it isn't followed by another injection");
+    }
+
+    {
+        // One at a time: each tab is injected once the one before it has finished, and a tab that reports
+        // meanwhile is skipped.
+        const tabList = [1, 2, 3, 4].map((id, index) => ({ id, windowId: 1, index, active: index === 0 }));
+        let page;
+        page = load({ timeScale: FAST, queryDelay: 2, tabList, inject: (tabId) => {
+            if (tabId === 1) iconFrom(page, 3);
+            return sleep(25);
+        } });
+        await sleep(SWEEP + 200);
+        check(JSON.stringify(injectedTabs(page)) === "[1,2,4]", `a tab that reports during the sweep isn't injected (injected ${JSON.stringify(injectedTabs(page))})`);
+        const gaps = page.injected.slice(1).map((entry, i) => entry.at - page.injected[i].at);
+        check(gaps.every((gap) => gap >= 20), `each injection waits for the one before it (gaps ${gaps.join(", ")} ms)`);
+    }
+
+    {
+        // An injection Safari never finishes doesn't stop the sweep.
+        const tabList = [1, 2].map((id, index) => ({ id, windowId: 1, index }));
+        const page = load({ timeScale: FAST, queryDelay: 2, tabList, inject: (tabId) => (tabId === 1 ? HANG : undefined) });
+        await sleep(SWEEP + 3000 * FAST + 60);
+        check(JSON.stringify(injectedTabs(page)) === "[1,2]", `the next tab is injected after an injection's time limit (injected ${JSON.stringify(injectedTabs(page))})`);
+        const gap = page.injected[1] && page.injected[1].at - page.injected[0].at;
+        check(gap >= 3000 * FAST - 10, `but not before it (${gap} ms)`);
+    }
+
+    {
+        // The window focused when the sweep runs goes first, not the one focused at start.
+        const tabList = [
+            { id: 1, windowId: 1, index: 0, active: true },
+            { id: 2, windowId: 2, index: 0, active: true },
+            { id: 3, windowId: 3, index: 0, active: true },
+        ];
+        const page = load({ timeScale: FAST, queryDelay: 2, tabList, lastFocused: 1 });
+        await sleep(SWEEP / 2);
+        page.fire("windows.focus", 3);
+        await sleep(SWEEP);
+        check(JSON.stringify(injectedTabs(page)) === "[3,1,2]", `the focused window's tabs go first (injected ${JSON.stringify(injectedTabs(page))})`);
+
+        // With no window focused (Safari in the background), the last one focused does.
+        const away = load({ timeScale: FAST, queryDelay: 2, tabList, lastFocused: 2 });
+        away.fire("windows.focus", -1);
+        await sleep(SWEEP * 1.5);
+        check(injectedTabs(away)[0] === 2, `with Safari in the background, the window focused last goes first (injected ${JSON.stringify(injectedTabs(away))})`);
     }
 
     if (failures === 0) {

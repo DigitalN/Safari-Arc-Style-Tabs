@@ -818,15 +818,70 @@ browser.browserAction.onClicked.addListener(() => {
 // ---------------------------------------------------------------------------
 // Startup
 
-async function collectExistingFavicons() {
-    // Content scripts only run on pages loaded after the extension starts, so ask
-    // the tabs that are already open for their icons.
-    const tabs = await browser.tabs.query({});
-    for (const tab of tabs) {
-        if (!tab.url || !/^https?:/.test(tab.url)) continue;
-        browser.tabs.executeScript(tab.id, { file: "content.js" }).catch(() => {});
-    }
+// The manifest's content.js only runs in pages loaded after the extension starts, so the tabs that were
+// already open are asked for their icons by injecting it. Each injection wakes that tab's web process, so
+// this waits a few seconds, by which time the pages that loaded meanwhile have run the manifest's copy and
+// reported, then injects only into tabs whose icon still hasn't come, one at a time, the focused window's
+// first. Discarded tabs are left alone: they load again when shown, and run the manifest's copy then.
+const FAVICON_SWEEP_DELAY_MS = 4000;
+// An injection Safari doesn't finish within this long doesn't hold up the next tab's.
+const INJECT_TIME_LIMIT_MS = 3000;
+// A tab still loading at the sweep runs the manifest's copy when it's done, unless its page started loading
+// before the extension did. If no icon comes this long after it finishes, it gets an injection then.
+const LOADED_ICON_WAIT_MS = 2000;
+
+// Tabs that were still loading at the sweep, until they finish.
+const awaitingLoad = new Set();
+
+function needsFaviconScript(tab) {
+    return !!tab.url && /^https?:/.test(tab.url) && !tab.discarded && !favicons.has(tab.id);
 }
+
+async function injectFaviconScript(tabId) {
+    let timer;
+    await Promise.race([
+        browser.tabs.executeScript(tabId, { file: "content.js" }).catch(() => {}),
+        new Promise((resolve) => { timer = setTimeout(resolve, INJECT_TIME_LIMIT_MS); }),
+    ]);
+    clearTimeout(timer);
+}
+
+async function collectExistingFavicons() {
+    const startedAt = Date.now();
+    const tabs = await browser.tabs.query({});
+    const web = tabs.filter((tab) => tab.url && /^https?:/.test(tab.url));
+    const reported = web.filter((tab) => favicons.has(tab.id)).length;
+    const discarded = web.filter((tab) => tab.discarded && !favicons.has(tab.id)).length;
+    const front = focusedWindowId !== WINDOW_ID_NONE ? focusedWindowId : lastFocusedWindowId;
+    // The focused window's active tab, its other tabs, then each other window's active tab, then the rest.
+    const rank = (tab) => (tab.windowId === front ? 0 : 2) + (tab.active ? 0 : 1);
+    const missing = web.filter(needsFaviconScript)
+        .sort((a, b) => rank(a) - rank(b) || a.windowId - b.windowId || a.index - b.index);
+    let loading = 0;
+    let injected = 0;
+    for (const tab of missing) {
+        if (tab.status === "loading") {
+            awaitingLoad.add(tab.id);
+            loading++;
+            continue;
+        }
+        // It may have reported while the tabs before it were injected.
+        if (favicons.has(tab.id)) continue;
+        injected++;
+        await injectFaviconScript(tab.id);
+    }
+    logToApp(`favicon sweep: ${web.length} web tabs, ${reported} had reported, ${discarded} discarded, `
+        + `${loading} still loading, injected ${injected} in ${Date.now() - startedAt} ms`);
+}
+
+browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status !== "complete" || !awaitingLoad.delete(tabId)) return;
+    setTimeout(() => {
+        if (tab && needsFaviconScript(tab)) injectFaviconScript(tabId);
+    }, LOADED_ICON_WAIT_MS);
+});
+
+browser.tabs.onRemoved.addListener((tabId) => awaitingLoad.delete(tabId));
 
 // The first message: it tells the app this copy has started, and has the extension's handler open the
 // app if it isn't running. Safari can lose the reply (see REPLY_TIME_LIMIT_MS), so it's sent again,
@@ -866,7 +921,7 @@ function refreshAfterStart() {
     sayHello();
     scheduleSnapshot(0);
     for (const delay of STARTUP_REFRESH_MS) setTimeout(refreshAfterStart, delay);
-    collectExistingFavicons().catch(() => {});
+    setTimeout(() => collectExistingFavicons().catch(() => {}), FAVICON_SWEEP_DELAY_MS);
 
     setInterval(() => postToApp({ type: "heartbeat", instance, seq: sentSeq }), HEARTBEAT_MS);
 })();
