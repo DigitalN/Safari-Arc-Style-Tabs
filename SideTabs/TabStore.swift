@@ -106,8 +106,14 @@ final class TabStore {
     /// Closes tabs nobody has looked at for a while, when that's turned on, and keeps the list for
     /// reopening them (TabCleanup.swift).
     let cleanup = TabCleanup()
-    /// When the extension last sent anything, on the awake clock (`uptime`), so sleep isn't silence (#45).
-    private(set) var lastMessageAt: TimeInterval?
+    /// When the extension last sent anything, on the awake clock (`uptime`), so sleep isn't silence (#45). Not
+    /// observed: it changes with every message, and views only need `isConnected` (#83).
+    @ObservationIgnored private(set) var lastMessageAt: TimeInterval?
+    /// Whether the extension has sent anything in the last `connectedFor` seconds of awake time, for the menu bar
+    /// menu and the empty sidebar. Set only when it changes, so a message doesn't update them (#83).
+    private(set) var isConnected = false
+    /// The one pending look at whether the extension has gone silent (`checkConnection`).
+    @ObservationIgnored private var connectionCheck: DispatchWorkItem?
     /// Favorites, shared by every profile, and each profile's Pinned list (#34, BookmarkLists.swift).
     private(set) var bookmarkLists = BookmarkLists()
     private(set) var customNames: [TabKey: CustomName] = [:]
@@ -280,7 +286,7 @@ final class TabStore {
 
     func handleMessage(_ message: ExtensionMessage) -> [String: Any] {
         let object = message.object
-        lastMessageAt = uptime()
+        noteMessageArrived()
         noteExtensionPath(object["extensionPath"] as? String)
         let sender = hear(from: object)
         if sender == .replaced {
@@ -729,6 +735,13 @@ final class TabStore {
         if !liveInstances.isEmpty {
             liveInstances.removeAll()
         }
+        // Its extension went with it; the next message from a new launch connects it again.
+        connectionCheck?.cancel()
+        connectionCheck = nil
+        if isConnected {
+            isConnected = false
+            bridgeLog.notice("Safari quit; the extension no longer counts as connected")
+        }
     }
 
     func requestSnapshot() {
@@ -1145,9 +1158,43 @@ final class TabStore {
 
     var hasData: Bool { !snapshots.isEmpty }
 
-    var isConnected: Bool {
-        guard let lastMessageAt else { return false }
-        return uptime() - lastMessageAt < 60
+    /// How long the extension can be silent, in awake time, before it counts as not connected. Well above the
+    /// heartbeat's interval, so a missed heartbeat or two doesn't flip it.
+    static let connectedFor: TimeInterval = 60
+
+    /// A message from the extension: it's connected. `isConnected` is written only when it changes, and one
+    /// check is pending at a time, for when the silence would reach `connectedFor` (#83).
+    private func noteMessageArrived() {
+        lastMessageAt = uptime()
+        if !isConnected {
+            isConnected = true
+            bridgeLog.notice("the extension is connected")
+        }
+        if connectionCheck == nil {
+            scheduleConnectionCheck(after: Self.connectedFor)
+        }
+    }
+
+    /// Whether the extension has been silent for `connectedFor` seconds of awake time; if not, looks again when it
+    /// would have been. Sleep doesn't count, as the awake clock stops. The checks in Tests/ call this directly.
+    func checkConnection() {
+        connectionCheck?.cancel()
+        connectionCheck = nil
+        guard isConnected else { return }
+        let silent = lastMessageAt.map { uptime() - $0 } ?? .infinity
+        if silent >= Self.connectedFor {
+            isConnected = false
+            bridgeLog.notice("the extension has been silent for \(Int(silent)) s; it no longer counts as connected")
+        } else {
+            scheduleConnectionCheck(after: Self.connectedFor - silent)
+        }
+    }
+
+    private func scheduleConnectionCheck(after wait: TimeInterval) {
+        connectionCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.checkConnection() }
+        connectionCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait + 0.05, execute: work)
     }
 
     /// True when Safari reports tabs but no URLs or titles, which means the extension

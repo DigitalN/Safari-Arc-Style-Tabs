@@ -4015,6 +4015,50 @@ do {
           "a favorite made from the tab keeps the icon")
 }
 
+// MARK: - Connected, changed only when it changes (#83)
+
+/// Whether reading `read` in a view would be updated by `change`.
+func notifies(_ read: () -> Void, _ change: () -> Void) -> Bool {
+    final class Flag: @unchecked Sendable { var on = false }
+    let notified = Flag()
+    withObservationTracking(read) { notified.on = true }
+    change()
+    return notified.on
+}
+
+do {
+    let (store, clocks, _) = clockedStore()
+    check(store.isConnected, "a message connects the extension")
+    check(!notifies({ _ = store.isConnected }, { heartbeat(store) }),
+          "a message while connected doesn't update what shows whether it's connected")
+    check(!notifies({ _ = store.isConnected }, {
+        clocks.pass(1)
+        send(store, snapshotObject(seq: 2, active: 2))
+    }), "nor does a snapshot")
+
+    clocks.pass(30)
+    store.checkConnection()
+    check(store.isConnected, "31 s after the last message it's still connected")
+    clocks.pass(TabStore.connectedFor - 31)
+    store.checkConnection()
+    check(store.isConnected, "and at 59 s after it")
+    clocks.sleep(3600)
+    store.checkConnection()
+    check(store.isConnected, "an hour asleep isn't silence")
+    clocks.pass(1)
+    check(notifies({ _ = store.isConnected }, { store.checkConnection() }),
+          "60 s of awake silence: the change shows")
+    check(!store.isConnected, "and it no longer counts as connected")
+    check(!notifies({ _ = store.isConnected }, { store.checkConnection() }), "looking again changes nothing")
+
+    check(notifies({ _ = store.isConnected }, { heartbeat(store) }), "the next message shows it connected again")
+    check(store.isConnected, "and it is")
+    store.safariDidTerminate()
+    check(!store.isConnected, "Safari quitting disconnects it at once")
+    heartbeat(store)
+    check(store.isConnected, "and a message from its next launch connects it again")
+}
+
 try? FileManager.default.removeItem(at: stateFolder)
 
 if failures == 0 {
