@@ -66,12 +66,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
         self.dock = dock
 
-        bridge.onMessage = { [store, favicons] type, payload, object in
+        bridge.onMessage = { [store, favicons] message in
             favicons.extensionIsReachable()
-            if type == "icon", let url = object["url"] as? String {
-                favicons.receive(url: url, data: (object["data"] as? String).flatMap { Data(base64Encoded: $0) })
+            if message.type == "icon", let url = message.object["url"] as? String {
+                favicons.receive(url: url, data: (message.object["data"] as? String).flatMap { Data(base64Encoded: $0) })
             }
-            return store.handleMessage(type: type, payload: payload, object: object)
+            return store.handleMessage(message)
         }
         bridge.start()
 

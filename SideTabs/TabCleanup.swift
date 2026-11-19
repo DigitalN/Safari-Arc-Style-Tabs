@@ -384,7 +384,7 @@ extension TabStore {
                 title: pageTitle(for: tab),
                 customName: customNames[key]?.name,
                 url: url,
-                faviconURL: tab.favIconUrl,
+                faviconURL: savedIconURL(tab.favIconUrl),
                 closedAt: closedAt,
                 profile: snapshots[key.instance]?.profile
             )
