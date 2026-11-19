@@ -3982,12 +3982,26 @@ do {
 
 // MARK: - Snapshots that change nothing, and changes in place of snapshots (#81)
 
-/// Whether anything the sidebar's views read changes while `action` runs. (`lastMessageAt`, which every message
-/// sets, isn't among them here: #83 sees to that one.)
+/// Whether anything observed in the store changes while `action` runs: what the sidebar's views read, the menu bar
+/// menu's `isConnected` (#83), and every other property that isn't `@ObservationIgnored`.
 func sidebarChanges(_ store: TabStore, while action: () -> Void) -> Bool {
     final class Flag: @unchecked Sendable { var raised = false }
     let changed = Flag()
     withObservationTracking {
+        _ = store.isConnected
+        _ = store.bookmarkLists
+        _ = store.renaming
+        _ = store.safariIsFrontmost
+        _ = store.dockedWindowTitle
+        _ = store.dockedWindowProfile
+        _ = store.dockedWindowIsPrivate
+        _ = store.dockedLikeWindowCount
+        _ = store.dockedWindowSettled
+        _ = store.profileToTurnOn
+        _ = store.switchPreview
+        _ = store.sidebarFade
+        _ = store.fadingOutContent
+        _ = store.copiesHaveHadTheirChance
         _ = store.snapshots
         _ = store.liveSnapshots
         _ = store.liveInstances
@@ -4027,6 +4041,7 @@ do {
     let (store, _) = makeStore()
     let shown = store.displayedContent
     check(shown != nil && store.currentWindow != nil, "the store shows the window")
+    check(store.isConnected, "and counts the extension as connected, so the messages below change nothing observed")
     check(!sidebarChanges(store) { send(store, snapshotObject(seq: 2, active: 1, startedAt: nowMilliseconds())) },
           "a snapshot that shows the same as the last one causes no observation change")
     check(!sidebarChanges(store) { send(store, snapshotObject(seq: 3, active: 1)) }, "nor one without a time")
@@ -4178,6 +4193,50 @@ do {
     store.addBookmark(from: tabTwo, instance: instance, to: .favorites(profile))
     check(store.bookmarks(in: .favorites(profile)).last?.faviconURL == "data:application/octet-stream;base64,QUJD",
           "a favorite made from the tab keeps the icon")
+}
+
+// MARK: - Connected, changed only when it changes (#83)
+
+/// Whether reading `read` in a view would be updated by `change`.
+func notifies(_ read: () -> Void, _ change: () -> Void) -> Bool {
+    final class Flag: @unchecked Sendable { var on = false }
+    let notified = Flag()
+    withObservationTracking(read) { notified.on = true }
+    change()
+    return notified.on
+}
+
+do {
+    let (store, clocks, _) = clockedStore()
+    check(store.isConnected, "a message connects the extension")
+    check(!notifies({ _ = store.isConnected }, { heartbeat(store) }),
+          "a message while connected doesn't update what shows whether it's connected")
+    check(!notifies({ _ = store.isConnected }, {
+        clocks.pass(1)
+        send(store, snapshotObject(seq: 2, active: 2))
+    }), "nor does a snapshot")
+
+    clocks.pass(30)
+    store.checkConnection()
+    check(store.isConnected, "31 s after the last message it's still connected")
+    clocks.pass(TabStore.connectedFor - 31)
+    store.checkConnection()
+    check(store.isConnected, "and at 59 s after it")
+    clocks.sleep(3600)
+    store.checkConnection()
+    check(store.isConnected, "an hour asleep isn't silence")
+    clocks.pass(1)
+    check(notifies({ _ = store.isConnected }, { store.checkConnection() }),
+          "60 s of awake silence: the change shows")
+    check(!store.isConnected, "and it no longer counts as connected")
+    check(!notifies({ _ = store.isConnected }, { store.checkConnection() }), "looking again changes nothing")
+
+    check(notifies({ _ = store.isConnected }, { heartbeat(store) }), "the next message shows it connected again")
+    check(store.isConnected, "and it is")
+    store.safariDidTerminate()
+    check(!store.isConnected, "Safari quitting disconnects it at once")
+    heartbeat(store)
+    check(store.isConnected, "and a message from its next launch connects it again")
 }
 
 try? FileManager.default.removeItem(at: stateFolder)

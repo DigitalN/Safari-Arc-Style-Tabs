@@ -59,6 +59,19 @@ echo "== row hit testing"
 swiftc -o "$WORK/row-hit-checks" Tests/RowHitChecks/main.swift SideTabs/RowHitTesting.swift SideTabs/Models.swift
 "$WORK/row-hit-checks"
 
+# When a tab's loading spinner shows: its first 10 s of loading, kept across rows made again, and fresh when it
+# loads again (#83).
+echo "== loading spinners"
+swiftc -o "$WORK/tab-loading-checks" Tests/TabLoadingChecks/main.swift SideTabs/TabLoading.swift SideTabs/Models.swift
+"$WORK/tab-loading-checks"
+
+# The favicons kept (#83): downsampled to FaviconStore.pixelSize, from the best size in an ICO, SVGs too; each URL
+# observed on its own; and only so many that no view shows, least recently used first. Compiled main-actor by
+# default, as the app is.
+echo "== favicons"
+swiftc -default-isolation MainActor -o "$WORK/favicon-checks" Tests/FaviconChecks/main.swift SideTabs/FaviconStore.swift
+"$WORK/favicon-checks"
+
 echo "== row press"
 swiftc -o "$WORK/row-press-checks" Tests/RowPressChecks/main.swift SideTabs/RowPress.swift
 "$WORK/row-press-checks"
