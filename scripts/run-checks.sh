@@ -15,6 +15,10 @@ echo "== background.js"
 node --check WebExtension/background.js
 node Tests/ExtensionChecks/background-checks.js
 
+echo "== content.js"
+node --check WebExtension/content.js
+node Tests/ExtensionChecks/content-checks.js
+
 # The store checks give each TabStore a state file in a temporary folder, so nothing here
 # reads or writes the real one in ~/Library/Application Support/Side Tabs.
 echo "== TabStore"
