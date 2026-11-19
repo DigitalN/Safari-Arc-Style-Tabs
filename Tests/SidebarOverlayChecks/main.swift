@@ -613,6 +613,126 @@ do {
     check(poll(&reveal, overPage) == .none && reveal.isRevealed, "brought out with the shortcut, it waits for a new visit")
 }
 
+// MARK: - Watching the pointer (#79)
+
+do {
+    // Only while there's an overlay and Safari is in front: with another app in front, nothing is watched.
+    check(OverlayReveal.watchesPointer(overlay: true, safariInFront: true), "an overlay over Safari in front is watched")
+    check(!OverlayReveal.watchesPointer(overlay: true, safariInFront: false), "with another app in front, the pointer isn't watched")
+    check(!OverlayReveal.watchesPointer(overlay: false, safariInFront: true), "nor while the sidebar is docked or hidden")
+    check(!OverlayReveal.watchesPointer(overlay: false, safariInFront: false), "nor with neither")
+}
+
+do {
+    // While the sidebar is away, a movement off the strip is passed over with one rectangle check.
+    var reveal = OverlayReveal()
+    check(!reveal.needsLook(at: overPage, strip: layout.strip), "away: a movement over the page needs no look")
+    check(!reveal.needsLook(at: overPanel, strip: layout.strip), "nor one where the panel would be")
+    check(reveal.needsLook(at: onStrip, strip: layout.strip), "one on the strip does")
+    let corners = [
+        CGPoint(x: layout.strip.minX, y: layout.strip.minY), CGPoint(x: layout.strip.maxX, y: layout.strip.maxY),
+    ]
+    check(corners.allSatisfy { reveal.needsLook(at: $0, strip: layout.strip) }, "the strip's edges count, as they do for coming out")
+    check(!reveal.needsLook(at: CGPoint(x: layout.strip.minX - 1, y: 400), strip: layout.strip), "just left of the strip doesn't")
+    check(!reveal.needsLook(at: CGPoint(x: 300, y: layout.strip.maxY + 1), strip: layout.strip), "nor just above it, by Safari's toolbar")
+    _ = poll(&reveal, onStrip)
+    check([overPage, overPanel, nearPanel, onStrip].allSatisfy { reveal.needsLook(at: $0, strip: layout.strip) },
+          "out: every movement is a look, so leaving it puts it away")
+    _ = poll(&reveal, overPage)
+    check(!reveal.needsLook(at: overPage, strip: layout.strip), "and once it's away again, the page needs none")
+    _ = reveal.toggle()
+    check(reveal.needsLook(at: overPage, strip: layout.strip), "brought out with the shortcut, every movement is a look too")
+}
+
+do {
+    // Passing a movement over never changes what happens: wherever needsLook says no, a look with Safari in
+    // front, held or not, does nothing, asks none of the slow checks and leaves the state as it was. Checked
+    // over a grid across the window and past its edges, from each state the sidebar can be away in.
+    var away: [(String, OverlayReveal)] = [("never out", OverlayReveal())]
+    var concealed = OverlayReveal()
+    _ = poll(&concealed, onStrip)
+    _ = poll(&concealed, overPage)
+    away.append(("put away by the pointer", concealed))
+    var toggledAway = OverlayReveal()
+    _ = toggledAway.toggle()
+    _ = toggledAway.toggle()
+    away.append(("put away with the shortcut", toggledAway))
+    var leftSafari = OverlayReveal()
+    _ = poll(&leftSafari, onStrip)
+    _ = poll(&leftSafari, overPanel, front: false)
+    away.append(("put away when Safari left the front", leftSafari))
+
+    var passedOver = 0
+    var wrong: [String] = []
+    for (name, start) in away {
+        for x in stride(from: window.minX - 40, through: window.maxX + 40, by: 3) {
+            for y in stride(from: window.minY - 40, through: window.maxY + 40, by: 7) {
+                let point = CGPoint(x: x, y: y)
+                guard !start.needsLook(at: point, strip: layout.strip) else { continue }
+                passedOver += 1
+                for holding in [false, true] {
+                    var reveal = start
+                    var asked = false
+                    let action = poll(&reveal, point, holding: holding) { asked = true; return true }
+                    if action != .none || reveal != start || asked {
+                        wrong.append("\(name) at \(point), holding \(holding)")
+                    }
+                }
+            }
+        }
+    }
+    check(passedOver > 1000, "the grid passes over most points: \(passedOver)")
+    check(wrong.isEmpty, "a movement passed over is one a look would have ignored: \(wrong.prefix(3))")
+}
+
+do {
+    // The handler's way (needsLook, then a look) gives the same actions as looking at every movement, along
+    // paths that come out at the edge, cross the sidebar, leave it, and come back while held.
+    let paths: [[(CGPoint, Bool)]] = [
+        [(overPage, false), (overPanel, false), (onStrip, false), (overPanel, false), (nearPanel, false), (overPage, false), (overPage, false)],
+        [(onStrip, false), (overPage, true), (overPage, true), (overPage, false), (onStrip, true), (overPanel, true), (overPage, false)],
+        [(overPanel, false), (overPage, false), (onStrip, false), (onStrip, false), (overPage, false), (onStrip, false)],
+    ]
+    for (index, path) in paths.enumerated() {
+        var everyMove = OverlayReveal()
+        var gated = OverlayReveal()
+        var same = true
+        for (point, holding) in path {
+            let expected = poll(&everyMove, point, holding: holding)
+            let actual = gated.needsLook(at: point, strip: layout.strip) ? poll(&gated, point, holding: holding) : .none
+            same = same && expected == actual && everyMove == gated
+        }
+        check(same, "path \(index + 1): passing movements over changes nothing")
+    }
+}
+
+do {
+    // The moments with no movement, each one look.
+    var reveal = OverlayReveal()
+    _ = poll(&reveal, onStrip)
+    check(poll(&reveal, overPage, front: false) == .conceal, "Safari leaving the front: the last look puts the sidebar away")
+    check(poll(&reveal, onStrip) == .reveal, "Safari back in front with the pointer resting on the strip: the look brings it out")
+
+    // A drag, held button or menu that ends with the pointer still and away from the sidebar.
+    check(poll(&reveal, overPage, holding: true) == .none && reveal.isRevealed, "held out until the button comes up")
+    check(poll(&reveal, overPage) == .conceal, "the mouse-up's look puts it away, with the pointer still")
+
+    // A rename that ends with the pointer away from the sidebar, as with Return.
+    _ = poll(&reveal, onStrip)
+    _ = poll(&reveal, overPanel)
+    check(poll(&reveal, overPage, holding: true) == .none, "renaming keeps it out")
+    check(poll(&reveal, overPage) == .conceal, "and the look when the rename ends puts it away")
+
+    // The overlay starting, or the layout done again, with the pointer still.
+    var started = OverlayReveal()
+    check(poll(&started, overPage) == .none && !started.isRevealed, "starting with the pointer over the page: nothing")
+    var atEdge = OverlayReveal()
+    check(poll(&atEdge, onStrip) == .reveal, "starting with the pointer already at the edge: out at once")
+    var pinned = OverlayReveal()
+    _ = pinned.toggle()
+    check(poll(&pinned, overPage) == .none && pinned.isRevealed, "a look after the shortcut doesn't put it away before a visit")
+}
+
 if failures == 0 {
     print("sidebar overlay checks passed")
 } else {

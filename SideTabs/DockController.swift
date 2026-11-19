@@ -22,7 +22,11 @@ final class DockController {
     private var healthTimer: Timer?
     private var isEditing = false
 
-    private var overlayTimer: Timer?
+    /// The pointer monitors and the menu observer, while the overlay watches the pointer (`watchPointer`).
+    private var overlayMonitors: [Any] = []
+    private var overlayMenuObserver: NSObjectProtocol?
+    /// Another app or Safari coming to the front, which starts and stops the overlay's watching.
+    private var activationObserver: NSObjectProtocol?
     /// Where the overlay's panel goes and the strip that brings it out, for the current window.
     private var overlayLayout: OverlayLayout?
     /// Whether the overlay is out, and why (SidebarOverlay.swift).
@@ -58,6 +62,7 @@ final class DockController {
         tracker.readsToolbarInWindows = settings.hidesAutomatically
         tracker.start()
         observeSettings()
+        observeActivation()
         update(makeRoom: true)
 
         // Picks up Accessibility access being granted, Safari windows appearing, etc., and
@@ -419,13 +424,12 @@ final class DockController {
         if overlayReveal.isRevealed && !panel.isVisible {
             panel.orderFrontRegardless()
         }
-        if overlayTimer == nil {
-            let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.pollOverlay() }
-            }
-            RunLoop.main.add(timer, forMode: .common)
-            overlayTimer = timer
-        }
+        // The overlay may have just started, or the strip moved, with the pointer already on it; or the
+        // panel moved out from under it; or another app came to the front. Only when the layout is done,
+        // never on a timer.
+        let safariInFront = tracker.isSafariFrontmost
+        lookAtPointer(safariInFront: safariInFront, because: "layout")
+        watchPointer(safariInFront)
     }
 
     /// Starts below Safari's toolbar and the bars under it, so the sidebar never covers them.
@@ -452,8 +456,7 @@ final class DockController {
     }
 
     private func stopOverlay() {
-        overlayTimer?.invalidate()
-        overlayTimer = nil
+        watchPointer(false)
         overlayLayout = nil
         overlayReveal = OverlayReveal()
         panel.alphaValue = 1
@@ -475,13 +478,20 @@ final class DockController {
     func toggleOverlay() {
         guard case .overlay = mode else { return }
         perform(overlayReveal.toggle(), because: "toolbar button or shortcut")
+        // From the menu bar item with another app in front (full screen), nothing watches the pointer to
+        // put it away again: look now, as the old timer did on its next tick.
+        if !tracker.isSafariFrontmost {
+            lookAtPointer(safariInFront: false, because: "toolbar button or shortcut")
+        }
     }
 
-    private func pollOverlay() {
+    /// One look at the pointer (`OverlayReveal.poll`), from a pointer event or one of the moments nothing moves.
+    /// `released` is a mouse button that has just come up, which `pressedMouseButtons` may still include.
+    private func lookAtPointer(safariInFront: Bool? = nil, released: Int = 0, because moment: String) {
         guard let layout = overlayLayout else { return }
         // Keep it out while a context menu or drag is in progress, or while renaming.
-        let holding = isEditing || RunLoop.current.currentMode == .eventTracking || NSEvent.pressedMouseButtons != 0
-        let safariInFront = tracker.isSafariFrontmost
+        let holding = isEditing || RunLoop.current.currentMode == .eventTracking || NSEvent.pressedMouseButtons & ~released != 0
+        let safariInFront = safariInFront ?? tracker.isSafariFrontmost
         let action = overlayReveal.poll(
             pointer: NSEvent.mouseLocation,
             strip: layout.strip,
@@ -492,7 +502,102 @@ final class DockController {
             // dock hears about the switch.
             mayReveal: { tracker.window.map { tracker.isOnActiveSpace($0) } ?? false }
         )
-        perform(action, because: action == .reveal ? "pointer at the edge" : safariInFront ? "pointer left" : "Safari isn't in front")
+        let reason = action == .reveal ? "pointer at the edge" : safariInFront ? "pointer left" : "Safari isn't in front"
+        perform(action, because: "\(reason) (\(moment))")
+    }
+
+    /// Watches the pointer while there's an overlay and Safari is in front (`OverlayReveal.watchesPointer`), with
+    /// event monitors rather than a timer (#79): a pointer that stays still, or moves over another app in front,
+    /// wakes nothing. Not a tracking window over the strip, which would take clicks on the left edge, where Safari
+    /// opens its own sidebar.
+    ///
+    /// A global monitor for events going to other apps (Safari, or whatever is under the pointer), and a local one
+    /// for those going to the sidebar itself, which the global one doesn't see. Movements and drags look at the
+    /// pointer; a mouse-up does too, so a drag or held button that ends away from the sidebar puts it away. A menu
+    /// closing is a look as well, since a menu takes the mouse-up that ends it.
+    private func watchPointer(_ safariInFront: Bool) {
+        let wanted = OverlayReveal.watchesPointer(overlay: overlayLayout != nil, safariInFront: safariInFront)
+        guard wanted != (overlayMenuObserver != nil) else { return }
+        guard wanted else {
+            overlayMonitors.forEach(NSEvent.removeMonitor)
+            overlayMonitors = []
+            overlayMenuObserver.map(NotificationCenter.default.removeObserver)
+            overlayMenuObserver = nil
+            log.notice("overlay stopped watching the pointer")
+            return
+        }
+        let events: NSEvent.EventTypeMask = [
+            .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+            .leftMouseUp, .rightMouseUp, .otherMouseUp,
+        ]
+        if let local = NSEvent.addLocalMonitorForEvents(matching: events, handler: { [weak self] event in
+            self?.overlayPointerEvent(event)
+            return event
+        }) {
+            overlayMonitors.append(local)
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: events, handler: { [weak self] event in
+            self?.overlayPointerEvent(event)
+        }) {
+            overlayMonitors.append(global)
+        }
+        overlayMenuObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.lookOnceSettled(because: "menu closed") }
+        }
+        log.notice("overlay watching the pointer")
+    }
+
+    private func overlayPointerEvent(_ event: NSEvent) {
+        guard let layout = overlayLayout else { return }
+        // Where the pointer is now, in screen coordinates, whichever app's window the event was for. A read of
+        // shared memory, not a call to the window server.
+        let pointer = NSEvent.mouseLocation
+        // While the sidebar is away, a movement off the strip changes nothing: one rectangle check and done.
+        guard overlayReveal.needsLook(at: pointer, strip: layout.strip) else { return }
+        switch event.type {
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            // A drag or a button held in a tracking loop (a scroller, a menu) ends with this event, still in the
+            // loop's mode, which counts as holding. Look once the loop is over.
+            let released = 1 << event.buttonNumber
+            lookOnceSettled(released: released, because: "mouse-up")
+        default:
+            lookAtPointer(because: "pointer moved")
+        }
+    }
+
+    /// A look once the run loop is back in its default mode, out of any menu or tracking loop that would count
+    /// as holding the sidebar out.
+    private func lookOnceSettled(released: Int = 0, because moment: String) {
+        RunLoop.main.perform(inModes: [.default]) { [weak self] in
+            MainActor.assumeIsolated { self?.lookAtPointer(released: released, because: moment) }
+        }
+        // A block added this way doesn't wake a run loop that's about to sleep.
+        CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
+
+    /// Safari coming to the front starts the watching, with a look, since the pointer may already be on the strip.
+    /// Another app coming to the front puts the sidebar away, as a look with Safari not in front does, then ends
+    /// it. `update` follows on SafariTracker's own `focusChanged` and agrees; this one goes by the app in the
+    /// notification, so neither waits on Safari's windows being read again.
+    private func observeActivation() {
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let safariInFront = app?.bundleIdentifier == SafariTracker.safariBundleID
+            MainActor.assumeIsolated {
+                guard let self, self.overlayLayout != nil else { return }
+                if safariInFront {
+                    self.watchPointer(true)
+                    self.lookAtPointer(safariInFront: true, because: "Safari came to the front")
+                } else {
+                    self.lookAtPointer(safariInFront: false, because: "another app came to the front")
+                    self.watchPointer(false)
+                }
+            }
+        }
     }
 
     private func perform(_ action: OverlayReveal.Action, because reason: String) {
@@ -540,6 +645,9 @@ final class DockController {
         } else {
             stopWatchingClicks()
             tracker.focusSafari()
+            // The rename held the overlay out; the pointer may have been away from it all along, as when Return
+            // ends it, and nothing moves to say so.
+            lookOnceSettled(because: "rename ended")
         }
     }
 
