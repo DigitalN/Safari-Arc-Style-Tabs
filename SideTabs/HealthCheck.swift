@@ -8,9 +8,14 @@ import Foundation
 // What the looks catch, while Safari is in front, within about two seconds: Safari windows appearing and
 // a switch to another window that the notifications missed (the full read, which picks the window again),
 // a swipe toward another Space that's taken back, leaving full screen finishing after the last event about
-// it, Safari's bars coming and going without the window moving (#35), and another window ending up between
-// Safari's window and the sidebar. Accessibility access being granted relaunches the app
-// (AccessibilityWatcher).
+// it, Safari's bars coming and going without the window moving while the overlay sidebar is out (#35), and
+// another window ending up between Safari's window and the sidebar. Accessibility access being granted
+// relaunches the app (AccessibilityWatcher).
+//
+// The bars take 10 to 15 round trips to read, so a look reads them only while the overlay is out. While it's
+// away they're read when the pointer nears the edge and right after it comes out, which it does at once at
+// the last layout (OverlayBars in SidebarOverlay.swift), and by a look whose window moved, changed size or
+// went into or out of full screen since they were last read (SafariBars.readsAgain).
 //
 // Every read is answered on Safari's main thread, so a look wakes Safari too. None run while there's
 // nothing to keep in place: the sidebar turned off, Safari not running, or a hold (asleep, the displays
@@ -71,9 +76,10 @@ nonisolated enum HealthCheck {
         return safariInFront ? .safariInFront : .off("Safari in the background")
     }
 
-    /// What one look reads of Safari's window. Every look also attaches if the tracker isn't attached, reads
-    /// Safari's bars where they're read at all (full screen, or the sidebar hiding automatically), and checks
-    /// whether another window is between Safari's window and the sidebar.
+    /// What one look reads of Safari's window. Every look also attaches if the tracker isn't attached, and
+    /// checks whether another window is between Safari's window and the sidebar. It reads Safari's bars, where
+    /// they're read at all (full screen, or the sidebar hiding automatically), only while the overlay is out
+    /// (`OverlayBars.lookReadsBars`), or when the window changed since they were last read.
     enum Read: Equatable {
         /// The docked window's frame, title and full-screen state, in one round trip.
         case geometry

@@ -41,6 +41,9 @@ final class DockController {
     private var overlayLayout: OverlayLayout?
     /// Whether the overlay is out, and why (SidebarOverlay.swift).
     private var overlayReveal = OverlayReveal()
+    /// When the overlay reads Safari's bars again (SidebarOverlay.swift), and whether a read it asked for is out.
+    private var overlayBars = OverlayBars()
+    private var overlayBarsReading = false
 
     /// Width + gap the last layout used, to keep Safari flush when the width changes.
     private var appliedInset: Double?
@@ -128,8 +131,9 @@ final class DockController {
         guard let read = healthSchedule.next(cadence: healthCadence, hasWindow: tracker.window != nil) else { return }
         let wasAttached = tracker.isAttached
         tracker.attachIfNeeded(readingWindow: false)
-        // At `.utility`: nobody waits on a look.
-        tracker.refreshWindow(full: read == .full, urgent: false) { [weak self] windowChanged in
+        // At `.utility`: nobody waits on a look. Safari's bars only while the overlay is out (OverlayBars).
+        let bars = OverlayBars.lookReadsBars(revealed: overlayReveal.isRevealed)
+        tracker.refreshWindow(full: read == .full, urgent: false, bars: bars) { [weak self] windowChanged in
             guard let self else { return }
             if !wasAttached && self.tracker.isAttached || self.mode == .hidden || windowChanged {
                 self.update(makeRoom: true)
@@ -547,6 +551,7 @@ final class DockController {
         watchPointer(false)
         overlayLayout = nil
         overlayReveal = OverlayReveal()
+        overlayBars = OverlayBars()
         // Every docked update comes through here, each move of Safari's window included (#85).
         if panel.alphaValue != 1 {
             panel.alphaValue = 1
@@ -645,6 +650,12 @@ final class DockController {
         // Where the pointer is now, in screen coordinates, whichever app's window the event was for. A read of
         // shared memory, not a call to the window server.
         let pointer = NSEvent.mouseLocation
+        // Nearing the strip while the sidebar is away: read Safari's bars, so the strip and the panel are below
+        // them by the time the pointer gets there. A second rectangle check.
+        if !overlayReveal.isRevealed,
+           overlayBars.pointerMoved(to: pointer, approach: layout.approach, now: ProcessInfo.processInfo.systemUptime) {
+            readOverlayBars(because: "pointer near the edge")
+        }
         // While the sidebar is away, a movement off the strip changes nothing: one rectangle check and done.
         guard overlayReveal.needsLook(at: pointer, strip: layout.strip) else { return }
         switch event.type {
@@ -696,11 +707,32 @@ final class DockController {
         case .none:
             return
         case .reveal:
+            // At once, where the last layout says; then Safari's bars fresh, and the panel moves if they changed.
             revealOverlay()
+            if overlayBars.revealed(now: ProcessInfo.processInfo.systemUptime) {
+                readOverlayBars(because: "sidebar came out")
+            }
         case .conceal:
             concealOverlay()
         }
         log.notice("overlay \(action == .reveal ? "out" : "away", privacy: .public): \(reason, privacy: .public)")
+    }
+
+    /// Reads Safari's bars again for the overlay (OverlayBars), at once, and lays it out again if they moved. One
+    /// at a time: a read already out is as fresh.
+    private func readOverlayBars(because reason: String) {
+        guard case .overlay = mode, !overlayBarsReading else { return }
+        overlayBarsReading = true
+        tracker.refreshWindow(full: false, urgent: true, bars: true) { [weak self] windowChanged in
+            guard let self else { return }
+            self.overlayBarsReading = false
+            if windowChanged {
+                self.update(makeRoom: true)
+            } else if let problem = self.placementProblem(checksStacking: false) {
+                self.log.notice("fixing (\(reason, privacy: .public)): \(problem, privacy: .public)")
+                self.update(makeRoom: false)
+            }
+        }
     }
 
     private func revealOverlay() {
