@@ -19,17 +19,39 @@ final class DockController {
 
     private var mode: Mode = .hidden
     private var settleWork: DispatchWorkItem?
-    private var healthTimer: Timer?
     private var isEditing = false
 
-    private var overlayTimer: Timer?
+    /// Looks again at Safari's window for changes macOS doesn't announce (HealthCheck.swift), while there's
+    /// something to keep in place: how often, or why not.
+    private var healthTimer: Timer?
+    private var healthCadence = HealthCheck.Cadence.off("not started")
+    private var healthSchedule = HealthCheck.Schedule()
+    /// Looks at the holds again a moment after one may have changed, in case macOS reports the change
+    /// before it can say so.
+    private var holdRecheck: DispatchWorkItem?
+    /// What holds Safari back now: asleep, the screen locked and the like (HoldWatcher). No looks run then.
+    var currentHolds: () -> Set<CopySilence.Hold> = { [] }
+
+    /// The pointer monitors and the menu observer, while the overlay watches the pointer (`watchPointer`).
+    private var overlayMonitors: [Any] = []
+    private var overlayMenuObserver: NSObjectProtocol?
+    /// Another app or Safari coming to the front, which starts and stops the overlay's watching.
+    private var activationObserver: NSObjectProtocol?
     /// Where the overlay's panel goes and the strip that brings it out, for the current window.
     private var overlayLayout: OverlayLayout?
     /// Whether the overlay is out, and why (SidebarOverlay.swift).
     private var overlayReveal = OverlayReveal()
+    /// When the overlay reads Safari's bars again (SidebarOverlay.swift), and whether a read it asked for is out.
+    private var overlayBars = OverlayBars()
+    private var overlayBarsReading = false
 
     /// Width + gap the last layout used, to keep Safari flush when the width changes.
     private var appliedInset: Double?
+
+    /// What the panel's shadow was last worked out for (`shapePanel`).
+    private var shadowShape: PanelShadowShape?
+    /// When the panel is ordered behind Safari's window again (`orderPanel`).
+    private var ordering = PanelOrderingRule()
 
     /// Below this, narrowing Safari to fit the sidebar would make it unusable.
     private let minimumSafariWidth: CGFloat = 480
@@ -58,35 +80,83 @@ final class DockController {
         tracker.readsToolbarInWindows = settings.hidesAutomatically
         tracker.start()
         observeSettings()
+        observeActivation()
         update(makeRoom: true)
+        refreshHealthTimer()
+    }
 
-        // Picks up Accessibility access being granted, Safari windows appearing, etc., and
-        // puts the sidebar right after changes macOS didn't announce, including a switch to
-        // another Safari window that the window notifications missed.
-        // The reads of Safari's windows happen off the main thread; this runs when they're in. If
+    /// A hold may have begun or ended (HoldWatcher).
+    func holdsMayHaveChanged() {
+        refreshHealthTimer()
+        holdRecheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.holdRecheck = nil
+            self?.refreshHealthTimer()
+        }
+        holdRecheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+
+    // MARK: - Looking again
+
+    /// Starts, stops or changes the looks for what's true now: the sidebar on or off, Safari running and in
+    /// front, the holds. Called on everything that can change one of those.
+    private func refreshHealthTimer() {
+        let cadence = HealthCheck.cadence(
+            sidebarVisible: settings.sidebarVisible,
+            safariRunning: tracker.app.map { !$0.isTerminated } ?? false,
+            holds: currentHolds(),
+            safariInFront: tracker.isSafariFrontmost
+        )
+        guard cadence != healthCadence else { return }
+        let wasRunning = healthCadence.isRunning
+        healthCadence = cadence
+        log.notice("looking again for changes macOS doesn't announce: \(cadence.summary, privacy: .public)")
+        healthTimer?.invalidate()
+        healthTimer = nil
+        guard let interval = cadence.interval else { return }
+        if !wasRunning {
+            healthSchedule.resume()
+        }
+        // The reads of Safari's windows happen off the main thread; the look finishes when they're in. If
         // Safari is slow to answer, that is later, and the sidebar stays as it was meanwhile.
-        healthTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                let wasAttached = self.tracker.isAttached
-                self.tracker.attachIfNeeded()
-                self.tracker.refreshWindow { [weak self] windowChanged in
-                    guard let self else { return }
-                    if !wasAttached && self.tracker.isAttached || self.mode == .hidden || windowChanged {
-                        self.update(makeRoom: true)
-                    } else if let problem = self.placementProblem() {
-                        self.log.notice("fixing: \(problem, privacy: .public)")
-                        self.update(makeRoom: NSEvent.pressedMouseButtons == 0)
-                    }
-                }
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.look() }
+        }
+        timer.tolerance = cadence.tolerance
+        RunLoop.main.add(timer, forMode: .default)
+        healthTimer = timer
+    }
+
+    /// Puts the sidebar right after changes macOS didn't announce (HealthCheck.swift).
+    private func look() {
+        guard let read = healthSchedule.next(cadence: healthCadence, hasWindow: tracker.window != nil) else { return }
+        let wasAttached = tracker.isAttached
+        tracker.attachIfNeeded(readingWindow: false)
+        // At `.utility`: nobody waits on a look. Safari's bars only while the overlay is out (OverlayBars).
+        let bars = OverlayBars.lookReadsBars(revealed: overlayReveal.isRevealed)
+        tracker.refreshWindow(full: read == .full, urgent: false, bars: bars) { [weak self] windowChanged in
+            guard let self else { return }
+            if !wasAttached && self.tracker.isAttached || self.mode == .hidden || windowChanged {
+                self.update(makeRoom: true)
+            } else if let problem = self.placementProblem(checksStacking: self.tracker.isSafariFrontmost) {
+                // Safari may have gone behind while the read was out: the window list is only for Safari in front.
+                self.log.notice("fixing: \(problem, privacy: .public)")
+                self.update(makeRoom: NSEvent.pressedMouseButtons == 0)
             }
         }
     }
 
     private func handle(_ event: SafariTracker.Event) {
+        defer {
+            if event.mayChangeHealthCheck {
+                refreshHealthTimer()
+            }
+        }
         switch event {
         case .moved, .resized:
-            update(makeRoom: false)
+            // With the mouse button held, the user is dragging or resizing Safari's window (#85).
+            update(makeRoom: false, dragging: NSEvent.pressedMouseButtons & 1 != 0)
             scheduleMakeRoom()
         case .launched:
             store.safariDidLaunch()
@@ -96,9 +166,13 @@ final class DockController {
             update(makeRoom: true)
         case .titleChanged:
             // Only the store's copy of the title, which picks the window to list. Nothing about where
-            // the window is has changed, so the layout isn't done again.
+            // the window is has changed, so the layout isn't done again. And only when it differs, so a
+            // notification that changed nothing reaches no observer (#82).
             if let window = tracker.window {
-                store.dockedWindowTitle = tracker.title(of: window)
+                let title = tracker.title(of: window)
+                if store.dockedWindowTitle != title {
+                    store.dockedWindowTitle = title
+                }
             }
         case .terminated:
             store.safariDidTerminate()
@@ -121,6 +195,7 @@ final class DockController {
     }
 
     private func settingsChanged() {
+        refreshHealthTimer()
         if tracker.readsToolbarInWindows != settings.hidesAutomatically {
             tracker.readsToolbarInWindows = settings.hidesAutomatically
             // The overlay starts below the toolbar, which a normal window's last read didn't include.
@@ -137,7 +212,8 @@ final class DockController {
 
     // MARK: - Layout
 
-    func update(makeRoom: Bool) {
+    /// `dragging`: for a move or resize of Safari's window while the user drags it (`PanelOrderingRule`).
+    func update(makeRoom: Bool, dragging: Bool = false) {
         store.safariIsFrontmost = tracker.isSafariFrontmost
 
         let hideReason: String?
@@ -195,14 +271,11 @@ final class DockController {
         }
         stopOverlay()
 
-        let target = dockedFrame(beside: axFrame)
-        panel.style.attached = true
-        if panel.frame != target {
-            panel.setFrame(target, display: true)
-            panel.invalidateShadow()
+        shapePanel(dockedFrame(beside: axFrame), attached: true)
+        if panel.level != .normal {
+            panel.level = .normal
         }
-        panel.level = .normal
-        orderPanel(below: window)
+        orderPanel(below: window, dragging: dragging)
         mode = .docked
         appliedInset = settings.width
         note("docked: Safari at \(axFrame.integral), panel at \(panel.frame), on screen: \(panel.isVisible && panel.isOnActiveSpace)")
@@ -227,7 +300,10 @@ final class DockController {
     /// Why the sidebar isn't where `update` would put it, if it isn't. macOS doesn't announce
     /// every change: a swipe toward another Space that's taken back never changes Spaces, and
     /// leaving full screen can finish after the last event about it.
-    private func placementProblem() -> String? {
+    ///
+    /// `checksStacking`: also copy the window server's list of windows to see whether another one is between
+    /// Safari's window and the sidebar. Only while Safari is in front (HealthCheck.swift).
+    private func placementProblem(checksStacking: Bool) -> String? {
         guard mode != .hidden else { return nil }
         guard settings.sidebarVisible, tracker.app?.isHidden == false,
               let window = tracker.window, let frame = tracker.frame(of: window) else {
@@ -265,7 +341,7 @@ final class DockController {
         if panel.frame != dockedFrame(beside: frame) {
             return "sidebar isn't beside Safari"
         }
-        if let number = tracker.windowNumber(of: window) {
+        if checksStacking, let number = tracker.windowNumber(of: window) {
             let behind = normalWindows(.optionOnScreenBelowWindow, relativeTo: number).first
             if let behind, behind[kCGWindowNumber as String] as? Int != panel.windowNumber {
                 let inFront = normalWindows(.optionOnScreenAboveWindow, relativeTo: number)
@@ -285,17 +361,51 @@ final class DockController {
 
     /// Keeps the panel directly behind Safari's window: in front of everything Safari is in
     /// front of, and with its corner fill hidden under Safari.
-    private func orderPanel(below window: AXUIElement) {
+    ///
+    /// While Safari's window is dragged (`dragging`), a panel on screen is left where it is: the drag
+    /// doesn't change what's between the two windows, and the check waits until the drag settles
+    /// (`scheduleMakeRoom`). Otherwise a panel already directly behind stays there, and anything between
+    /// the two windows puts it back (#85).
+    private func orderPanel(below window: AXUIElement, dragging: Bool = false) {
         // Left on another Space (such as the one Safari just left full screen from), the panel
         // has to be ordered out and back in to move to the Space being shown.
         if panel.isVisible && !tracker.isOnActiveSpace(windowNumber: panel.windowNumber) {
             panel.orderOut(nil)
         }
-        if let number = tracker.windowNumber(of: window) {
+        order(below: window, ordering.layout(panelVisible: panel.isVisible, dragging: dragging))
+    }
+
+    private func order(below window: AXUIElement, _ ordering: PanelOrdering) {
+        if ordering != .skip, let number = tracker.windowNumber(of: window),
+           ordering == .order || !isDirectlyBehind(number) {
             panel.order(.below, relativeTo: number)
         }
         if !panel.isVisible {
             panel.orderFrontRegardless()
+        }
+    }
+
+    /// Whether the panel is directly behind the window with this number, with nothing between them,
+    /// from the window server's order of the windows on screen (numbers only, no window details).
+    private func isDirectlyBehind(_ number: Int) -> Bool {
+        let frontToBack = NSWindow.windowNumbers(options: [.allApplications])?.map(\.intValue) ?? []
+        return DockedPanelRules.isDirectlyBehind(panel: panel.windowNumber, window: number, frontToBack: frontToBack)
+    }
+
+    /// Gives the panel its style and frame. Its shadow follows the outline it draws, which changes with
+    /// its size and style but not its position, so the window server only works the shadow out again
+    /// then, not on every move while Safari's window is dragged (#85).
+    private func shapePanel(_ frame: NSRect, attached: Bool) {
+        if panel.style.attached != attached {
+            panel.style.attached = attached
+        }
+        if panel.frame != frame {
+            panel.setFrame(frame, display: true)
+        }
+        let shape = PanelShadowShape(size: panel.frame.size, attached: attached, scale: panel.backingScaleFactor)
+        if DockedPanelRules.needsNewShadow(shape, last: shadowShape) {
+            shadowShape = shape
+            panel.invalidateShadow()
         }
     }
 
@@ -316,7 +426,12 @@ final class DockController {
                 self?.scheduleMakeRoom()
                 return
             }
+            // The one check of the windows' order that a drag of Safari's window put off.
+            let settled = self.ordering.settled()
             if let window = self.tracker.window {
+                if self.mode == .docked {
+                    self.order(below: window, settled)
+                }
                 self.makeRoom(for: window)
             }
         }
@@ -409,23 +524,20 @@ final class DockController {
         if !overlayReveal.isRevealed && panel.isVisible {
             panel.orderOut(nil)
         }
-        panel.style.attached = false
         // Sized as soon as the place is known, so revealing it later is instant.
-        if panel.frame != layout.panel {
-            panel.setFrame(layout.panel, display: true)
-            panel.invalidateShadow()
+        shapePanel(layout.panel, attached: false)
+        if panel.level != .floating {
+            panel.level = .floating
         }
-        panel.level = .floating
         if overlayReveal.isRevealed && !panel.isVisible {
             panel.orderFrontRegardless()
         }
-        if overlayTimer == nil {
-            let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.pollOverlay() }
-            }
-            RunLoop.main.add(timer, forMode: .common)
-            overlayTimer = timer
-        }
+        // The overlay may have just started, or the strip moved, with the pointer already on it; or the
+        // panel moved out from under it; or another app came to the front. Only when the layout is done,
+        // never on a timer.
+        let safariInFront = tracker.isSafariFrontmost
+        lookAtPointer(safariInFront: safariInFront, because: "layout")
+        watchPointer(safariInFront)
     }
 
     /// Starts below Safari's toolbar and the bars under it, so the sidebar never covers them.
@@ -452,11 +564,14 @@ final class DockController {
     }
 
     private func stopOverlay() {
-        overlayTimer?.invalidate()
-        overlayTimer = nil
+        watchPointer(false)
         overlayLayout = nil
         overlayReveal = OverlayReveal()
-        panel.alphaValue = 1
+        overlayBars = OverlayBars()
+        // Every docked update comes through here, each move of Safari's window included (#85).
+        if panel.alphaValue != 1 {
+            panel.alphaValue = 1
+        }
     }
 
     /// Whether the toolbar button, its shortcut and the menu bar item slide the sidebar out or
@@ -475,13 +590,20 @@ final class DockController {
     func toggleOverlay() {
         guard case .overlay = mode else { return }
         perform(overlayReveal.toggle(), because: "toolbar button or shortcut")
+        // From the menu bar item with another app in front (full screen), nothing watches the pointer to
+        // put it away again: look now, as the old timer did on its next tick.
+        if !tracker.isSafariFrontmost {
+            lookAtPointer(safariInFront: false, because: "toolbar button or shortcut")
+        }
     }
 
-    private func pollOverlay() {
+    /// One look at the pointer (`OverlayReveal.poll`), from a pointer event or one of the moments nothing moves.
+    /// `released` is a mouse button that has just come up, which `pressedMouseButtons` may still include.
+    private func lookAtPointer(safariInFront: Bool? = nil, released: Int = 0, because moment: String) {
         guard let layout = overlayLayout else { return }
         // Keep it out while a context menu or drag is in progress, or while renaming.
-        let holding = isEditing || RunLoop.current.currentMode == .eventTracking || NSEvent.pressedMouseButtons != 0
-        let safariInFront = tracker.isSafariFrontmost
+        let holding = isEditing || RunLoop.current.currentMode == .eventTracking || NSEvent.pressedMouseButtons & ~released != 0
+        let safariInFront = safariInFront ?? tracker.isSafariFrontmost
         let action = overlayReveal.poll(
             pointer: NSEvent.mouseLocation,
             strip: layout.strip,
@@ -492,7 +614,108 @@ final class DockController {
             // dock hears about the switch.
             mayReveal: { tracker.window.map { tracker.isOnActiveSpace($0) } ?? false }
         )
-        perform(action, because: action == .reveal ? "pointer at the edge" : safariInFront ? "pointer left" : "Safari isn't in front")
+        let reason = action == .reveal ? "pointer at the edge" : safariInFront ? "pointer left" : "Safari isn't in front"
+        perform(action, because: "\(reason) (\(moment))")
+    }
+
+    /// Watches the pointer while there's an overlay and Safari is in front (`OverlayReveal.watchesPointer`), with
+    /// event monitors rather than a timer (#79): a pointer that stays still, or moves over another app in front,
+    /// wakes nothing. Not a tracking window over the strip, which would take clicks on the left edge, where Safari
+    /// opens its own sidebar.
+    ///
+    /// A global monitor for events going to other apps (Safari, or whatever is under the pointer), and a local one
+    /// for those going to the sidebar itself, which the global one doesn't see. Movements and drags look at the
+    /// pointer; a mouse-up does too, so a drag or held button that ends away from the sidebar puts it away. A menu
+    /// closing is a look as well, since a menu takes the mouse-up that ends it.
+    private func watchPointer(_ safariInFront: Bool) {
+        let wanted = OverlayReveal.watchesPointer(overlay: overlayLayout != nil, safariInFront: safariInFront)
+        guard wanted != (overlayMenuObserver != nil) else { return }
+        guard wanted else {
+            overlayMonitors.forEach(NSEvent.removeMonitor)
+            overlayMonitors = []
+            overlayMenuObserver.map(NotificationCenter.default.removeObserver)
+            overlayMenuObserver = nil
+            log.notice("overlay stopped watching the pointer")
+            return
+        }
+        let events: NSEvent.EventTypeMask = [
+            .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+            .leftMouseUp, .rightMouseUp, .otherMouseUp,
+        ]
+        if let local = NSEvent.addLocalMonitorForEvents(matching: events, handler: { [weak self] event in
+            self?.overlayPointerEvent(event)
+            return event
+        }) {
+            overlayMonitors.append(local)
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: events, handler: { [weak self] event in
+            self?.overlayPointerEvent(event)
+        }) {
+            overlayMonitors.append(global)
+        }
+        overlayMenuObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.lookOnceSettled(because: "menu closed") }
+        }
+        log.notice("overlay watching the pointer")
+    }
+
+    private func overlayPointerEvent(_ event: NSEvent) {
+        guard let layout = overlayLayout else { return }
+        // Where the pointer is now, in screen coordinates, whichever app's window the event was for. A read of
+        // shared memory, not a call to the window server.
+        let pointer = NSEvent.mouseLocation
+        // Nearing the strip while the sidebar is away: read Safari's bars, so the strip and the panel are below
+        // them by the time the pointer gets there. A second rectangle check.
+        if !overlayReveal.isRevealed,
+           overlayBars.pointerMoved(to: pointer, approach: layout.approach, now: ProcessInfo.processInfo.systemUptime) {
+            readOverlayBars(because: "pointer near the edge")
+        }
+        // While the sidebar is away, a movement off the strip changes nothing: one rectangle check and done.
+        guard overlayReveal.needsLook(at: pointer, strip: layout.strip) else { return }
+        switch event.type {
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            // A drag or a button held in a tracking loop (a scroller, a menu) ends with this event, still in the
+            // loop's mode, which counts as holding. Look once the loop is over.
+            let released = 1 << event.buttonNumber
+            lookOnceSettled(released: released, because: "mouse-up")
+        default:
+            lookAtPointer(because: "pointer moved")
+        }
+    }
+
+    /// A look once the run loop is back in its default mode, out of any menu or tracking loop that would count
+    /// as holding the sidebar out.
+    private func lookOnceSettled(released: Int = 0, because moment: String) {
+        RunLoop.main.perform(inModes: [.default]) { [weak self] in
+            MainActor.assumeIsolated { self?.lookAtPointer(released: released, because: moment) }
+        }
+        // A block added this way doesn't wake a run loop that's about to sleep.
+        CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
+
+    /// Safari coming to the front starts the watching, with a look, since the pointer may already be on the strip.
+    /// Another app coming to the front puts the sidebar away, as a look with Safari not in front does, then ends
+    /// it. `update` follows on SafariTracker's own `focusChanged` and agrees; this one goes by the app in the
+    /// notification, so neither waits on Safari's windows being read again.
+    private func observeActivation() {
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let safariInFront = app?.bundleIdentifier == SafariTracker.safariBundleID
+            MainActor.assumeIsolated {
+                guard let self, self.overlayLayout != nil else { return }
+                if safariInFront {
+                    self.watchPointer(true)
+                    self.lookAtPointer(safariInFront: true, because: "Safari came to the front")
+                } else {
+                    self.lookAtPointer(safariInFront: false, because: "another app came to the front")
+                    self.watchPointer(false)
+                }
+            }
+        }
     }
 
     private func perform(_ action: OverlayReveal.Action, because reason: String) {
@@ -500,11 +723,32 @@ final class DockController {
         case .none:
             return
         case .reveal:
+            // At once, where the last layout says; then Safari's bars fresh, and the panel moves if they changed.
             revealOverlay()
+            if overlayBars.revealed(now: ProcessInfo.processInfo.systemUptime) {
+                readOverlayBars(because: "sidebar came out")
+            }
         case .conceal:
             concealOverlay()
         }
         log.notice("overlay \(action == .reveal ? "out" : "away", privacy: .public): \(reason, privacy: .public)")
+    }
+
+    /// Reads Safari's bars again for the overlay (OverlayBars), at once, and lays it out again if they moved. One
+    /// at a time: a read already out is as fresh.
+    private func readOverlayBars(because reason: String) {
+        guard case .overlay = mode, !overlayBarsReading else { return }
+        overlayBarsReading = true
+        tracker.refreshWindow(full: false, urgent: true, bars: true) { [weak self] windowChanged in
+            guard let self else { return }
+            self.overlayBarsReading = false
+            if windowChanged {
+                self.update(makeRoom: true)
+            } else if let problem = self.placementProblem(checksStacking: false) {
+                self.log.notice("fixing (\(reason, privacy: .public)): \(problem, privacy: .public)")
+                self.update(makeRoom: false)
+            }
+        }
     }
 
     private func revealOverlay() {
@@ -540,6 +784,9 @@ final class DockController {
         } else {
             stopWatchingClicks()
             tracker.focusSafari()
+            // The rename held the overlay out; the pointer may have been away from it all along, as when Return
+            // ends it, and nothing moves to say so.
+            lookOnceSettled(because: "rename ended")
         }
     }
 
@@ -606,4 +853,15 @@ final class DockController {
 
 private extension CGRect {
     var area: CGFloat { isNull ? 0 : width * height }
+}
+
+private extension SafariTracker.Event {
+    /// Safari coming to the front or going behind, hidden or shown, launched or quit: what decides whether
+    /// the dock looks again at Safari's window, and how often (HealthCheck.swift).
+    var mayChangeHealthCheck: Bool {
+        switch self {
+        case .focusChanged, .visibilityChanged, .launched, .terminated: true
+        case .moved, .resized, .windowChanged, .titleChanged: false
+        }
+    }
 }

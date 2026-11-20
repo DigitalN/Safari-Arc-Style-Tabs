@@ -61,8 +61,9 @@ final class TabCleanup {
     /// ... and none closed longer ago than this.
     static let listLifetime: TimeInterval = 30 * 24 * 60 * 60
     /// How long after the clocks start (Side Tabs launching, or the setting turned on) every extension
-    /// instance that is still alive has surely reported. The background page sends a heartbeat every
-    /// 5 seconds and is asked for a snapshot on the first one, but under load it has run 20 s late.
+    /// instance that is still alive has surely reported. The background page says hello when it starts, sends
+    /// something at least every 10 seconds and is asked for a snapshot on the first message, but under load it
+    /// has run 20 s late.
     /// After this, clocks of instances that haven't reported belong to a Safari that has quit.
     static let instanceGracePeriod: TimeInterval = 2 * 60
     /// How long Side Tabs can be away (quit, or restarting into an update) before the clocks it saved
@@ -384,7 +385,7 @@ extension TabStore {
                 title: pageTitle(for: tab),
                 customName: customNames[key]?.name,
                 url: url,
-                faviconURL: tab.favIconUrl,
+                faviconURL: savedIconURL(tab.favIconUrl),
                 closedAt: closedAt,
                 profile: snapshots[key.instance]?.profile
             )

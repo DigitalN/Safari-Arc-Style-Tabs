@@ -33,21 +33,27 @@ copy in `/Applications` is the only one.
 scripts/run-checks.sh
 ```
 
-Runs what can be checked without Safari: `background.js` against a stand-in `browser`
-(`Tests/ExtensionChecks`), the Swift logic compiled with small test programs (`TabStore`'s
+Runs what can be checked without Safari: `background.js` against a stand-in `browser`, and
+`content.js` against a stand-in page and its `MutationObserver` (`Tests/ExtensionChecks`), the extension's
+way to the app against a stand-in for the app's port (`Tests/AppPortChecks`), the Swift logic compiled with small test programs (`TabStore`'s
 handling of messages, its favorites and pinned items, and the folders in Pinned: the tree, the rows it shows,
 where a drop lands and how it's saved; where Safari's tab bar is in a window's Accessibility tree and which
 of its buttons a tab matches and which one Safari has selected, checked against trees kept as data in
 `Tests/TabBarFinderChecks/trees`; which of Safari's windows are browser windows the sidebar
 docks to, and never Settings, against the same trees; what a press on a row turns into; which row is under a
 middle click; which queued
-Accessibility requests are still wanted; which notifications the docked window is watched for;
+Accessibility requests are still wanted; which notifications the docked window is watched for; when the docked
+sidebar's shadow is worked out again and when it's ordered behind Safari's window again; when the sidebar looks
+again at Safari's window for changes macOS doesn't announce (only while it's on and Safari is in front), how often,
+and what each look reads;
 where the sidebar slides out over the page in full screen or when it hides automatically, below which
 of Safari's bars (against trees in `Tests/SidebarOverlayChecks/trees`), and what
-brings it out and puts it away; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
+brings it out and puts it away, which pointer movements it needs to look at, and when it reads Safari's bars
+again (only while it's out, right after it comes out, and as the pointer nears the edge); which tabs cleanup closes, the clocks it keeps, its list of closed tabs
 and where they reopen; with *Minimize other profiles' windows* on, which windows a change of profile
 minimizes and brings back, which window a switch brings forward, the list of windows Side Tabs minimized
-and how it's matched after a restart, and when a click on Safari's Dock icon opens a window; what the
+and how it's matched after a restart, and when a click on Safari's Dock icon opens a window and which presses
+the Dock is asked about at all; what the
 sidebar shows while a switch's window comes back from the Dock, and when Safari's report ends it, or another window
 coming to the front does, and what clicks act on meanwhile; swiping between profiles (which way a gesture goes, the
 halfway-or-flick rule, the ends, what the incoming page shows, which window comes forward, and what the sidebar shows
@@ -173,19 +179,29 @@ separate window that the app keeps attached to Safari's window:
 ```
 
 - `WebExtension/`: the Safari web extension. `background.js` sends windows and tabs to
-  the app (with retries, and a heartbeat every 5 seconds so missed updates are noticed)
-  and carries out the app's commands: switch, close, open, move, and so on. It also
+  the app (with retries, and a heartbeat after 10 seconds without any other message, so missed
+  updates are noticed and the app knows it's still running)
+  and carries out the app's commands: switch, close, open, move, and so on. After a first
+  full snapshot it sends only what changed since the last state the app took, which the
+  app turns back into a full snapshot; when the app hasn't got the state they're counted
+  from, it asks that copy for a full snapshot again. A change of focus alone is sent
+  without asking Safari for every tab, and a page's `data:` icon goes to the app once,
+  under a short name. It also
   fetches favicons for the app, which never connects to websites itself: reaching a
   device on the local network, like a router, would make macOS ask for Local Network
   access. `content.js` reports each page's favicon URL, which Safari's tabs API doesn't
   provide. Safari can lose a native message's reply, so `background.js` gives up on each
   message after 4 seconds and counts it as not delivered. Each Safari profile runs its own
-  copy of `background.js`; the app hides a copy's windows after 30 seconds without a
+  copy of `background.js`; the app hides a copy's windows after 40 seconds without a
   message from it, and drops the copy once a newer copy of the same profile reports (after
-  the extension reloads or is reinstalled). Those 30 seconds are awake time in which the copy
+  the extension reloads or is reinstalled). Those 40 seconds are awake time in which the copy
   could have spoken: sleep, a locked screen, the screen saver, a switched-away session and
-  Safari hidden don't count, and each copy gets 30 seconds again when they end
-  (`CopySilence`, `HoldWatcher`). Every command from the app carries an id, and
+  Safari hidden don't count, and each copy gets 40 seconds again when they end
+  (`CopySilence`, `HoldWatcher`). When one of those lasts 30 seconds, the app asks the
+  copies to stop heartbeating for 5 minutes, again every 4 minutes while it lasts, and to
+  start again when it ends. A copy heard from after that counts as usual; one that says its
+  heartbeats are still paused, or isn't heard from at all, counts only once its pause has
+  run out, since it may have missed the word. Every command from the app carries an id, and
   `background.js` skips one it has already run, since Safari has delivered commands twice.
 - `SideTabsExtension/`: the extension's native handler. It passes messages to the app
   over a CFMessagePort named after the app group, which is what lets the sandboxed

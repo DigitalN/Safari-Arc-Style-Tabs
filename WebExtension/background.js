@@ -11,7 +11,8 @@
 // Safari ignores this value and always talks to the containing app.
 const NATIVE_APP_ID = "com.digitaln.sidetabs";
 const WINDOW_ID_NONE = browser.windows.WINDOW_ID_NONE ?? -1;
-const HEARTBEAT_MS = 5000;
+// A copy that has had nothing delivered to the app for this long sends a heartbeat (see "Heartbeats" below).
+const HEARTBEAT_MS = 10000;
 
 // How long a native message waits for its reply. The extension's handler always answers within about
 // 3 s (its message to the app gives up after 1 s + 2 s), but Safari can lose the reply, and then the
@@ -23,11 +24,11 @@ const REPLY_TIME_LIMIT_MS = 4000;
 // app can keep profiles apart and notice when Safari restarts.
 const instance = (crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-// Counts snapshots and `activated` reports together, so the app can tell which of two
+// Counts snapshots, changes and `activated` reports together, so the app can tell which of two
 // messages is newer even when they arrive out of order: each one is a separate native
 // message, and nothing orders them on the way.
 let seq = 0;
-// The last snapshot the app confirmed receiving.
+// The last snapshot or changes the app confirmed receiving.
 let sentSeq = 0;
 let focusedWindowId = WINDOW_ID_NONE;
 let lastFocusedWindowId = null;
@@ -39,11 +40,13 @@ const favicons = new Map();
 // ---------------------------------------------------------------------------
 // Snapshots
 
-function serializeTab(tab) {
+// `index` is the tab's place in its window's list, which is what Safari's own index is, and what the
+// app reads it as.
+function serializeTab(tab, index) {
     return {
         id: tab.id,
         windowId: tab.windowId,
-        index: tab.index,
+        index,
         title: tab.title ?? null,
         url: tab.url ?? null,
         active: !!tab.active,
@@ -51,7 +54,7 @@ function serializeTab(tab) {
         audible: !!tab.audible,
         muted: !!(tab.mutedInfo && tab.mutedInfo.muted),
         loading: tab.status === "loading",
-        favIconUrl: favicons.get(tab.id) || tab.favIconUrl || null,
+        favIconUrl: iconForApp(favicons.get(tab.id) || tab.favIconUrl || null),
     };
 }
 
@@ -72,14 +75,24 @@ function shownSignature(tab) {
 // The shown state of each tab as of the last snapshot built.
 let lastShown = new Map();
 
-async function buildSnapshot() {
+// Whether a tab or window may have changed since the last time Safari was asked for them (see buildState):
+// any event about them, a command, and the refreshes after startup set it. A change of focus alone doesn't,
+// and is sent without asking Safari anything (see stateWithFocus).
+let tabsChanged = true;
+
+// What this copy's windows and tabs are: the windows, each with its tabs, and which one has focus. `seq` and
+// `startedAt` say when it was taken (see below). A full snapshot is this, with the message's type and the
+// copy's instance.
+async function buildState() {
     // The number is taken before asking Safari anything. Every report numbered lower
     // happened before the queries below, so the snapshot includes it; a higher-numbered one
     // may or may not be in it, and the app applies it after the snapshot.
-    const snapshotSeq = ++seq;
+    const stateSeq = ++seq;
     // And the time, on the clock the app reads (Date.now()): what Safari reports below describes
     // a moment after this, so a sidebar click made after it may not be in the snapshot.
     const startedAt = Date.now();
+    // Anything that happens from now on may be missing from what Safari answers.
+    tabsChanged = false;
     // Query tabs directly rather than windows.getAll({ populate: true }), which can
     // return windows without their tabs while Safari is still restoring them.
     const [windows, tabs] = await Promise.all([browser.windows.getAll(), browser.tabs.query({})]);
@@ -101,9 +114,7 @@ async function buildSnapshot() {
     }
 
     return {
-        type: "snapshot",
-        instance,
-        seq: snapshotSeq,
+        seq: stateSeq,
         startedAt,
         focusedWindowId,
         lastFocusedWindowId,
@@ -117,6 +128,109 @@ async function buildSnapshot() {
     };
 }
 
+// The state the app last took, with only the focus changed since: when nothing but focus has changed since
+// that state was taken, Safari isn't asked again (#81). Focus moves in every profile's copy whenever Safari
+// comes to the front or goes to the back. The tabs are as Safari reported them then, so the time stays that
+// state's: a sidebar click made since may not be in them. The number is new, as for any state: no report
+// has been sent since that state was taken (every one comes with an event that sets `tabsChanged`).
+function stateWithFocus(state) {
+    return {
+        seq: ++seq,
+        startedAt: state.startedAt,
+        focusedWindowId,
+        lastFocusedWindowId,
+        focusChangedAt,
+        windows: state.windows.map((w) => ({ ...w, focused: w.id === focusedWindowId })),
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots and changes (#81)
+//
+// The first message about the windows is a full snapshot. After that, only what changed since the last state
+// the app took goes out (`changes`), with `base`, that state's number, so the app can tell when it hasn't got
+// the state the changes are counted from, and ask for a full snapshot. A full snapshot goes out again:
+//
+// - for a `snapshot` command, and when a reply asks for one (`needSnapshot`),
+// - after a message that wasn't delivered, or whose reply was lost: the app may not have it,
+// - now and then with a change, in case the app's copy has drifted (FULL_SNAPSHOT_MS).
+//
+// When nothing changed, the changes are just the new number and time: the app still learns that Safari was as
+// it was at that time. Changes, snapshots and `activated` reports share `seq`, and the app turns changes back
+// into the snapshot they stand for, so the rules between snapshots and reports hold as they did.
+
+// The last state the app took, and each of its tabs' signatures (see tabSignature). Null until then, and
+// again after a message that wasn't delivered: the next one is a full snapshot.
+let sentState = null;
+// Set by a `snapshot` command or a reply that asks for one: the next message is a full snapshot.
+let fullSnapshotWanted = false;
+// When a full snapshot was last delivered.
+let lastFullSnapshotAt = 0;
+// How often, at most, a change goes out as a full snapshot anyway.
+const FULL_SNAPSHOT_MS = 5 * 60 * 1000;
+
+function fullSnapshot(state) {
+    return { type: "snapshot", instance, ...state };
+}
+
+// A tab as the changes compare it: everything sent about it but where it is, which its window's list of tabs
+// says. Moving or closing a tab changes no other tab.
+function tabSignature(tab) {
+    const { index, windowId, ...rest } = tab;
+    return JSON.stringify(rest);
+}
+
+function signaturesOf(state) {
+    const signatures = new Map();
+    for (const w of state.windows) for (const tab of w.tabs) signatures.set(tab.id, tabSignature(tab));
+    return signatures;
+}
+
+// What changed from `sent` (the state the app has) to `state`, as a message:
+// - `focus`: the three focus fields, if any of them changed,
+// - `windowIds`: the windows in order, if that changed (a window that's gone is left out),
+// - `windows`: each new or changed window's `focused` and `incognito`, and its `tabIds` in order if they changed,
+// - `tabs`: each new or changed tab, whole.
+// Each part is left out when nothing in it changed.
+function changesSince(sent, state) {
+    const message = { type: "changes", instance, seq: state.seq, base: sent.state.seq, startedAt: state.startedAt };
+    const before = sent.state;
+    if (state.focusedWindowId !== before.focusedWindowId || state.lastFocusedWindowId !== before.lastFocusedWindowId
+        || state.focusChangedAt !== before.focusChangedAt) {
+        message.focus = {
+            focusedWindowId: state.focusedWindowId,
+            lastFocusedWindowId: state.lastFocusedWindowId,
+            focusChangedAt: state.focusChangedAt,
+        };
+    }
+    const windowIds = state.windows.map((w) => w.id);
+    if (windowIds.join() !== before.windows.map((w) => w.id).join()) message.windowIds = windowIds;
+    const beforeWindows = new Map(before.windows.map((w) => [w.id, w]));
+    const windows = [];
+    const tabs = [];
+    for (const w of state.windows) {
+        const old = beforeWindows.get(w.id);
+        const entry = { id: w.id, focused: w.focused, incognito: w.incognito };
+        const tabIds = w.tabs.map((tab) => tab.id);
+        let changed = !old || old.focused !== w.focused || old.incognito !== w.incognito;
+        if (!old || tabIds.join() !== old.tabs.map((tab) => tab.id).join()) {
+            entry.tabIds = tabIds;
+            changed = true;
+        }
+        if (changed) windows.push(entry);
+        for (const tab of w.tabs) {
+            if (sent.signatures.get(tab.id) !== tabSignature(tab)) tabs.push(tab);
+        }
+    }
+    if (windows.length) message.windows = windows;
+    if (tabs.length) message.tabs = tabs;
+    return message;
+}
+
+function hasChanges(message) {
+    return !!(message.focus || message.windowIds || message.windows || message.tabs);
+}
+
 let sendTimer = null;
 let sendDue = 0;
 let sending = false;
@@ -125,8 +239,10 @@ let retryDelay = 250;
 let lastFlushAt = 0;
 
 // Asks for a snapshot in `delay` ms. An earlier request replaces a pending later one, so a
-// slow background refresh (see scheduleLazySnapshot) never holds up an urgent one.
-function scheduleSnapshot(delay = 30) {
+// slow background refresh (see scheduleLazySnapshot) never holds up an urgent one. `changed`: a tab or
+// window may have changed, so Safari has to be asked (see tabsChanged).
+function scheduleSnapshot(delay = 30, changed = true) {
+    if (changed) tabsChanged = true;
     const due = Date.now() + delay;
     if (sendTimer) {
         if (sendDue <= due) return;
@@ -136,13 +252,24 @@ function scheduleSnapshot(delay = 30) {
     sendTimer = setTimeout(flushSnapshot, delay);
 }
 
+// Asks for a full snapshot as soon as possible.
+function scheduleFullSnapshot() {
+    fullSnapshotWanted = true;
+    scheduleSnapshot(0, false);
+}
+
 // For changes that can wait, like a page loading in the background: every snapshot asks
 // Safari for all windows and tabs, so while pages load these are spaced out rather than
 // sent one after another, which would keep Safari busy and delay the commands that matter.
+// A window the sidebar isn't showing waits longer (#81): one that isn't focused, unless no window is
+// (Safari is in the background) and it's the one focused last, which the sidebar still shows.
 const LAZY_SNAPSHOT_MS = 250;
+const LAZY_UNFOCUSED_SNAPSHOT_MS = 1000;
 
-function scheduleLazySnapshot() {
-    scheduleSnapshot(Math.max(30, lastFlushAt + LAZY_SNAPSHOT_MS - Date.now()));
+function scheduleLazySnapshot(windowId) {
+    const shown = windowId === focusedWindowId || (focusedWindowId === WINDOW_ID_NONE && windowId === lastFocusedWindowId);
+    const spacing = shown ? LAZY_SNAPSHOT_MS : LAZY_UNFOCUSED_SNAPSHOT_MS;
+    scheduleSnapshot(Math.max(30, lastFlushAt + spacing - Date.now()));
 }
 
 async function flushSnapshot() {
@@ -154,18 +281,32 @@ async function flushSnapshot() {
     }
     sending = true;
     let delivered = false;
+    let taken = false;
     try {
-        const snapshot = await buildSnapshot();
-        const reply = await postToApp(snapshot);
+        const full = fullSnapshotWanted || !sentState;
+        fullSnapshotWanted = false;
+        const state = !full && !tabsChanged ? stateWithFocus(sentState.state) : await buildState();
+        let message = full ? fullSnapshot(state) : changesSince(sentState, state);
+        if (!full && hasChanges(message) && Date.now() - lastFullSnapshotAt >= FULL_SNAPSHOT_MS) message = fullSnapshot(state);
+        const reply = await postToApp(message);
         delivered = !!(reply && reply.appRunning);
-        if (delivered) sentSeq = snapshot.seq;
+        // A reply that asks for a snapshot says the app didn't take this (it hasn't got the state the changes
+        // are counted from), or wants a full one anyway: the reply has asked for it (handleReply).
+        taken = delivered && !reply.needSnapshot;
+        if (taken) {
+            sentSeq = state.seq;
+            sentState = { state, signatures: signaturesOf(state) };
+            if (message.type === "snapshot") lastFullSnapshotAt = Date.now();
+            sendNewIcons(state);
+        }
     } catch (error) {
         console.warn("Side Tabs: snapshot failed", error);
     } finally {
+        if (!taken) sentState = null;
         // The app may be starting up, Safari may still be restoring windows, or the reply was lost
         // (postToApp gives up waiting for it): try again.
         if (!delivered) {
-            setTimeout(() => scheduleSnapshot(0), retryDelay);
+            setTimeout(() => scheduleSnapshot(0, false), retryDelay);
             retryDelay = Math.min(retryDelay * 2, 15000);
         } else {
             retryDelay = 250;
@@ -173,7 +314,7 @@ async function flushSnapshot() {
         sending = false;
         if (resendRequested) {
             resendRequested = false;
-            scheduleSnapshot(0);
+            scheduleSnapshot(0, false);
         }
     }
 }
@@ -187,6 +328,9 @@ let heardFromApp = false;
 // lost reply can't hold up whatever comes next. A reply that turns up later goes to handleLateReply.
 function postToApp(message) {
     const sentAt = Date.now();
+    // While the app has heartbeats paused, every message says for how much longer (see "Heartbeats").
+    const pausedFor = pausedUntil - sentAt;
+    const sent = pausedFor > 0 ? { ...message, heartbeatsPausedFor: pausedFor } : message;
     return new Promise((resolve) => {
         let settled = false;
         const timer = setTimeout(() => {
@@ -197,12 +341,13 @@ function postToApp(message) {
         }, REPLY_TIME_LIMIT_MS);
         let call;
         try {
-            call = Promise.resolve(browser.runtime.sendNativeMessage(NATIVE_APP_ID, message));
+            call = Promise.resolve(browser.runtime.sendNativeMessage(NATIVE_APP_ID, sent));
         } catch (error) {
             call = Promise.reject(error);
         }
         call.then((reply) => {
             heardFromApp = true;
+            noteDelivered(reply, sentAt);
             if (settled) {
                 handleLateReply(reply, message, Date.now() - sentAt);
                 return;
@@ -227,7 +372,7 @@ function postToApp(message) {
 
 function handleReply(reply) {
     if (!reply || typeof reply !== "object") return;
-    if (reply.needSnapshot) scheduleSnapshot(0);
+    if (reply.needSnapshot) scheduleFullSnapshot();
     if (Array.isArray(reply.commands)) reply.commands.forEach((command) => runCommand(command, "reply"));
 }
 
@@ -237,7 +382,7 @@ function handleReply(reply) {
 // for a snapshot is safe at any time.
 function handleLateReply(reply, message, milliseconds) {
     noteLateReply(message, milliseconds);
-    if (reply && typeof reply === "object" && reply.needSnapshot) scheduleSnapshot(0);
+    if (reply && typeof reply === "object" && reply.needSnapshot) scheduleFullSnapshot();
 }
 
 // Sends a message that the app can safely receive twice, and sends it again, with back-off, until it's
@@ -284,6 +429,83 @@ function noteLateReply(message, milliseconds) {
 }
 
 // ---------------------------------------------------------------------------
+// Heartbeats
+//
+// The app counts a copy that has sent nothing for a while as stopped (Side Tabs turned off in its profile,
+// #31), and hides its windows. Any message shows the copy is running, so a heartbeat is only sent when
+// nothing else has been delivered for HEARTBEAT_MS: with nothing happening in Safari, one message per
+// interval, and none while snapshots and the like are going out (#80). Each heartbeat carries the last
+// snapshot the app confirmed (`sentSeq`), so the app can ask for one it doesn't have.
+//
+// While Safari is held back (the Mac asleep, the screen locked and the like) the app doesn't count silence,
+// and asks the copies to stop heartbeating (`pauseHeartbeats`). Commands can be lost, so a pause never lasts
+// past the time the app gave, by the clock (`until`) or from when it came (`ms`), whichever is sooner, nor
+// more than PAUSE_LIMIT_MS. Any other command from the app ends it: the one the app sends when the hold
+// ends (`resumeHeartbeats`), its request for a snapshot, anything. While a pause lasts, every message says
+// how much longer (`heartbeatsPausedFor`, ms), so the app knows not to count that silence, and can tell a
+// copy that missed the end of the hold to start again.
+
+const PAUSE_LIMIT_MS = 5 * 60 * 1000;
+
+// When the latest message the app answered was sent: the app heard from this copy then, at the earliest.
+let lastDeliveredAt = 0;
+// When the last heartbeat was sent, delivered or not, so one whose reply is lost isn't followed at once by
+// another. Starts now: the hello and the first snapshot go out at once anyway.
+let heartbeatSentAt = Date.now();
+// Until when the app asked for no heartbeats, and when a pause last ended early. Zero for none.
+let pausedUntil = 0;
+let resumedAt = 0;
+let heartbeatTimer = null;
+
+// A reply came, on time or late: if it's from the app, it heard the message.
+function noteDelivered(reply, sentAt) {
+    if (reply && typeof reply === "object" && reply.appRunning && sentAt > lastDeliveredAt) lastDeliveredAt = sentAt;
+}
+
+// When the next heartbeat is due, if nothing else is delivered before then.
+function nextHeartbeatAt() {
+    return Math.max(lastDeliveredAt + HEARTBEAT_MS, heartbeatSentAt + HEARTBEAT_MS, resumedAt + HEARTBEAT_MS, pausedUntil);
+}
+
+// Sets the one heartbeat timer for when the next heartbeat is due. Messages going out don't touch it: when it
+// fires early, because something was delivered meanwhile, it's set again for the new time.
+function scheduleHeartbeat() {
+    clearTimeout(heartbeatTimer);
+    heartbeatTimer = setTimeout(heartbeatTimerFired, Math.max(0, nextHeartbeatAt() - Date.now()));
+}
+
+function heartbeatTimerFired() {
+    heartbeatTimer = null;
+    // A pause the app didn't end ends on its own.
+    if (pausedUntil && Date.now() >= pausedUntil) pausedUntil = 0;
+    if (Date.now() >= nextHeartbeatAt()) sendHeartbeat();
+    scheduleHeartbeat();
+}
+
+function sendHeartbeat() {
+    heartbeatSentAt = Date.now();
+    postToApp({ type: "heartbeat", instance, seq: sentSeq });
+}
+
+// The app asked for no heartbeats until `until` (Date.now() time) and for at most `ms`, because it doesn't
+// count silence now.
+function pauseHeartbeats(until, ms) {
+    const now = Date.now();
+    const length = Math.min(Number.isFinite(ms) ? ms : PAUSE_LIMIT_MS, PAUSE_LIMIT_MS);
+    pausedUntil = Math.min(Number.isFinite(until) ? until : now + length, now + length);
+    if (pausedUntil <= now) pausedUntil = 0;
+    scheduleHeartbeat();
+}
+
+// A command from the app other than a pause: the app is counting silence again, or soon will.
+function resumeHeartbeats() {
+    if (!pausedUntil) return;
+    pausedUntil = 0;
+    resumedAt = Date.now();
+    scheduleHeartbeat();
+}
+
+// ---------------------------------------------------------------------------
 // Commands from the app
 
 // The ids of the commands run lately, each with how it came (a port's number, or "reply"). The app gives
@@ -321,11 +543,20 @@ async function runCommand(command, via = "unknown") {
     if (!command || typeof command !== "object") return;
     if (command.instance && command.instance !== instance) return;
     if (isRepeat(command, via)) return;
+    if (command.action === "pauseHeartbeats") {
+        pauseHeartbeats(command.until, command.ms);
+        return;
+    }
+    resumeHeartbeats();
 
     try {
         switch (command.action) {
+        case "resumeHeartbeats":
+            break;
+
         case "snapshot":
-            scheduleSnapshot(0);
+            // Always a full snapshot, whatever the app already has (#81).
+            scheduleFullSnapshot();
             break;
 
         case "activate":
@@ -476,10 +707,73 @@ function reconnectSoon(delay) {
 const ICON_TIMEOUT_MS = 10000;
 const ICON_MAX_BYTES = 512 * 1024;
 
+// Icons a page puts in its HTML as a `data:` URL are several KB each, and snapshots would carry them on every
+// change (#81). Snapshots carry a short name for one in its place (DATA_ICON_PREFIX and a hash of the URL), and
+// the icon itself goes to the app once, in an `icon` message under that name, as soon as the app has a state
+// with it. The app can also ask for it by that name (`fetchIcons`), as for any icon.
+const DATA_ICON_PREFIX = "sidetabs-icon:";
+// The `data:` URL behind each name given out, oldest first.
+const dataIcons = new Map();
+const DATA_ICON_LIMIT = 200;
+// The name given out for each `data:` URL in dataIcons, so a URL that's often several KB is hashed once, not
+// every time the tab list is built. The two always hold the same icons: they're only changed together.
+const dataIconNames = new Map();
+// The names whose icon has been sent to the app.
+const sentDataIcons = new Set();
+
+// The icon URL as the app is sent it: a `data:` URL's name, any other URL as it is.
+function iconForApp(url) {
+    if (typeof url !== "string" || !url.startsWith("data:")) return url;
+    const known = dataIconNames.get(url);
+    if (known) return known;
+    const name = DATA_ICON_PREFIX + hashOf(url);
+    // Another URL with the same hash keeps the name (see hashOf); this one is just hashed each time.
+    if (dataIcons.has(name)) return name;
+    dataIcons.set(name, url);
+    dataIconNames.set(url, name);
+    if (dataIcons.size > DATA_ICON_LIMIT) {
+        const [oldest, oldestURL] = dataIcons.entries().next().value;
+        dataIcons.delete(oldest);
+        dataIconNames.delete(oldestURL);
+        sentDataIcons.delete(oldest);
+    }
+    return name;
+}
+
+// A short hash of a string, as 13 or so base-36 digits (cyrb53). Two different icons getting the same one is
+// too unlikely to matter.
+function hashOf(text) {
+    let h1 = 0xdeadbeef;
+    let h2 = 0x41c6ce57;
+    for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        h1 = Math.imul(h1 ^ code, 2654435761);
+        h2 = Math.imul(h2 ^ code, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+
+// Sends the app each `data:` icon in a state it has just taken that it hasn't been sent yet.
+function sendNewIcons(state) {
+    for (const w of state.windows) {
+        for (const tab of w.tabs) {
+            const name = tab.favIconUrl;
+            if (typeof name !== "string" || !name.startsWith(DATA_ICON_PREFIX) || sentDataIcons.has(name)) continue;
+            if (!dataIcons.has(name)) continue;
+            sentDataIcons.add(name);
+            sendIcon(name);
+        }
+    }
+}
+
+// Sends the app the icon at `url`, or a `data:` icon by its name.
 async function sendIcon(url) {
     let data = null;
     try {
-        data = await fetchIcon(url);
+        const source = url.startsWith(DATA_ICON_PREFIX) ? dataIcons.get(url) : url;
+        if (source) data = await fetchIcon(source);
     } catch {
         // Unreachable, too slow, or not allowed: the app shows a letter instead.
     }
@@ -488,6 +782,12 @@ async function sendIcon(url) {
 
 // The icon as base64, or null.
 async function fetchIcon(url) {
+    // A `data:` URL that is base64 already needs no fetching.
+    const inline = /^data:[^,]*;base64,/i.exec(url);
+    if (inline) {
+        const data = url.slice(inline[0].length);
+        return data && data.length * 0.75 <= ICON_MAX_BYTES ? data : null;
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ICON_TIMEOUT_MS);
     try {
@@ -564,12 +864,12 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     }
     noteChangeKeys(changeInfo);
     if (changeMayBeShown(changeInfo)) {
-        scheduleLazySnapshot();
+        scheduleLazySnapshot(tab && tab.windowId);
     } else if (tab && shownSignature(tab) !== lastShown.get(tabId)) {
         // Only keys for changes the sidebar doesn't show, yet something it does show differs
         // from the last snapshot: Safari reported that change without its usual key.
         noteChangeKeys(changeInfo, "shown change reported only as");
-        scheduleLazySnapshot();
+        scheduleLazySnapshot(tab.windowId);
     }
 });
 
@@ -594,7 +894,11 @@ browser.windows.onFocusChanged.addListener((windowId) => {
     focusedWindowId = windowId;
     if (windowId !== WINDOW_ID_NONE) lastFocusedWindowId = windowId;
     focusChangedAt = Date.now();
-    scheduleSnapshot(0);
+    // Only the focus changed: what's sent is the state the app has with the new focus, without asking Safari
+    // for every tab again, in every profile's copy (#81). Unless the window is one that state doesn't have:
+    // Safari restores windows without telling extensions.
+    const known = windowId === WINDOW_ID_NONE || (sentState && sentState.state.windows.some((w) => w.id === windowId));
+    scheduleSnapshot(0, !known);
 });
 
 browser.runtime.onMessage.addListener((message, sender) => {
@@ -611,20 +915,75 @@ browser.browserAction.onClicked.addListener(() => {
 // ---------------------------------------------------------------------------
 // Startup
 
-async function collectExistingFavicons() {
-    // Content scripts only run on pages loaded after the extension starts, so ask
-    // the tabs that are already open for their icons.
-    const tabs = await browser.tabs.query({});
-    for (const tab of tabs) {
-        if (!tab.url || !/^https?:/.test(tab.url)) continue;
-        browser.tabs.executeScript(tab.id, { file: "content.js" }).catch(() => {});
-    }
+// The manifest's content.js only runs in pages loaded after the extension starts, so the tabs that were
+// already open are asked for their icons by injecting it. Each injection wakes that tab's web process, so
+// this waits a few seconds, by which time the pages that loaded meanwhile have run the manifest's copy and
+// reported, then injects only into tabs whose icon still hasn't come, one at a time, the focused window's
+// first. Discarded tabs are left alone: they load again when shown, and run the manifest's copy then.
+const FAVICON_SWEEP_DELAY_MS = 4000;
+// An injection Safari doesn't finish within this long doesn't hold up the next tab's.
+const INJECT_TIME_LIMIT_MS = 3000;
+// A tab still loading at the sweep runs the manifest's copy when it's done, unless its page started loading
+// before the extension did. If no icon comes this long after it finishes, it gets an injection then.
+const LOADED_ICON_WAIT_MS = 2000;
+
+// Tabs that were still loading at the sweep, until they finish.
+const awaitingLoad = new Set();
+
+function needsFaviconScript(tab) {
+    return !!tab.url && /^https?:/.test(tab.url) && !tab.discarded && !favicons.has(tab.id);
 }
+
+async function injectFaviconScript(tabId) {
+    let timer;
+    await Promise.race([
+        browser.tabs.executeScript(tabId, { file: "content.js" }).catch(() => {}),
+        new Promise((resolve) => { timer = setTimeout(resolve, INJECT_TIME_LIMIT_MS); }),
+    ]);
+    clearTimeout(timer);
+}
+
+async function collectExistingFavicons() {
+    const startedAt = Date.now();
+    const tabs = await browser.tabs.query({});
+    const web = tabs.filter((tab) => tab.url && /^https?:/.test(tab.url));
+    const reported = web.filter((tab) => favicons.has(tab.id)).length;
+    const discarded = web.filter((tab) => tab.discarded && !favicons.has(tab.id)).length;
+    const front = focusedWindowId !== WINDOW_ID_NONE ? focusedWindowId : lastFocusedWindowId;
+    // The focused window's active tab, its other tabs, then each other window's active tab, then the rest.
+    const rank = (tab) => (tab.windowId === front ? 0 : 2) + (tab.active ? 0 : 1);
+    const missing = web.filter(needsFaviconScript)
+        .sort((a, b) => rank(a) - rank(b) || a.windowId - b.windowId || a.index - b.index);
+    let loading = 0;
+    let injected = 0;
+    for (const tab of missing) {
+        if (tab.status === "loading") {
+            awaitingLoad.add(tab.id);
+            loading++;
+            continue;
+        }
+        // It may have reported while the tabs before it were injected.
+        if (favicons.has(tab.id)) continue;
+        injected++;
+        await injectFaviconScript(tab.id);
+    }
+    logToApp(`favicon sweep: ${web.length} web tabs, ${reported} had reported, ${discarded} discarded, `
+        + `${loading} still loading, injected ${injected} in ${Date.now() - startedAt} ms`);
+}
+
+browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status !== "complete" || !awaitingLoad.delete(tabId)) return;
+    setTimeout(() => {
+        if (tab && needsFaviconScript(tab)) injectFaviconScript(tabId);
+    }, LOADED_ICON_WAIT_MS);
+});
+
+browser.tabs.onRemoved.addListener((tabId) => awaitingLoad.delete(tabId));
 
 // The first message: it tells the app this copy has started, and has the extension's handler open the
 // app if it isn't running. Safari can lose the reply (see REPLY_TIME_LIMIT_MS), so it's sent again,
 // with back-off, until any message from this copy has had a reply, a few times at most. Nothing waits
-// for it: snapshots and heartbeats start at once.
+// for it: snapshots start at once, and heartbeats run as usual.
 const HELLO_RETRIES = 5;
 
 async function sayHello(attempt = 0) {
@@ -659,7 +1018,7 @@ function refreshAfterStart() {
     sayHello();
     scheduleSnapshot(0);
     for (const delay of STARTUP_REFRESH_MS) setTimeout(refreshAfterStart, delay);
-    collectExistingFavicons().catch(() => {});
+    setTimeout(() => collectExistingFavicons().catch(() => {}), FAVICON_SWEEP_DELAY_MS);
 
-    setInterval(() => postToApp({ type: "heartbeat", instance, seq: sentSeq }), HEARTBEAT_MS);
+    scheduleHeartbeat();
 })();

@@ -613,6 +613,249 @@ do {
     check(poll(&reveal, overPage) == .none && reveal.isRevealed, "brought out with the shortcut, it waits for a new visit")
 }
 
+// MARK: - Watching the pointer (#79)
+
+do {
+    // Only while there's an overlay and Safari is in front: with another app in front, nothing is watched.
+    check(OverlayReveal.watchesPointer(overlay: true, safariInFront: true), "an overlay over Safari in front is watched")
+    check(!OverlayReveal.watchesPointer(overlay: true, safariInFront: false), "with another app in front, the pointer isn't watched")
+    check(!OverlayReveal.watchesPointer(overlay: false, safariInFront: true), "nor while the sidebar is docked or hidden")
+    check(!OverlayReveal.watchesPointer(overlay: false, safariInFront: false), "nor with neither")
+}
+
+do {
+    // While the sidebar is away, a movement off the strip is passed over with one rectangle check.
+    var reveal = OverlayReveal()
+    check(!reveal.needsLook(at: overPage, strip: layout.strip), "away: a movement over the page needs no look")
+    check(!reveal.needsLook(at: overPanel, strip: layout.strip), "nor one where the panel would be")
+    check(reveal.needsLook(at: onStrip, strip: layout.strip), "one on the strip does")
+    let corners = [
+        CGPoint(x: layout.strip.minX, y: layout.strip.minY), CGPoint(x: layout.strip.maxX, y: layout.strip.maxY),
+    ]
+    check(corners.allSatisfy { reveal.needsLook(at: $0, strip: layout.strip) }, "the strip's edges count, as they do for coming out")
+    check(!reveal.needsLook(at: CGPoint(x: layout.strip.minX - 1, y: 400), strip: layout.strip), "just left of the strip doesn't")
+    check(!reveal.needsLook(at: CGPoint(x: 300, y: layout.strip.maxY + 1), strip: layout.strip), "nor just above it, by Safari's toolbar")
+    _ = poll(&reveal, onStrip)
+    check([overPage, overPanel, nearPanel, onStrip].allSatisfy { reveal.needsLook(at: $0, strip: layout.strip) },
+          "out: every movement is a look, so leaving it puts it away")
+    _ = poll(&reveal, overPage)
+    check(!reveal.needsLook(at: overPage, strip: layout.strip), "and once it's away again, the page needs none")
+    _ = reveal.toggle()
+    check(reveal.needsLook(at: overPage, strip: layout.strip), "brought out with the shortcut, every movement is a look too")
+}
+
+do {
+    // Passing a movement over never changes what happens: wherever needsLook says no, a look with Safari in
+    // front, held or not, does nothing, asks none of the slow checks and leaves the state as it was. Checked
+    // over a grid across the window and past its edges, from each state the sidebar can be away in.
+    var away: [(String, OverlayReveal)] = [("never out", OverlayReveal())]
+    var concealed = OverlayReveal()
+    _ = poll(&concealed, onStrip)
+    _ = poll(&concealed, overPage)
+    away.append(("put away by the pointer", concealed))
+    var toggledAway = OverlayReveal()
+    _ = toggledAway.toggle()
+    _ = toggledAway.toggle()
+    away.append(("put away with the shortcut", toggledAway))
+    var leftSafari = OverlayReveal()
+    _ = poll(&leftSafari, onStrip)
+    _ = poll(&leftSafari, overPanel, front: false)
+    away.append(("put away when Safari left the front", leftSafari))
+
+    var passedOver = 0
+    var wrong: [String] = []
+    for (name, start) in away {
+        for x in stride(from: window.minX - 40, through: window.maxX + 40, by: 3) {
+            for y in stride(from: window.minY - 40, through: window.maxY + 40, by: 7) {
+                let point = CGPoint(x: x, y: y)
+                guard !start.needsLook(at: point, strip: layout.strip) else { continue }
+                passedOver += 1
+                for holding in [false, true] {
+                    var reveal = start
+                    var asked = false
+                    let action = poll(&reveal, point, holding: holding) { asked = true; return true }
+                    if action != .none || reveal != start || asked {
+                        wrong.append("\(name) at \(point), holding \(holding)")
+                    }
+                }
+            }
+        }
+    }
+    check(passedOver > 1000, "the grid passes over most points: \(passedOver)")
+    check(wrong.isEmpty, "a movement passed over is one a look would have ignored: \(wrong.prefix(3))")
+}
+
+do {
+    // The handler's way (needsLook, then a look) gives the same actions as looking at every movement, along
+    // paths that come out at the edge, cross the sidebar, leave it, and come back while held.
+    let paths: [[(CGPoint, Bool)]] = [
+        [(overPage, false), (overPanel, false), (onStrip, false), (overPanel, false), (nearPanel, false), (overPage, false), (overPage, false)],
+        [(onStrip, false), (overPage, true), (overPage, true), (overPage, false), (onStrip, true), (overPanel, true), (overPage, false)],
+        [(overPanel, false), (overPage, false), (onStrip, false), (onStrip, false), (overPage, false), (onStrip, false)],
+    ]
+    for (index, path) in paths.enumerated() {
+        var everyMove = OverlayReveal()
+        var gated = OverlayReveal()
+        var same = true
+        for (point, holding) in path {
+            let expected = poll(&everyMove, point, holding: holding)
+            let actual = gated.needsLook(at: point, strip: layout.strip) ? poll(&gated, point, holding: holding) : .none
+            same = same && expected == actual && everyMove == gated
+        }
+        check(same, "path \(index + 1): passing movements over changes nothing")
+    }
+}
+
+do {
+    // The moments with no movement, each one look.
+    var reveal = OverlayReveal()
+    _ = poll(&reveal, onStrip)
+    check(poll(&reveal, overPage, front: false) == .conceal, "Safari leaving the front: the last look puts the sidebar away")
+    check(poll(&reveal, onStrip) == .reveal, "Safari back in front with the pointer resting on the strip: the look brings it out")
+
+    // A drag, held button or menu that ends with the pointer still and away from the sidebar.
+    check(poll(&reveal, overPage, holding: true) == .none && reveal.isRevealed, "held out until the button comes up")
+    check(poll(&reveal, overPage) == .conceal, "the mouse-up's look puts it away, with the pointer still")
+
+    // A rename that ends with the pointer away from the sidebar, as with Return.
+    _ = poll(&reveal, onStrip)
+    _ = poll(&reveal, overPanel)
+    check(poll(&reveal, overPage, holding: true) == .none, "renaming keeps it out")
+    check(poll(&reveal, overPage) == .conceal, "and the look when the rename ends puts it away")
+
+    // The overlay starting, or the layout done again, with the pointer still.
+    var started = OverlayReveal()
+    check(poll(&started, overPage) == .none && !started.isRevealed, "starting with the pointer over the page: nothing")
+    var atEdge = OverlayReveal()
+    check(poll(&atEdge, onStrip) == .reveal, "starting with the pointer already at the edge: out at once")
+    var pinned = OverlayReveal()
+    _ = pinned.toggle()
+    check(poll(&pinned, overPage) == .none && pinned.isRevealed, "a look after the shortcut doesn't put it away before a visit")
+}
+
+// MARK: - Reading Safari's bars again (#78 review)
+
+// Reading the bars is 10 to 15 round trips to Safari's main thread. A look reads them only while the sidebar is
+// out; while it's away, it comes out at once at the last layout, and the bars are read as the pointer nears the
+// edge and right after it comes out.
+
+do {
+    check(!OverlayBars.lookReadsBars(revealed: false), "a look while the sidebar is away doesn't read the bars")
+    check(OverlayBars.lookReadsBars(revealed: true), "a look while it's out does, so a change is fixed within about a second")
+}
+
+do {
+    // What the reader does with a read that wasn't asked for the bars (a look while the sidebar is away).
+    let normal = BarsBasis(frame: CGRect(x: 300, y: 100, width: 1000, height: 700), isFullScreen: false)
+    let full = BarsBasis(frame: CGRect(x: 0, y: 0, width: 1512, height: 982), isFullScreen: true)
+    func reads(wanted: Bool = true, asked: Bool = false, _ basis: BarsBasis?, last: BarsBasis?) -> Bool {
+        SafariBars.readsAgain(wanted: wanted, asked: asked, basis: basis, lastRead: last)
+    }
+    check(!reads(full, last: full), "away, nothing changed: the bars aren't read, and what was read is kept")
+    check(reads(asked: true, full, last: full), "asked (a window event, the sidebar coming out, the pointer nearing the edge, a look while out): read")
+    check(reads(full, last: nil), "never read for this window, or the last read didn't finish: read")
+    check(reads(full, last: normal), "entering full screen finishing after the last event: read")
+    check(reads(normal, last: full), "leaving full screen while away, with the sidebar hiding automatically: read")
+    var moved = full
+    moved.frame.size.height -= 30
+    check(reads(moved, last: full), "the window changed size since: read")
+    check(!reads(wanted: false, asked: true, normal, last: nil), "a docked window's bars are never read")
+    check(!reads(asked: true, nil, last: full), "nor without a frame to measure them against")
+
+    // Entering full screen: the event's read comes mid-animation, the first look after it finishes reads them
+    // again, and then they're left alone.
+    let midway = BarsBasis(frame: CGRect(x: 40, y: 30, width: 1400, height: 900), isFullScreen: true)
+    var last: BarsBasis? = nil
+    var readCount = 0
+    for (basis, asked) in [(midway, true), (full, false), (full, false), (full, false)] where reads(asked: asked, basis, last: last) {
+        last = basis
+        readCount += 1
+    }
+    check(readCount == 2 && last == full, "entering full screen: read at the event and once more when it settles, then not again: \(readCount)")
+}
+
+do {
+    // Full screen, with Safari's toolbar slid away at the last read; then the pointer at the top of the screen
+    // slides it down, and the Favourites bar under it: the bars now end 97 points down.
+    let screen = laptop
+    let stale = OverlayLayout.fullScreen(screen: screen, toolbarBottom: nil, mainHeight: laptop.height, width: 260)
+    let fresh = OverlayLayout.fullScreen(screen: screen, toolbarBottom: 97, mainHeight: laptop.height, width: 260)
+    check(stale != fresh && stale.strip.maxY > fresh.strip.maxY, "the bars decide the strip's top: \(stale.strip.maxY) vs \(fresh.strip.maxY)")
+
+    // The pointer on the strip brings it out at once at the last layout; nothing waits for a read.
+    var reveal = OverlayReveal()
+    var bars = OverlayBars()
+    let atEdge = CGPoint(x: 0, y: 400)
+    check(reveal.poll(pointer: atEdge, strip: stale.strip, panel: stale.panel, safariInFront: true, holding: false) == .reveal,
+          "the pointer on the strip brings it out at once, at the last layout")
+    check(bars.revealed(now: 100), "then the bars are read fresh")
+    check(fresh != stale, "and the panel moves below them, since the layout changed")
+    // So does the shortcut.
+    var pinned = OverlayReveal()
+    var pinnedBars = OverlayBars()
+    check(pinned.toggle() == .reveal && pinnedBars.revealed(now: 0), "the shortcut brings it out at once too, and the bars are read after")
+
+    // Beside the toolbar that slid down: the stale strip reaches there, the fresh one doesn't. So the pointer has
+    // to have brought a fresh read before it gets there: the approach covers it and everything around it.
+    let besideToolbar = CGPoint(x: 0, y: laptop.height - 80)
+    check(stale.strip.contains(besideToolbar) && !fresh.strip.contains(besideToolbar), "beside the slid-down toolbar is on the stale strip only")
+    for layout in [stale, fresh] {
+        for y in stride(from: layout.strip.minY, through: layout.strip.maxY, by: 5) {
+            for x in [layout.strip.minX, layout.strip.maxX] where !layout.approach.contains(CGPoint(x: x, y: y)) {
+                check(false, "the strip at (\(x), \(y)) is inside the approach")
+            }
+        }
+    }
+    check(stale.approach.contains(CGPoint(x: 10, y: laptop.height - 0.5)), "the approach reaches the top of the screen, where the toolbar slides down from")
+    check(stale.approach.maxX >= stale.strip.maxX + OverlayLayout.approachDistance, "and \(OverlayLayout.approachDistance) points into the page")
+    check(!stale.approach.contains(CGPoint(x: 400, y: 400)), "not the middle of the page")
+
+    // Coming from the page to the edge, the read starts well before the pointer gets there, once.
+    var approaching = OverlayBars()
+    var readsAt: [CGFloat] = []
+    for x in stride(from: 900, through: 0, by: -20) {
+        if approaching.pointerMoved(to: CGPoint(x: CGFloat(x), y: laptop.height - 80), approach: stale.approach, now: 10 + Double(900 - x) / 3000) {
+            readsAt.append(CGFloat(x))
+        }
+    }
+    check(readsAt.count == 1, "one read on the way in: \(readsAt)")
+    check((readsAt.first ?? 0) >= stale.strip.maxX + 120, "started at least 120 points from the edge: \(readsAt)")
+
+    // Bars that shrank (the find bar closed): the stale strip stops short of the edge's top, the fresh one
+    // doesn't; the approach covers the gap, so the read is made before the pointer gets there.
+    let shrunkStale = OverlayLayout.fullScreen(screen: screen, toolbarBottom: 140, mainHeight: laptop.height, width: 260)
+    let shrunkFresh = OverlayLayout.fullScreen(screen: screen, toolbarBottom: 97, mainHeight: laptop.height, width: 260)
+    let inGap = CGPoint(x: 0, y: laptop.height - 120)
+    check(!shrunkStale.strip.contains(inGap) && shrunkFresh.strip.contains(inGap), "below the bars that went: on the fresh strip only")
+    check(shrunkStale.approach.contains(inGap), "and inside the stale approach, so the edge isn't missed")
+}
+
+do {
+    // A normal window with the sidebar hiding automatically: the same, up to the window's top.
+    let windowLayout = OverlayLayout.window(frame: window, visible: visible, toolbarBottom: windowTopAX + 52, mainHeight: laptop.height, width: 260)
+    check(windowLayout.approach.contains(CGPoint(x: window.minX + 2, y: window.maxY - 0.5)), "a window's approach reaches its top")
+    check(windowLayout.approach.contains(CGPoint(x: windowLayout.strip.minX, y: windowLayout.strip.minY))
+          && windowLayout.approach.contains(CGPoint(x: windowLayout.strip.maxX, y: windowLayout.strip.maxY)), "and covers its strip, edges included")
+    check(!windowLayout.approach.contains(CGPoint(x: window.midX, y: window.midY)), "not the middle of the page")
+}
+
+do {
+    // Coming near again: once per arrival, and not again within a second of the last read.
+    let approach = layout.approach
+    let near = CGPoint(x: layout.strip.maxX + 50, y: 400)
+    var bars = OverlayBars()
+    check(!bars.pointerMoved(to: overPage, approach: approach, now: 0), "over the page: no read")
+    check(bars.pointerMoved(to: near, approach: approach, now: 1), "coming near the strip: a read")
+    check(!bars.pointerMoved(to: CGPoint(x: near.x - 20, y: 380), approach: approach, now: 1.2), "moving about near it: no more")
+    check(!bars.pointerMoved(to: overPage, approach: approach, now: 1.4), "leaving: none")
+    check(!bars.pointerMoved(to: near, approach: approach, now: 1.6), "back within a second: none")
+    _ = bars.pointerMoved(to: overPage, approach: approach, now: 3)
+    check(bars.pointerMoved(to: near, approach: approach, now: 3.2), "back later: a read")
+    _ = bars.pointerMoved(to: overPage, approach: approach, now: 4)
+    _ = bars.revealed(now: 5)
+    check(!bars.pointerMoved(to: near, approach: approach, now: 5.5), "coming near just after a read for coming out: none")
+}
+
 if failures == 0 {
     print("sidebar overlay checks passed")
 } else {

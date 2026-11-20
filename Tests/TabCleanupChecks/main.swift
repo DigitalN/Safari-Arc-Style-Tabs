@@ -593,7 +593,7 @@ do {
     ]))
     ahead = 20
     send(store, ["type": "heartbeat", "instance": "A", "profile": "home", "seq": 1])
-    ahead = 31
+    ahead = CopySilence.allowance + 1
     store.noteQuietCopies()
     check(store.liveInstances == ["A"], "B, the work profile's copy, is quiet")
 

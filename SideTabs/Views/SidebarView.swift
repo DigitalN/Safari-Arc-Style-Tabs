@@ -7,6 +7,7 @@ struct SidebarView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(SidebarSwipe.self) private var swipe
     @State private var showsClosedTabs = false
+    @State private var tabLoading = TabLoading()
 
     var body: some View {
         let closedTabsShown = showsClosedTabs && settings.closesUnviewedTabs
@@ -28,6 +29,9 @@ struct SidebarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: closedTabsShown, initial: true) { swipe.isBlocked = closedTabsShown }
+        // The panel is ordered out when it hides, never torn down; spinners go by this (#83).
+        .tracksWindowVisibility()
+        .environment(\.tabLoading, tabLoading)
     }
 }
 
@@ -571,9 +575,18 @@ private struct WebsiteAccessBanner: View {
 
 private struct EmptySidebar: View {
     @Environment(TabStore.self) private var store
+    @Environment(\.windowIsOnScreen) private var windowIsOnScreen
     /// nil until Safari answers; checked rather than inferred from silence, because the
     /// extension is quiet for a few seconds whenever Safari or Side Tabs restarts.
     @State private var extensionEnabled: Bool?
+    /// The spinner has had its time (`TabLoading.spinnerFor`) since the text changed or the sidebar came on screen.
+    @State private var spinnerDone = false
+
+    /// What starts the spinner's time again.
+    private struct SpinnerPhase: Equatable {
+        let connected: Bool
+        let onScreen: Bool
+    }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -591,19 +604,48 @@ private struct EmptySidebar: View {
                     Permissions.openExtensionSettings()
                 }
             } else {
-                ProgressView()
-                    .controlSize(.small)
+                // Only for a while, and never in a hidden or covered sidebar: this shows for as long as Safari is
+                // quit, and a spinner redraws the panel at the display's rate (#83).
+                if windowIsOnScreen && !spinnerDone {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Color.clear
+                        .frame(width: 16, height: 16)
+                }
                 Text(store.isConnected ? "Loading tabs…" : "Connecting to Safari…")
                     .font(.headline)
             }
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task {
-            while !Task.isCancelled {
-                extensionEnabled = await Permissions.extensionEnabled()
-                try? await Task.sleep(for: .seconds(2))
+        // Whether the extension is on, asked of Safari when this appears and again when something could have
+        // changed it: Safari launching or coming to the front, the extension starting or stopping to speak. Never
+        // on a timer, because this also shows in the hidden sidebar for as long as Safari is quit (#83).
+        .task { await checkExtension() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didLaunchApplicationNotification)) {
+            if Self.isSafari($0) { Task { await checkExtension() } }
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)) {
+            if Self.isSafari($0) { Task { await checkExtension() } }
+        }
+        .onChange(of: store.isConnected) { Task { await checkExtension() } }
+        .task(id: SpinnerPhase(connected: store.isConnected, onScreen: windowIsOnScreen)) {
+            spinnerDone = false
+            guard windowIsOnScreen else { return }
+            try? await Task.sleep(for: .seconds(TabLoading.spinnerFor))
+            if !Task.isCancelled {
+                spinnerDone = true
             }
         }
+    }
+
+    private func checkExtension() async {
+        extensionEnabled = await Permissions.extensionEnabled()
+    }
+
+    private static func isSafari(_ note: Notification) -> Bool {
+        let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        return app?.bundleIdentifier == SafariTracker.safariBundleID
     }
 }

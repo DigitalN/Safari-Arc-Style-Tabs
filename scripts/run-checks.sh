@@ -15,6 +15,10 @@ echo "== background.js"
 node --check WebExtension/background.js
 node Tests/ExtensionChecks/background-checks.js
 
+echo "== content.js"
+node --check WebExtension/content.js
+node Tests/ExtensionChecks/content-checks.js
+
 # The store checks give each TabStore a state file in a temporary folder, so nothing here
 # reads or writes the real one in ~/Library/Application Support/Side Tabs.
 echo "== TabStore"
@@ -59,6 +63,19 @@ echo "== row hit testing"
 swiftc -o "$WORK/row-hit-checks" Tests/RowHitChecks/main.swift SideTabs/RowHitTesting.swift SideTabs/Models.swift
 "$WORK/row-hit-checks"
 
+# When a tab's loading spinner shows: its first 10 s of loading, kept across rows made again, and fresh when it
+# loads again (#83).
+echo "== loading spinners"
+swiftc -o "$WORK/tab-loading-checks" Tests/TabLoadingChecks/main.swift SideTabs/TabLoading.swift SideTabs/Models.swift
+"$WORK/tab-loading-checks"
+
+# The favicons kept (#83): downsampled to FaviconStore.pixelSize, from the best size in an ICO, SVGs too; each URL
+# observed on its own; and only so many that no view shows, least recently used first. Compiled main-actor by
+# default, as the app is.
+echo "== favicons"
+swiftc -default-isolation MainActor -o "$WORK/favicon-checks" Tests/FaviconChecks/main.swift SideTabs/FaviconStore.swift
+"$WORK/favicon-checks"
+
 echo "== row press"
 swiftc -o "$WORK/row-press-checks" Tests/RowPressChecks/main.swift SideTabs/RowPress.swift
 "$WORK/row-press-checks"
@@ -75,10 +92,33 @@ echo "== update control"
 swiftc -o "$WORK/update-control-checks" Tests/UpdateControlChecks/main.swift SideTabs/UpdateControl.swift
 "$WORK/update-control-checks"
 
+# When the dock looks again at Safari's window for changes macOS doesn't announce (#78): never with the sidebar
+# off, Safari not running, Safari behind another app, or while something holds Safari back (asleep, the screen
+# locked and the like); and often enough while it's in front that each case is caught within about two seconds.
+# With the timer's tolerance.
+echo "== looking again at Safari's window"
+swiftc -o "$WORK/health-check-checks" Tests/HealthCheckChecks/main.swift SideTabs/HealthCheck.swift SideTabs/CopySilence.swift
+"$WORK/health-check-checks"
+# The reader's queue is at .utility for the dock's periodic looks. Anything else sent to it is something the user
+# waits on and has to raise itself to .userInitiated, or it runs on the efficiency cores behind a look.
+if grep -nE 'reader\.queue\.async *(\{|\(execute)' SideTabs/SafariTracker.swift; then
+    echo "FAIL: a read of Safari's windows is sent at the queue's .utility; use qos: .userInitiated, flags: .enforceQoS"
+    exit 1
+fi
+echo "reads the user waits on are .userInitiated"
+
 echo "== docked window notifications"
 swiftc -o "$WORK/docked-window-checks" Tests/DockedWindowChecks/main.swift SideTabs/DockedWindowNotifications.swift
 "$WORK/docked-window-checks"
 
+# Dragging Safari's window moves the docked sidebar without working its shadow out again, and without
+# checking or redoing its order behind Safari's window until the drag settles (#85).
+echo "== docked panel"
+swiftc -o "$WORK/docked-panel-checks" Tests/DockedPanelChecks/main.swift SideTabs/DockedPanelRules.swift
+"$WORK/docked-panel-checks"
+
+# Also when the overlay reads Safari's bars again (#78 review): not on looks while it's away; at once out at the last
+# layout, then a fresh read; and as the pointer nears the edge, so a strip whose top moved isn't followed.
 echo "== sidebar overlay"
 swiftc -o "$WORK/overlay-checks" Tests/SidebarOverlayChecks/main.swift SideTabs/SidebarOverlay.swift \
     SideTabs/SafariBars.swift SideTabs/TabBarFinder.swift SideTabs/TabBarMatcher.swift
@@ -138,7 +178,9 @@ swiftc -o "$WORK/unseen-checks" \
 # A click on Safari's Dock icon (#42): Safari's item found in the Dock's tree by its bundle, never its
 # title or a minimized window's tile, wherever the Dock is; and only a plain click on it counts, not a
 # press held long enough for the icon's menu, a choice in that menu, a drag, or a press that starts or
-# ends elsewhere. Against constructed trees in Tests/DockIconChecks/trees.
+# ends elsewhere. And the Dock is only asked about presses in its strip along the screen's edge or near
+# where Safari's icon was, never every click on the screen (#85). Against constructed trees in
+# Tests/DockIconChecks/trees.
 echo "== Dock icon"
 swiftc -o "$WORK/dock-icon-checks" \
     Tests/DockIconChecks/main.swift SideTabs/SafariDockIconWatcher.swift SideTabs/AccessibilityQuery.swift Shared/Bridge.swift
@@ -158,6 +200,14 @@ echo "no commands in replies"
 # A row has one mouse gesture, the one sidebarRowGesture attaches. A press gesture of its own,
 # inside the reorder gesture, wins every press and the reorder never starts (#20).
 # How the favorites' grid lays out tiles, at every width SwiftUI proposes (#34).
+# The extension's way to the app: the port kept between messages, messages sent at once, a stalled app, and
+# the app quitting and relaunching (#84). Against a stand-in port with a name of its own, never the app's.
+# Compiled as the extension target is: Swift 5, nonisolated by default.
+echo "== app port"
+swiftc -swift-version 5 -target arm64-apple-macosx26.0 -o "$WORK/app-port-checks" \
+    Tests/AppPortChecks/main.swift SideTabsExtension/SafariWebExtensionHandler.swift Shared/Bridge.swift
+"$WORK/app-port-checks"
+
 echo "== tile grid"
 swiftc -o "$WORK/tile-grid-checks" Tests/TileGridChecks/main.swift SideTabs/TileGridMetrics.swift
 "$WORK/tile-grid-checks"

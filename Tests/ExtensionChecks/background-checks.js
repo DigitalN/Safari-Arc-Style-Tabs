@@ -29,13 +29,23 @@ const HANG = Symbol("hang");
 // a snapshot build overlap with other events. `reply(message, count)` answers each native message
 // (`count` messages so far, this one included): a reply, a promise of one (to answer late), or HANG.
 // `timeScale` shortens every timer background.js sets, so a check of its 4 s time limit doesn't take
-// seconds. `hangLastFocused` makes windows.getLastFocused never answer. Heartbeats don't run by
-// themselves; `heartbeat()` sends one as the timer would. `ports` are the ports background.js connected
+// seconds. `hangLastFocused` makes windows.getLastFocused never answer. `heartbeat()` sends a heartbeat
+// as the heartbeat timer does when one is due. With `manualTime`, background.js's clock (Date.now) and its
+// timers are the checks' own: time stands still until `advance(ms)` moves it, running each timer that comes
+// due on the way. `ports` are the ports background.js connected
 // for the app's commands, oldest first: `deliver(command)` sends one through a port as Safari would, and
 // `drop()` has Safari report it disconnected. The first `connectFails` attempts to connect throw.
 // `quiet` keeps background.js's warnings out of the output, for a check that expects them.
-function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true }), timeScale = 1, hangLastFocused = false, connectFails = 0, quiet = false } = {}) {
+// `tabList` replaces the tabs with these (each needs an id and a windowId), and `lastFocused` is the window
+// Safari says was focused last. `injected` lists the tabs.executeScript calls, and `inject(tabId)` answers
+// each one: a promise to finish later, or HANG.
+function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true }), timeScale = 1, hangLastFocused = false, connectFails = 0, quiet = false,
+    tabList = null, lastFocused = 1, inject = () => undefined, manualTime = false } = {}) {
+    const clock = { now: 1_000_000, timers: [], nextId: 1 };
+    const now = () => (manualTime ? clock.now : Date.now());
     const sent = [];
+    let queries = 0;
+    const injected = [];
     const updates = [];
     const created = [];
     const windowUpdates = [];
@@ -44,21 +54,25 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
     const ports = [];
     const listeners = {};
     const event = (name) => ({ addListener: (fn) => (listeners[name] ||= []).push(fn) });
-    const tabs = Array.from({ length: tabCount }, (_, i) => ({
+    const tabs = tabList ? tabList.map((tab) => ({ title: `Tab ${tab.id}`, url: `https://example.com/${tab.id}`, ...tab })) : Array.from({ length: tabCount }, (_, i) => ({
         id: i + 1, windowId: 1, index: i, title: `Tab ${i + 1}`, url: `https://example.com/${i + 1}`, active: i === 0,
     }));
     const browser = {
         windows: {
             WINDOW_ID_NONE: -1,
             getAll: async () => [{ id: 1, focused: true }],
-            getLastFocused: () => (hangLastFocused ? new Promise(() => {}) : Promise.resolve({ id: 1, focused: true })),
+            getLastFocused: () => (hangLastFocused ? new Promise(() => {}) : Promise.resolve({ id: lastFocused, focused: true })),
             update: async (id, props) => { windowUpdates.push({ id, props }); return { id, ...props }; },
             create: async (props) => { windowsCreated.push(props); return { id: 9, focused: !!props.focused, tabs: [{ id: 900, windowId: 9 }] }; },
             onCreated: event("windows.created"), onRemoved: event("windows.removed"), onFocusChanged: event("windows.focus"),
         },
         tabs: {
-            query: async () => { await sleep(queryDelay); return tabs.map((tab) => ({ ...tab })); },
-            executeScript: async () => {},
+            query: async () => { queries++; await sleep(queryDelay); return tabs.map((tab) => ({ ...tab })); },
+            executeScript: (tabId, details) => {
+                injected.push({ at: now(), tabId, file: details.file });
+                const answer = inject(tabId);
+                return answer === HANG ? new Promise(() => {}) : Promise.resolve(answer);
+            },
             update: async (id, props) => { updates.push({ id, props }); return { ...tabs[id - 1], ...props }; },
             create: async (props) => { created.push(props); return { id: 100 + created.length, windowId: props.windowId ?? 1, index: 0, url: props.url }; },
             onCreated: event("created"), onActivated: event("activated"), onMoved: event("moved"),
@@ -68,7 +82,7 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
         runtime: {
             sendNativeMessage: (id, message) => {
                 const copy = JSON.parse(JSON.stringify(message));
-                sent.push({ at: Date.now(), message: copy });
+                sent.push({ at: now(), message: copy });
                 const answer = reply(copy, sent.length);
                 return answer === HANG ? new Promise(() => {}) : Promise.resolve(answer);
             },
@@ -97,21 +111,55 @@ function load({ queryDelay = 20, tabCount = 5, reply = () => ({ appRunning: true
     // background.js, run through BACKGROUND_JS, has no refreshAfterStart: there they're told by delay.)
     const startupRefresh = (fn, ms) => (context.refreshAfterStart ? fn === context.refreshAfterStart : [1000, 3000, 6000].includes(ms));
     const timer = (fn, ms, ...args) => (startupRefresh(fn, ms) ? 0 : setTimeout(fn, (ms ?? 0) * timeScale, ...args));
+    const manualTimer = (fn, ms, ...args) => {
+        if (startupRefresh(fn, ms)) return 0;
+        const id = clock.nextId++;
+        clock.timers.push({ id, at: clock.now + Math.max(0, ms ?? 0), fn, args });
+        return id;
+    };
+    const manualClear = (id) => {
+        clock.timers = clock.timers.filter((entry) => entry.id !== id);
+    };
     const context = vm.createContext({
-        browser, console: quiet ? { ...console, warn: () => {} } : console, setTimeout: timer, clearTimeout,
+        browser, console: quiet ? { ...console, warn: () => {} } : console,
+        setTimeout: manualTime ? manualTimer : timer, clearTimeout: manualTime ? manualClear : clearTimeout,
         setInterval: (fn, ms) => intervals.push({ fn, ms }), crypto: { randomUUID: () => "test-instance" },
-        URL, fetch: async () => ({}), AbortController, FileReader: class {}, Date, Math,
+        URL, fetch: async () => ({}), AbortController, FileReader: class {}, Date: manualTime ? { now: () => clock.now } : Date, Math,
     });
     vm.runInContext(source.replace('"use strict";', ""), context);
     const fire = (name, ...args) => (listeners[name] || []).forEach((fn) => fn(...args));
     const ofType = (type) => sent.filter((entry) => entry.message.type === type).map((entry) => entry.message);
+    // The messages about the windows: full snapshots, and the changes since the last one (#81).
+    const states = () => sent.filter((entry) => isState(entry.message)).map((entry) => entry.message);
     // Carries out a command from the app, as the port or a reply would deliver it.
     const run = (command) => context.runCommand({ instance: "test-instance", ...command });
-    const heartbeat = () => intervals.filter((entry) => entry.ms === 5000).forEach((entry) => entry.fn());
+    // (A background.js older than #80 sends them from a 5 s setInterval instead.)
+    const heartbeat = () => (context.sendHeartbeat ? context.sendHeartbeat() : intervals.filter((entry) => entry.ms === 5000).forEach((entry) => entry.fn()));
     // Reads one of background.js's top-level variables.
     const state = (name) => vm.runInContext(name, context);
-    return { sent, tabs, updates, created, windowUpdates, windowsCreated, intervals, ports, fire, ofType, run, heartbeat, state };
+    // How many times Safari was asked for every tab.
+    const queryCount = () => queries;
+    // Moves the manual clock on by `ms`, running the timers that come due, in order, and letting what they
+    // start (replies, snapshots) finish in between.
+    const settle = () => sleep(queryDelay + 2);
+    const advance = async (ms) => {
+        const end = clock.now + ms;
+        for (;;) {
+            await settle();
+            clock.timers.sort((a, b) => a.at - b.at || a.id - b.id);
+            const next = clock.timers[0];
+            if (!next || next.at > end) break;
+            clock.timers.shift();
+            clock.now = Math.max(clock.now, next.at);
+            next.fn(...next.args);
+        }
+        clock.now = end;
+        await settle();
+    };
+    return { sent, tabs, updates, created, windowUpdates, windowsCreated, intervals, ports, injected, fire, ofType, states, run, heartbeat, state, queryCount, advance, now };
 }
+
+const isState = (message) => message.type === "snapshot" || message.type === "changes";
 
 // Waits for the first startup snapshot and forgets what was sent so far.
 async function settled(page) {
@@ -132,7 +180,7 @@ async function settled(page) {
         check(reports.length === 2, "each activation is reported");
         check(reports.every((report) => Number.isInteger(report.seq)), "activated reports carry a seq");
         check(reports[0].seq < reports[1].seq, "activated reports are numbered in the order they happened");
-        const snapshots = page.ofType("snapshot");
+        const snapshots = page.states();
         check(snapshots.length >= 1, "a snapshot follows an activation");
         const numbers = [...reports, ...snapshots].map((message) => message.seq);
         check(new Set(numbers).size === numbers.length, "snapshots and reports never reuse a number");
@@ -144,16 +192,16 @@ async function settled(page) {
         const page = load({ queryDelay: 60 });
         await settled(page);
 
-        page.fire("windows.focus", 1);               // starts a snapshot build (60 ms query)
+        page.run({ action: "snapshot" });            // starts a snapshot build (60 ms query)
         await sleep(10);
         page.fire("activated", { tabId: 2, windowId: 1 });
         await sleep(400);
         const report = page.ofType("activated")[0];
-        const first = page.ofType("snapshot")[0];
+        const first = page.states()[0];
         check(report && first, "both a report and a snapshot were sent");
         if (report && first) {
             check(first.seq < report.seq, "a snapshot started before an activation is numbered before it");
-            const later = page.ofType("snapshot").find((snapshot) => snapshot.seq > report.seq);
+            const later = page.states().find((snapshot) => snapshot.seq > report.seq);
             check(!!later, "the snapshot the activation asks for is numbered after it");
         }
     }
@@ -165,7 +213,7 @@ async function settled(page) {
         await settled(page);
         page.fire("activated", { tabId: 2, windowId: 1 });
         await sleep(200);
-        const snapshots = page.ofType("snapshot");
+        const snapshots = page.states();
         check(snapshots.every((snapshot, i) => i === 0 || snapshot.seq > snapshots[i - 1].seq), "snapshots are numbered in build order");
     }
 
@@ -196,11 +244,11 @@ async function settled(page) {
         await settled(page);
 
         const before = Date.now();
-        page.fire("windows.focus", 1);               // starts a snapshot build (80 ms query)
+        page.run({ action: "snapshot" });            // starts a snapshot build (80 ms query)
         await sleep(20);
         page.fire("activated", { tabId: 2, windowId: 1 });
         await sleep(400);
-        const entry = page.sent.find((item) => item.message.type === "snapshot");
+        const entry = page.sent.find((item) => isState(item.message));
         const report = page.ofType("activated")[0];
         check(!!entry && !!report, "a snapshot and a report were sent");
         if (entry && report) {
@@ -211,7 +259,7 @@ async function settled(page) {
                 check(entry.at - snapshot.startedAt >= 60,
                     `it is when the build started, not when it finished: the queries took 80 ms (sent ${entry.at - snapshot.startedAt} ms later)`);
                 check(snapshot.startedAt < report.at, "a snapshot started before an activation is stamped before it");
-                const next = page.ofType("snapshot").find((item) => item.seq > report.seq);
+                const next = page.states().find((item) => item.seq > report.seq);
                 check(!next || next.startedAt >= report.at, "and the one the activation asks for is stamped after it");
             }
         }
@@ -225,7 +273,7 @@ async function settled(page) {
             page.sent.length = 0;
             action();
             await sleep(450);
-            return page.ofType("snapshot").length;
+            return page.states().length;
         };
         const unchanged = { ...page.tabs[0] };
 
@@ -277,7 +325,7 @@ async function settled(page) {
             await sleep(10);
         }
         await sleep(700);
-        const count = page.ofType("snapshot").length;
+        const count = page.states().length;
         check(count > 0 && count <= 6, `40 title updates over ~0.4 s sent ${count} snapshots`);
     }
 
@@ -288,12 +336,12 @@ async function settled(page) {
         await page.run({ action: "mute", tabId: 2, muted: true });
         await sleep(200);
         check(page.updates.length === 1 && page.updates[0].props.muted === true, "the mute command mutes the tab");
-        check(page.ofType("snapshot").length >= 1, "and a snapshot follows it, without Safari reporting any update");
+        check(page.states().length >= 1, "and a snapshot follows it, without Safari reporting any update");
 
         page.sent.length = 0;
         await page.run({ action: "mute", tabId: 2, muted: false });
         await sleep(200);
-        check(page.ofType("snapshot").length >= 1, "and one follows an unmute");
+        check(page.states().length >= 1, "and one follows an unmute");
     }
 
     {
@@ -304,7 +352,7 @@ async function settled(page) {
         await page.run({ action: "activate", tabId: 2 });
         await sleep(100);
         check(page.updates.length === 1 && page.updates[0].props.active === true, "the activate command switches the tab");
-        check(page.ofType("snapshot").length === 0, "and sends no snapshot of its own: Safari reports the switch");
+        check(page.states().length === 0, "and sends no snapshot of its own: Safari reports the switch");
     }
 
     // --- #27: a tab reopened from cleanup's list in another profile's window brings that window forward ---
@@ -347,14 +395,14 @@ async function settled(page) {
         } });
         await sleep(LIMIT * 3);
         check(lost === 1, "the first snapshot's reply was lost");
-        check(page.ofType("snapshot").length >= 2, "a snapshot whose reply never comes is sent again");
+        check(page.states().length >= 2, "a snapshot whose reply never comes is sent again");
         check(page.state("sending") === false, "and the copy isn't left waiting for that reply");
         const logs = page.ofType("log").map((message) => message.message);
         check(logs.some((line) => line.startsWith(`no reply within 4000 ms to "snapshot"`)), "and the app's log hears of the lost reply");
         page.sent.length = 0;
         page.fire("windows.removed", 1);
         await sleep(50);
-        check(page.ofType("snapshot").length === 1, "a later change is still sent");
+        check(page.states().length === 1, "a later change is still sent");
     }
 
     {
@@ -366,7 +414,7 @@ async function settled(page) {
             page.fire("updated", 1, { title: "x" }, { ...page.tabs[0], title: `x${Date.now()}` });
             await sleep(10);
         }
-        const times = page.sent.filter((entry) => entry.message.type === "snapshot").map((entry) => entry.at);
+        const times = page.sent.filter((entry) => isState(entry.message)).map((entry) => entry.at);
         check(times.length >= 5, `snapshots keep going out while their replies are lost (${times.length} in ${LIMIT * 8} ms)`);
         const gaps = times.slice(1).map((at, i) => at - times[i]);
         check(gaps.every((gap) => gap >= LIMIT - 10), `one at a time, each after the last one's time limit (gaps ${gaps.join(", ")} ms)`);
@@ -380,8 +428,8 @@ async function settled(page) {
         const page = load({ timeScale: FAST, queryDelay: 2, reply: (message) => (message.type === "hello" ? HANG : { appRunning: true }) });
         await sleep(LIMIT / 2);
         check(page.ofType("hello").length === 1, "the hello was sent");
-        check(page.ofType("snapshot").length >= 1, "the first snapshot doesn't wait for the hello's reply");
-        check(page.intervals.some((entry) => entry.ms === 5000), "heartbeats are started without waiting for it either");
+        check(page.states().length >= 1, "the first snapshot doesn't wait for the hello's reply");
+        check(page.state("typeof heartbeatTimer") === "undefined" ? page.intervals.length > 0 : page.state("heartbeatTimer") !== null, "heartbeats are started without waiting for it either");
         page.heartbeat();
         check(page.ofType("heartbeat").length === 1, "and they go out");
         await sleep(LIMIT * 4);
@@ -396,15 +444,15 @@ async function settled(page) {
         check(hellos.length === 6, `with no reply to anything, the hello is sent again 5 times (sent ${hellos.length})`);
         const gaps = hellos.slice(1).map((at, i) => at - hellos[i]);
         check(gaps.every((gap, i) => i === 0 || gap > gaps[i - 1]), `further and further apart (gaps ${gaps.join(", ")} ms)`);
-        check(page.ofType("snapshot").length >= 3, "and snapshots keep being tried");
-        check(page.intervals.some((entry) => entry.ms === 5000), "and heartbeats run");
+        check(page.states().length >= 3, "and snapshots keep being tried");
+        check(page.state("typeof heartbeatTimer") === "undefined" ? page.intervals.length > 0 : page.state("heartbeatTimer") !== null, "and heartbeats run");
     }
 
     {
         // Safari never answers which window was focused last: the copy starts anyway.
         const stuck = load({ timeScale: FAST, queryDelay: 2, hangLastFocused: true });
         await sleep(150);
-        check(stuck.ofType("hello").length === 1 && stuck.ofType("snapshot").length >= 1,
+        check(stuck.ofType("hello").length === 1 && stuck.states().length >= 1,
             "a copy whose question about the focused window is never answered still says hello and sends snapshots");
     }
 
@@ -422,7 +470,7 @@ async function settled(page) {
         answerLate({ appRunning: true, needSnapshot: true, commands: [{ action: "activate", tabId: 3 }] });
         await sleep(50);
         check(page.updates.length === 0, "a command in a reply that came after the time limit isn't run");
-        check(page.ofType("snapshot").length === 1, "but its request for a snapshot is");
+        check(page.states().length === 1, "but its request for a snapshot is");
         check(page.ofType("log").some((message) => message.message.startsWith(`the reply to "snapshot" came`)),
             "and the app's log hears of the late reply");
         check(page.state("sending") === false, "and nothing is left waiting");
@@ -455,7 +503,7 @@ async function settled(page) {
         await settled(page);
         page.fire("activated", { tabId: 3, windowId: 1 });
         await sleep(30);
-        check(page.ofType("snapshot").length === 1, "a switch report waiting for its reply doesn't hold up the snapshot after it");
+        check(page.states().length === 1, "a switch report waiting for its reply doesn't hold up the snapshot after it");
         await sleep(LIMIT * 2);
         page.updates.length = 0;
         answerLate({ appRunning: true, commands: [{ action: "activate", tabId: 4 }] });
@@ -506,6 +554,190 @@ async function settled(page) {
         check(lines.length === 6, `13 lost heartbeat replies are logged 6 times: the first five and the 10th (got ${lines.length})`);
         check(lines.at(-1)?.includes("(10 so far)"), "each line says how many so far");
         check(!page.ofType("log").some((message) => message.message.includes(`to "snapshot"`)), "and other types are counted apart");
+    }
+
+    // --- #80: a heartbeat only when nothing else has been delivered for the interval, and none during a pause ---
+
+    const HEARTBEAT = 10000;
+    // Past what a copy sends as it starts: the hello, the first snapshot, and the log line of the favicon sweep
+    // 4 s in (#84).
+    const STARTUP = 5000;
+    // The times, on the manual clock, of the messages sent after `from`, and of the heartbeats among them.
+    const sentAfter = (page, from) => page.sent.filter((entry) => entry.at > from);
+    const heartbeatTimes = (page, from = -Infinity) => sentAfter(page, from).filter((entry) => entry.message.type === "heartbeat").map((entry) => entry.at);
+    const gapsOf = (times) => times.slice(1).map((at, i) => at - times[i]);
+
+    {
+        // Nothing happening in Safari: one message per interval, and that's the heartbeat.
+        const page = load({ manualTime: true, queryDelay: 0 });
+        await page.advance(STARTUP);
+        const start = page.now();
+        check(sentAfter(page, -Infinity).some((entry) => entry.message.type === "hello"), "the copy says hello at once");
+        check(heartbeatTimes(page).length === 0, "and sends no heartbeat with it: the hello and the first snapshot show it's running");
+        await page.advance(60000);
+        const idle = sentAfter(page, start);
+        check(idle.every((entry) => entry.message.type === "heartbeat"), `with nothing happening, only heartbeats go out (${idle.map((entry) => entry.message.type).join(", ")})`);
+        check(idle.length === 6, `one every 10 s: 6 in a minute (got ${idle.length})`);
+        const gaps = gapsOf(idle.map((entry) => entry.at));
+        check(gaps.every((gap) => gap === HEARTBEAT), `exactly an interval apart (gaps ${gaps.join(", ")} ms)`);
+        const lastSnapshot = page.ofType("snapshot").at(-1);
+        check(idle.every((entry) => entry.message.seq === lastSnapshot.seq), "each names the last snapshot the app confirmed, as before");
+    }
+
+    {
+        // While other messages are delivered, no heartbeat; the first one comes an interval after the last
+        // delivered message.
+        const page = load({ manualTime: true, queryDelay: 0 });
+        await page.advance(STARTUP);
+        const start = page.now();
+        for (let i = 0; i < 10; i++) {
+            page.fire("activated", { tabId: (i % 3) + 1, windowId: 1 });
+            await page.advance(3000);
+        }
+        check(heartbeatTimes(page, start).length === 0, "30 s of tab switches every 3 s: no heartbeat");
+        const lastPost = page.sent.at(-1).at;
+        await page.advance(30000);
+        const after = heartbeatTimes(page, start);
+        check(after[0] === lastPost + HEARTBEAT, `the first heartbeat comes 10 s after the last message (${after[0] - lastPost} ms)`);
+        check(after.length === 3, `then one per interval (${after.length} in 30 s)`);
+    }
+
+    {
+        // Messages the app didn't get don't count: the app not running (no `appRunning` in the reply), or no
+        // reply at all. Heartbeats go on every interval meanwhile, and no faster.
+        const page = load({ manualTime: true, queryDelay: 0, quiet: true, reply: (message) => (message.type === "heartbeat" ? { appRunning: true } : message.type === "log" ? HANG : {}) });
+        await page.advance(STARTUP);
+        const start = page.now();
+        for (let i = 0; i < 20; i++) {
+            page.fire("activated", { tabId: (i % 3) + 1, windowId: 1 });
+            await page.advance(2000);
+        }
+        const times = heartbeatTimes(page, start);
+        check(times.length === 4, `undelivered messages every 2 s don't hold heartbeats back: 4 in 40 s (got ${times.length})`);
+
+        const lost = load({ manualTime: true, queryDelay: 0, quiet: true, reply: (message) => (message.type === "heartbeat" ? HANG : { appRunning: true }) });
+        await lost.advance(STARTUP);
+        const from = lost.now();
+        await lost.advance(60000);
+        const beats = heartbeatTimes(lost, from);
+        const gaps = gapsOf(beats);
+        // (Each lost reply is logged 4 s after its heartbeat, and the log, which is delivered, counts.)
+        check(beats.length >= 4 && gaps.every((gap) => gap >= HEARTBEAT && gap <= HEARTBEAT + 4000),
+            `heartbeats whose replies are lost go on, an interval apart, not one after another (${beats.length}, gaps ${gaps.join(", ")} ms)`);
+    }
+
+    {
+        // A late reply from the app still counts: it heard the message when it was sent.
+        let answerLate;
+        const page = load({ manualTime: true, queryDelay: 0, quiet: true, reply: (message) => {
+            if (message.type === "activated") return new Promise((resolve) => { answerLate = resolve; });
+            return { appRunning: true };
+        } });
+        await page.advance(20000);
+        page.fire("activated", { tabId: 2, windowId: 1 });
+        const sentAt = page.now();
+        await page.advance(6000);
+        answerLate({ appRunning: true });
+        // The snapshot after the switch was delivered at once, so the next heartbeat is an interval after it anyway.
+        await page.advance(10000);
+        check(page.state("typeof lastDeliveredAt") !== "undefined" && page.state("lastDeliveredAt") >= sentAt, "a reply that came after the time limit still counts as delivered");
+    }
+
+    {
+        // The app asks for a pause while a hold lasts: no heartbeats until the time it gave, then they go on by
+        // themselves, at once, though the app never said the hold ended.
+        const page = load({ manualTime: true, queryDelay: 0 });
+        await page.advance(STARTUP);
+        const start = page.now();
+        page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 90000, id: "L-1" });
+        await page.advance(89000);
+        check(heartbeatTimes(page, start).length === 0 && sentAfter(page, start).length === 0, "nothing at all during a 90 s pause");
+        await page.advance(1000);
+        const times = heartbeatTimes(page, start);
+        check(times[0] === start + 90000, `a pause the app doesn't end ends on its own: a heartbeat when it's over (${times[0] - start} ms)`);
+        await page.advance(30000);
+        check(heartbeatTimes(page, start).length === 4, "and they go on every interval after it");
+
+        // A later pause replaces the earlier one, so the app can keep a long hold going.
+        const second = page.now();
+        page.ports[0].deliver({ action: "pauseHeartbeats", until: second + 60000, id: "L-2" });
+        await page.advance(50000);
+        page.ports[0].deliver({ action: "pauseHeartbeats", until: page.now() + 60000, id: "L-3" });
+        await page.advance(50000);
+        check(heartbeatTimes(page, second).length === 0, "a pause asked for again before it's over goes on");
+    }
+
+    {
+        // While a pause lasts, every message says for how much longer, so the app doesn't count that silence and
+        // can tell a copy that missed the end of the hold. Once the pause is over, they don't.
+        const page = load({ manualTime: true, queryDelay: 0 });
+        await page.advance(STARTUP);
+        const start = page.now();
+        page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 300000, ms: 300000, id: "L-1" });
+        await page.advance(100000);
+        page.fire("activated", { tabId: 2, windowId: 1 });
+        await page.advance(1000);
+        const during = sentAfter(page, start);
+        check(during.length >= 2 && during.every((entry) => entry.message.heartbeatsPausedFor === start + 300000 - entry.at),
+            `messages sent during a pause say how much longer it lasts (${during.map((entry) => entry.message.heartbeatsPausedFor).join(", ")})`);
+        check(heartbeatTimes(page, start).length === 0, "a 5 min pause sends no heartbeat in its first 100 s, whatever else goes out");
+        await page.advance(200000);
+        const after = sentAfter(page, start + 300000 - 1);
+        check(after.length >= 1 && after.every((entry) => entry.message.heartbeatsPausedFor === undefined), "messages after it has run out don't");
+    }
+
+    {
+        // The app says the hold has ended: heartbeats start again, an interval later, unless something else
+        // was delivered first. So does any other command from the app, such as its request for a snapshot.
+        for (const ending of [{ action: "resumeHeartbeats" }, { action: "snapshot" }, { action: "activate", tabId: 2 }]) {
+            const page = load({ manualTime: true, queryDelay: 0 });
+            await page.advance(STARTUP);
+            const start = page.now();
+            page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 90000, id: "L-1" });
+            await page.advance(30000);
+            const ended = page.now();
+            page.ports[0].deliver({ ...ending, id: "L-2" });
+            await page.advance(30000);
+            const times = heartbeatTimes(page, start);
+            const delivered = sentAfter(page, ended).filter((entry) => entry.message.type !== "heartbeat").map((entry) => entry.at);
+            const expected = Math.max(ended, ...delivered) + HEARTBEAT;
+            check(page.state("pausedUntil") === 0, `"${ending.action}" ends a pause`);
+            check(times[0] === expected, `after "${ending.action}", the first heartbeat is an interval after it or after the last message (${times[0] - ended} ms after)`);
+        }
+    }
+
+    {
+        // A pause never lasts more than 5 min, whatever the app says, nor applies when it's already over; a pause
+        // for another copy isn't this copy's.
+        const page = load({ manualTime: true, queryDelay: 0 });
+        await page.advance(STARTUP);
+        const start = page.now();
+        page.ports[0].deliver({ action: "pauseHeartbeats", until: start + 24 * 3600 * 1000, id: "L-1" });
+        await page.advance(5 * 60 * 1000);
+        check(heartbeatTimes(page, start)[0] === start + 5 * 60 * 1000, "a pause for a day ends after 5 min");
+
+        // The app says until when by the clock and for how long; whichever ends first ends the pause, so a
+        // clock set back, or a command that came late, doesn't make it longer than the app counts on.
+        const late = load({ manualTime: true, queryDelay: 0 });
+        await late.advance(STARTUP);
+        const came = late.now();
+        late.ports[0].deliver({ action: "pauseHeartbeats", until: came + 600000, ms: 90000, id: "L-1" });
+        await late.advance(90000);
+        check(heartbeatTimes(late, came)[0] === came + 90000, "a pause ends after the time it was given for, though its clock time is later");
+        const early = load({ manualTime: true, queryDelay: 0 });
+        await early.advance(STARTUP);
+        const at = early.now();
+        early.ports[0].deliver({ action: "pauseHeartbeats", until: at + 60000, ms: 90000, id: "L-1" });
+        await early.advance(60000);
+        check(heartbeatTimes(early, at)[0] === at + 60000, "and at its clock time, if that's sooner");
+
+        const other = load({ manualTime: true, queryDelay: 0 });
+        await other.advance(STARTUP);
+        const from = other.now();
+        other.ports[0].deliver({ action: "pauseHeartbeats", until: from + 90000, id: "L-1", instance: "another-copy" });
+        other.ports[0].deliver({ action: "pauseHeartbeats", until: from - 1000, id: "L-2" });
+        await other.advance(20000);
+        check(heartbeatTimes(other, from).length === 2, "a pause for another copy, or one already over, doesn't stop heartbeats");
     }
 
     // --- #37: a command runs once, however many times it arrives ---
@@ -595,6 +827,390 @@ async function settled(page) {
         await sleep(20);
         check(activations(page).length === 0 && !logLines(page).some((line) => line.startsWith("skipped")),
             "a command for another copy isn't run, and isn't counted as a repeat");
+    }
+
+
+    // --- #81: changes, not everything ---
+
+    // What one tab in the stand-in looks like to Safari's tabs.onUpdated.
+    const updateTab = (page, id, change) => {
+        const tab = page.tabs.find((item) => item.id === id);
+        Object.assign(tab, change);
+        page.fire("updated", id, change, { ...tab });
+    };
+    const lastState = (page) => page.states().at(-1);
+
+    {
+        // After the first snapshot, a change sends only the tab that changed, counted from the last state the app took.
+        const page = load();
+        await settled(page);
+        const base = page.state("sentSeq");
+        check(base > 0, "the first snapshot was delivered");
+        updateTab(page, 2, { title: "Renamed" });
+        await sleep(400);
+        const states = page.states();
+        check(states.length === 1 && states[0].type === "changes", `a title change sends changes, not a snapshot (sent ${states.map((m) => m.type)})`);
+        const changes = states[0];
+        if (changes) {
+            check(changes.base === base, "counted from the last state the app took");
+            check(changes.seq > base, "and numbered after it");
+            check(Number.isInteger(changes.startedAt), "stamped with when it was taken, like a snapshot");
+            check(changes.tabs?.length === 1 && changes.tabs[0].id === 2 && changes.tabs[0].title === "Renamed",
+                `with only the changed tab, whole (${JSON.stringify(changes.tabs)})`);
+            check(!changes.windows && !changes.windowIds && !changes.focus, "and nothing about windows or focus");
+            check(page.state("sentSeq") === changes.seq, "the heartbeat names the changes once they're delivered");
+        }
+
+        // The next change is counted from those changes.
+        page.sent.length = 0;
+        updateTab(page, 3, { status: "loading" });
+        await sleep(400);
+        const next = lastState(page);
+        check(next?.type === "changes" && next.base === changes?.seq && next.tabs?.length === 1 && next.tabs[0].loading === true,
+            "the next changes are counted from the last ones");
+
+        // A change that ends where it began sends only a number and a time.
+        page.sent.length = 0;
+        updateTab(page, 3, { status: "complete" });
+        updateTab(page, 3, { status: "loading" });
+        await sleep(400);
+        const same = lastState(page);
+        check(same?.type === "changes" && JSON.stringify(Object.keys(same).sort()) === JSON.stringify(["base", "instance", "seq", "startedAt", "type"]),
+            `a state that matches the last one sends only its number and time (${JSON.stringify(same)})`);
+        check(JSON.stringify(same ?? {}).length < 150, "which is a few bytes");
+    }
+
+    {
+        // Moving or closing a tab sends the window's new list of tabs, and no tab.
+        const page = load();
+        await settled(page);
+        page.tabs[0].index = 2;
+        page.tabs[2].index = 0;
+        page.fire("moved", 1, { windowId: 1, fromIndex: 0, toIndex: 2 });
+        await sleep(200);
+        const moved = lastState(page);
+        check(moved?.type === "changes" && JSON.stringify(moved.windows) === JSON.stringify([{ id: 1, focused: true, incognito: false, tabIds: [3, 2, 1, 4, 5] }]),
+            `a move sends the window's tabs in their new order (${JSON.stringify(moved?.windows)})`);
+        check(moved && !moved.tabs, "and no tab: a tab's place isn't part of it");
+
+        page.sent.length = 0;
+        page.tabs.splice(1, 1);
+        page.tabs.forEach((tab) => { if (tab.index > 1) tab.index -= 1; });
+        page.fire("removed", 2, { windowId: 1 });
+        await sleep(200);
+        const closed = lastState(page);
+        check(closed?.type === "changes" && JSON.stringify(closed.windows?.[0]?.tabIds) === JSON.stringify([3, 1, 4, 5]) && !closed.tabs,
+            `a closed tab is left out of its window's list, and no other tab is sent (${JSON.stringify(closed)})`);
+
+        // A new window with a tab: the windows in order, the new window, and its tab.
+        page.sent.length = 0;
+        page.tabs.push({ id: 20, windowId: 2, index: 0, title: "Other", url: "https://example.com/other", active: true });
+        page.fire("windows.created", { id: 2 });
+        await sleep(200);
+        const opened = lastState(page);
+        check(opened?.type === "changes" && JSON.stringify(opened.windowIds) === "[1,2]", "a new window sends the windows in order");
+        check(JSON.stringify(opened?.windows) === JSON.stringify([{ id: 2, focused: false, incognito: false, tabIds: [20] }]), "and the new window with its tabs");
+        check(opened?.tabs?.length === 1 && opened.tabs[0].id === 20, "and its tab");
+    }
+
+    {
+        // Focus moving, in or out of Safari, sends the new focus without asking Safari for every tab again, in every
+        // profile's copy. Switching away from Safari and back sends no full snapshot.
+        const page = load();
+        await settled(page);
+        const queries = page.queryCount();
+        page.fire("windows.focus", -1);
+        await sleep(100);
+        const away = lastState(page);
+        check(away?.type === "changes", "focus leaving Safari sends changes");
+        check(away?.focus?.focusedWindowId === -1 && away.focus.lastFocusedWindowId === 1 && Number.isFinite(away.focus.focusChangedAt),
+            `with the new focus (${JSON.stringify(away?.focus)})`);
+        check(JSON.stringify(away?.windows) === JSON.stringify([{ id: 1, focused: false, incognito: false }]), "and the window that lost it, without its tabs");
+        check(away && !away.tabs, "and no tab");
+        page.fire("windows.focus", 1);
+        await sleep(100);
+        const back = lastState(page);
+        check(back?.type === "changes" && back.focus?.focusedWindowId === 1 && back.base === away?.seq, "focus coming back sends changes too");
+        check(page.queryCount() === queries, `and Safari wasn't asked for its tabs for either (${page.queryCount() - queries} times)`);
+        check(page.states().every((message) => message.type === "changes"), "no full snapshot was sent");
+        check(!!back && !!away && back.startedAt === away.startedAt && back.startedAt < away.focus.focusChangedAt,
+            "its time is that of the tabs it carries, from before focus moved");
+
+        // Focus moving to a window the app hasn't been told of asks Safari: it restores windows without saying so.
+        page.sent.length = 0;
+        page.tabs.push({ id: 40, windowId: 4, index: 0, title: "Restored", url: "https://example.com/restored", active: true });
+        page.fire("windows.focus", 4);
+        await sleep(100);
+        check(page.queryCount() === queries + 1, "focus moving to a window the app hasn't got asks Safari");
+        check(JSON.stringify(lastState(page)?.windowIds) === "[1,4]" && lastState(page)?.focus?.focusedWindowId === 4,
+            "and sends the window with the focus");
+        page.fire("windows.focus", 1);
+        await sleep(100);
+
+        // A focus change with a change to a tab still on its way asks Safari.
+        page.sent.length = 0;
+        updateTab(page, 4, { title: "Busy" });
+        page.fire("windows.focus", -1);
+        await sleep(100);
+        check(page.queryCount() === queries + 2, "a focus change after a tab change asks Safari");
+        const both = lastState(page);
+        check(both?.focus?.focusedWindowId === -1 && both.tabs?.some((tab) => tab.id === 4 && tab.title === "Busy"),
+            "and sends both");
+    }
+
+    {
+        // A full snapshot again: for a snapshot command, when a reply asks for one, and after a message that wasn't
+        // delivered.
+        let refuse = 0;
+        let askAgain = 0;
+        const page = load({ reply: (message) => {
+            if (message.type === "changes" && refuse > 0) { refuse--; return { appRunning: false }; }
+            if (message.type === "changes" && askAgain > 0) { askAgain--; return { appRunning: true, needSnapshot: true }; }
+            return { appRunning: true };
+        } });
+        await settled(page);
+        await page.run({ action: "snapshot" });
+        await sleep(100);
+        check(lastState(page)?.type === "snapshot", "a snapshot command sends a full snapshot, even with nothing changed");
+
+        page.sent.length = 0;
+        refuse = 1;
+        updateTab(page, 2, { title: "Lost" });
+        await sleep(800);
+        const afterLoss = page.states().map((message) => message.type);
+        check(JSON.stringify(afterLoss) === JSON.stringify(["changes", "snapshot"]), `changes that weren't delivered are followed by a full snapshot (${afterLoss})`);
+
+        page.sent.length = 0;
+        askAgain = 1;
+        updateTab(page, 2, { title: "Gap" });
+        await sleep(400);
+        const afterGap = page.states().map((message) => message.type);
+        check(JSON.stringify(afterGap) === JSON.stringify(["changes", "snapshot"]), `a reply that asks for a snapshot gets a full one (${afterGap})`);
+        check(page.state("sentSeq") === lastState(page)?.seq, "and the heartbeat names the full one, not the changes the app didn't take");
+
+        page.sent.length = 0;
+        page.heartbeat();
+        await sleep(10);
+        page.sent.length = 0;
+        updateTab(page, 2, { title: "Fine" });
+        await sleep(400);
+        check(lastState(page)?.type === "changes", "after that, changes again");
+    }
+
+    {
+        // Now and then a change goes out as a full snapshot, in case the app's copy has drifted; a state with nothing
+        // new doesn't.
+        const page = load();
+        await settled(page);
+        page.state("lastFullSnapshotAt = Date.now() - FULL_SNAPSHOT_MS - 1");
+        page.fire("updated", 1, { status: "complete" }, { ...page.tabs[0] });
+        await sleep(400);
+        check(lastState(page)?.type === "changes", "a state with nothing new isn't made a full snapshot");
+        page.sent.length = 0;
+        updateTab(page, 1, { title: "Later" });
+        await sleep(400);
+        check(lastState(page)?.type === "snapshot", "a change long after the last full snapshot is sent as one");
+        page.sent.length = 0;
+        updateTab(page, 1, { title: "Later still" });
+        await sleep(400);
+        check(lastState(page)?.type === "changes", "and the next one as changes");
+    }
+
+    {
+        // A page's icon in a data: URL goes to the app once, by a short name, never in the snapshots.
+        const page = load();
+        await settled(page);
+        const dataURL = "data:image/png;base64," + "QUJD".repeat(500);
+        page.fire("runtime.message", { type: "favicon", url: dataURL }, { tab: { id: 2 } });
+        await sleep(200);
+        const withIcon = lastState(page);
+        const name = withIcon?.tabs?.find((tab) => tab.id === 2)?.favIconUrl;
+        check(typeof name === "string" && name.startsWith("sidetabs-icon:") && name.length < 40, `the snapshot carries a short name for the icon (${name?.slice(0, 40)})`);
+        check(!JSON.stringify(page.states()).includes("data:"), "and never the data: URL");
+        const icons = page.ofType("icon");
+        check(icons.length === 1 && icons[0].url === name && icons[0].data === "QUJD".repeat(500), "the icon goes to the app once, under that name");
+        updateTab(page, 2, { title: "Again" });
+        await page.run({ action: "snapshot" });
+        await sleep(400);
+        check(page.ofType("icon").length === 1, "and isn't sent again with later changes or snapshots");
+        check(page.states().filter((message) => message.type === "snapshot").at(-1)?.windows[0].tabs[1].favIconUrl === name,
+            "full snapshots carry the same name");
+        await page.run({ action: "fetchIcons", urls: [name] });
+        await sleep(50);
+        check(page.ofType("icon").length === 2 && page.ofType("icon")[1].data === "QUJD".repeat(500), "the app can ask for it by name");
+        await page.run({ action: "fetchIcons", urls: ["sidetabs-icon:unknown"] });
+        await sleep(50);
+        check(page.ofType("icon").length === 3 && page.ofType("icon")[2].data === null, "a name this copy doesn't know gets no icon");
+    }
+
+    {
+        // A data: URL is hashed once, not every time the tab list is built (#84 review).
+        const page = load();
+        await settled(page);
+        page.state("globalThis.hashed = 0; { const real = hashOf; hashOf = (text) => { hashed++; return real(text); }; }");
+        const dataURL = "data:image/png;base64," + "QUJD".repeat(2000);
+        page.fire("runtime.message", { type: "favicon", url: dataURL }, { tab: { id: 2 } });
+        page.fire("runtime.message", { type: "favicon", url: dataURL }, { tab: { id: 4 } });
+        await sleep(200);
+        check(page.state("hashed") === 1, `the first tab list with the icon hashes it once, for both tabs that show it (${page.state("hashed")} times)`);
+        updateTab(page, 2, { title: "Again" });
+        await page.run({ action: "snapshot" });
+        await sleep(400);
+        updateTab(page, 4, { title: "And again" });
+        await sleep(400);
+        check(page.state("hashed") === 1, `later tab lists, full or changes, don't hash it again (${page.state("hashed")} times)`);
+        const name = lastState(page)?.tabs?.find((tab) => tab.id === 4)?.favIconUrl
+            ?? page.states().filter((message) => message.type === "snapshot").at(-1)?.windows[0].tabs[3].favIconUrl;
+        check(typeof name === "string" && name.startsWith("sidetabs-icon:"), `and they carry the same name (${name?.slice(0, 40)})`);
+
+        // Past DATA_ICON_LIMIT the oldest icon is forgotten, by both maps at once.
+        const limit = page.state("DATA_ICON_LIMIT");
+        const urls = Array.from({ length: limit + 5 }, (_, i) => `data:image/png;base64,${i}`);
+        page.state(`globalThis.urls = ${JSON.stringify(urls)}; globalThis.names = urls.map(iconForApp);`);
+        const inStep = () => page.state(`dataIcons.size === dataIconNames.size
+            && [...dataIcons].every(([name, url]) => dataIconNames.get(url) === name)
+            && [...dataIconNames].every(([url, name]) => dataIcons.get(name) === url)`);
+        check(page.state("dataIcons.size") === limit, `no more than ${limit} icons are kept (${page.state("dataIcons.size")})`);
+        check(inStep(), "the names and the URLs stay in step past the limit");
+        check(page.state("!dataIconNames.has(" + JSON.stringify(dataURL) + ") && !dataIcons.has(" + JSON.stringify(name) + ")"),
+            "the oldest icon is gone from both");
+        check(page.state("!sentDataIcons.has(" + JSON.stringify(name) + ")"), "and from the icons sent to the app");
+        const hashedBefore = page.state("hashed");
+        check(page.state("iconForApp(urls.at(-1)) === names.at(-1)") && page.state("hashed") === hashedBefore,
+            "a kept icon is named again without hashing");
+        check(page.state("iconForApp(" + JSON.stringify(dataURL) + ")") === name && page.state("hashed") === hashedBefore + 1,
+            "a forgotten one is hashed again, to the same name");
+        check(inStep() && page.state("dataIcons.size") === limit, "and the two maps are still in step");
+    }
+
+    {
+        // Changes in a window the sidebar isn't showing wait longer: about a second after the last state, rather than
+        // a quarter of one.
+        const page = load();
+        await settled(page);
+        page.tabs.push({ id: 30, windowId: 2, index: 0, title: "Back", url: "https://example.com/back", active: true });
+        page.fire("windows.created", { id: 2 });
+        await sleep(100);
+        const flushed = page.sent.filter((entry) => isState(entry.message)).at(-1)?.at;
+        page.sent.length = 0;
+        const tab = page.tabs.find((item) => item.id === 30);
+        tab.title = "Back loading";
+        page.fire("updated", 30, { title: tab.title }, { ...tab });
+        await sleep(1300);
+        const late = page.sent.find((entry) => isState(entry.message));
+        check(!!late && late.at - flushed >= 950, `a change in an unfocused window waits about a second (${late && late.at - flushed} ms)`);
+
+        page.sent.length = 0;
+        updateTab(page, 1, { title: "Front" });
+        const fired = Date.now();
+        await sleep(600);
+        const soon = page.sent.find((entry) => isState(entry.message));
+        check(!!soon && soon.at - fired <= 400, `one in the focused window doesn't (${soon && soon.at - fired} ms)`);
+
+        // With Safari in the background, the window focused last is the one the sidebar shows.
+        page.fire("windows.focus", -1);
+        await sleep(100);
+        page.sent.length = 0;
+        updateTab(page, 1, { title: "Still shown" });
+        const firedAgain = Date.now();
+        await sleep(600);
+        const shown = page.sent.find((entry) => isState(entry.message));
+        check(!!shown && shown.at - firedAgain <= 400, `nor in the window focused last, with Safari in the background (${shown && shown.at - firedAgain} ms)`);
+    }
+
+    // --- #84 p2: a few seconds after start, content.js goes only into tabs whose icon hasn't come ---
+    // At FAST, the 4 s wait is 80 ms, an injection's 3 s time limit 60 ms, and the 2 s wait after a load 40 ms.
+    const SWEEP = 4000 * FAST;
+    const injectedTabs = (page) => page.injected.map((entry) => entry.tabId);
+    const iconFrom = (page, tabId, url = `https://example.com/${tabId}.png`) => page.fire("runtime.message", { type: "favicon", url }, { tab: { id: tabId } });
+
+    {
+        const tabList = [
+            { id: 1, windowId: 1, index: 0, active: true },
+            { id: 2, windowId: 1, index: 1 },
+            { id: 3, windowId: 1, index: 2 },                                   // ran the manifest's copy
+            { id: 4, windowId: 1, index: 3, discarded: true },
+            { id: 5, windowId: 1, index: 4, url: "about:blank" },
+            { id: 6, windowId: 1, index: 5, status: "loading" },               // reports nothing when done
+            { id: 10, windowId: 1, index: 6, status: "loading" },              // runs the manifest's copy when done
+            { id: 7, windowId: 2, index: 0 },
+            { id: 8, windowId: 2, index: 1, active: true },
+            { id: 9, windowId: 2, index: 2, url: "http://router.local/" },
+        ];
+        const page = load({ timeScale: FAST, queryDelay: 2, tabList });
+        iconFrom(page, 3);
+        await sleep(SWEEP / 2);
+        check(page.injected.length === 0, "nothing is injected right after start");
+        await sleep(SWEEP + 60);
+        check(page.injected.every((entry) => entry.file === "content.js"), "the sweep injects content.js");
+        check(JSON.stringify(injectedTabs(page)) === "[1,2,8,7,9]",
+            `only tabs without an icon, focused window first, active tab first (injected ${JSON.stringify(injectedTabs(page))})`);
+        check(!injectedTabs(page).includes(3), "a tab that ran the manifest's copy gets no second run");
+        check(!injectedTabs(page).includes(4), "a discarded tab is left alone");
+        check(!injectedTabs(page).includes(5), "a page that isn't http(s) is left alone");
+        check(!injectedTabs(page).includes(6) && !injectedTabs(page).includes(10), "a tab still loading isn't injected yet");
+        const line = page.ofType("log").map((message) => message.message).find((message) => message.startsWith("favicon sweep:"));
+        check(!!line && line.includes("9 web tabs, 1 had reported, 1 discarded, 2 still loading, injected 5"),
+            `the app's log hears what the sweep did (${line})`);
+
+        // A loading tab whose page started before the extension: when it's done and no icon has come, it's injected.
+        page.fire("updated", 6, { status: "complete" }, { ...page.tabs[5], status: "complete" });
+        // One that runs the manifest's copy when it's done isn't.
+        page.fire("updated", 10, { status: "complete" }, { ...page.tabs[6], status: "complete" });
+        iconFrom(page, 10);
+        await sleep(20);
+        check(!injectedTabs(page).includes(6), "a tab that finished loading gets a moment for the manifest's copy to report");
+        await sleep(4000 * FAST);
+        check(injectedTabs(page).filter((id) => id === 6).length === 1, "then, with no icon, it's injected once");
+        check(!injectedTabs(page).includes(10), "a tab whose manifest copy reported after loading isn't");
+        page.fire("updated", 6, { status: "complete" }, { ...page.tabs[5], status: "complete" });
+        await sleep(4000 * FAST);
+        check(injectedTabs(page).filter((id) => id === 6).length === 1, "and a later load of it isn't followed by another injection");
+    }
+
+    {
+        // One at a time: each tab is injected once the one before it has finished, and a tab that reports
+        // meanwhile is skipped.
+        const tabList = [1, 2, 3, 4].map((id, index) => ({ id, windowId: 1, index, active: index === 0 }));
+        let page;
+        page = load({ timeScale: FAST, queryDelay: 2, tabList, inject: (tabId) => {
+            if (tabId === 1) iconFrom(page, 3);
+            return sleep(25);
+        } });
+        await sleep(SWEEP + 200);
+        check(JSON.stringify(injectedTabs(page)) === "[1,2,4]", `a tab that reports during the sweep isn't injected (injected ${JSON.stringify(injectedTabs(page))})`);
+        const gaps = page.injected.slice(1).map((entry, i) => entry.at - page.injected[i].at);
+        check(gaps.every((gap) => gap >= 20), `each injection waits for the one before it (gaps ${gaps.join(", ")} ms)`);
+    }
+
+    {
+        // An injection Safari never finishes doesn't stop the sweep.
+        const tabList = [1, 2].map((id, index) => ({ id, windowId: 1, index }));
+        const page = load({ timeScale: FAST, queryDelay: 2, tabList, inject: (tabId) => (tabId === 1 ? HANG : undefined) });
+        await sleep(SWEEP + 3000 * FAST + 60);
+        check(JSON.stringify(injectedTabs(page)) === "[1,2]", `the next tab is injected after an injection's time limit (injected ${JSON.stringify(injectedTabs(page))})`);
+        const gap = page.injected[1] && page.injected[1].at - page.injected[0].at;
+        check(gap >= 3000 * FAST - 10, `but not before it (${gap} ms)`);
+    }
+
+    {
+        // The window focused when the sweep runs goes first, not the one focused at start.
+        const tabList = [
+            { id: 1, windowId: 1, index: 0, active: true },
+            { id: 2, windowId: 2, index: 0, active: true },
+            { id: 3, windowId: 3, index: 0, active: true },
+        ];
+        const page = load({ timeScale: FAST, queryDelay: 2, tabList, lastFocused: 1 });
+        await sleep(SWEEP / 2);
+        page.fire("windows.focus", 3);
+        await sleep(SWEEP);
+        check(JSON.stringify(injectedTabs(page)) === "[3,1,2]", `the focused window's tabs go first (injected ${JSON.stringify(injectedTabs(page))})`);
+
+        // With no window focused (Safari in the background), the last one focused does.
+        const away = load({ timeScale: FAST, queryDelay: 2, tabList, lastFocused: 2 });
+        away.fire("windows.focus", -1);
+        await sleep(SWEEP * 1.5);
+        check(injectedTabs(away)[0] === 2, `with Safari in the background, the window focused last goes first (injected ${JSON.stringify(injectedTabs(away))})`);
     }
 
     if (failures === 0) {

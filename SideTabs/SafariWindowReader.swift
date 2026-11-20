@@ -19,12 +19,14 @@ nonisolated struct WindowReading {
     /// read in full screen, and in normal windows while the sidebar hides automatically: the overlay
     /// has to start below it.
     var toolbarBottom: CGFloat?
+    /// What `toolbarBottom` was read against; nil if it wasn't, or its last read didn't finish.
+    var barsBasis: BarsBasis?
 }
 
 /// Reads Safari's windows through the Accessibility API, off the main thread.
 ///
 /// Every Accessibility call waits for Safari's main thread, which can be busy for seconds. The
-/// sidebar's own main thread asks for these reads every second and after every window event, so
+/// sidebar's own main thread asks for these reads periodically and after every window event, so
 /// it must never be the one waiting: SafariTracker asks this reader to do it and uses the
 /// answer when it arrives. When Safari doesn't answer in time, the outcome says so, and the
 /// tracker keeps what it knew, so a slow Safari can't make the sidebar hide or jump.
@@ -40,7 +42,11 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
         var keepPrevious = false
     }
 
-    let queue = DispatchQueue(label: "com.digitaln.sidetabs.accessibility-read", qos: .userInitiated)
+    /// At `.utility`, which the periodic reads run at (#78): they're for changes macOS doesn't announce, and
+    /// nobody is waiting on them. Reads the user waits on, a click or a window event the sidebar follows, are
+    /// submitted with `qos: .userInitiated, flags: .enforceQoS`, which raises them (a block's QoS can raise a
+    /// queue's, never lower it).
+    let queue = DispatchQueue(label: "com.digitaln.sidetabs.accessibility-read", qos: .utility)
     /// How long any one read waits for Safari. After a timeout a read gives up on the rest.
     private let query = AXQuery(timeout: 0.5)
     private let log = Logger(subsystem: SideTabsBridge.appBundleIdentifier, category: "tracker")
@@ -108,8 +114,10 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
 
     /// Picks the window to dock to (when `full`) and reads its frame and the rest. `current` is
     /// the window docked to now and `previous` what was read from it. `toolbarInWindows` also reads
-    /// where the toolbar ends when the window isn't full screen.
-    func read(application: AXUIElement, current: AXUIElement?, previous: WindowReading, full: Bool, toolbarInWindows: Bool = false) -> Outcome {
+    /// where the toolbar ends when the window isn't full screen. `bars: false` reads the bars only if the
+    /// window moved, changed size or went into or out of full screen since they were last read
+    /// (`SafariBars.readsAgain`), and otherwise keeps what was read.
+    func read(application: AXUIElement, current: AXUIElement?, previous: WindowReading, full: Bool, toolbarInWindows: Bool = false, bars: Bool = true) -> Outcome {
         query.clearTimedOut()
         var outcome = Outcome()
         var window = current
@@ -127,7 +135,7 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
             return outcome
         }
         let sameWindow = current.map { CFEqual($0, window) } ?? false
-        let (reading, complete) = readGeometry(window, previous: sameWindow ? previous : WindowReading(), toolbarInWindows: toolbarInWindows)
+        let (reading, complete) = readGeometry(window, previous: sameWindow ? previous : WindowReading(), toolbarInWindows: toolbarInWindows, bars: bars)
         if !complete && !sameWindow {
             // A window whose frame Safari wouldn't give can't be docked to yet; stay where we are.
             outcome.keepPrevious = true
@@ -142,7 +150,7 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
 
     /// Reads everything but the window itself. Stops at the first read Safari doesn't answer,
     /// keeping what was read so far and the previous value of the rest.
-    private func readGeometry(_ window: AXUIElement, previous: WindowReading, toolbarInWindows: Bool) -> (reading: WindowReading, complete: Bool) {
+    private func readGeometry(_ window: AXUIElement, previous: WindowReading, toolbarInWindows: Bool, bars: Bool = true) -> (reading: WindowReading, complete: Bool) {
         var reading = previous
         func step<Value>(_ body: () -> Value, _ assign: (inout WindowReading, Value) -> Void) -> Bool {
             query.clearTimedOut()
@@ -151,19 +159,26 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
             assign(&reading, value)
             return true
         }
-        // In one round trip: this runs every second and after every window event, docked or not.
+        // In one round trip: this runs periodically and after every window event, docked or not.
         guard step({ basics(of: window) }, { $0.frame = $1.frame; $0.title = $1.title; $0.isFullScreen = $1.isFullScreen }) else {
             return (reading, false)
         }
         if reading.number == nil {
             reading.number = windowNumber(of: window)
         }
-        if reading.isFullScreen || toolbarInWindows, let frame = reading.frame {
-            guard step({ toolbarBottom(of: window, windowFrame: frame) }, { $0.toolbarBottom = $1 }) else {
-                return (reading, false)
+        let wanted = reading.isFullScreen || toolbarInWindows
+        let basis = reading.frame.map { BarsBasis(frame: $0, isFullScreen: reading.isFullScreen) }
+        if let frame = reading.frame, let basis, wanted {
+            if SafariBars.readsAgain(wanted: wanted, asked: bars, basis: basis, lastRead: reading.barsBasis) {
+                guard step({ toolbarBottom(of: window, windowFrame: frame) }, { $0.toolbarBottom = $1; $0.barsBasis = basis }) else {
+                    // Read again at the next chance, whatever asks.
+                    reading.barsBasis = nil
+                    return (reading, false)
+                }
             }
         } else {
             reading.toolbarBottom = nil
+            reading.barsBasis = nil
         }
         return (reading, true)
     }
@@ -274,7 +289,8 @@ nonisolated final class SafariWindowReader: @unchecked Sendable {
     /// Favourites bar, the tab bar, the find bar (SafariBars.swift). Nil if Safari reports none (e.g.
     /// a hidden full-screen toolbar).
     ///
-    /// Kept cheap, since it's read every second while the sidebar can slide out: the window's children
+    /// Kept cheap, since it's read every second while the overlay sidebar is out, and on every window event
+    /// where bars are read at all (#78 review: not every second while it's away): the window's children
     /// and its own buttons come in one round trip, the buttons aren't read further, each other child
     /// takes one more, and only the split group's children are read below that.
     private func toolbarBottom(of window: AXUIElement, windowFrame: CGRect) -> CGFloat? {

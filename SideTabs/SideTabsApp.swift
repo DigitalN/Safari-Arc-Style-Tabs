@@ -64,14 +64,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // The gear in the sidebar's bottom bar (#43).
             .environment(\.showSideTabsSettings, ShowSettingsAction { [weak self] in self?.showSettings() }))
         let dock = DockController(panel: panel, tracker: tracker, settings: settings, store: store)
+        // No looks at Safari's window while it's held back (#78).
+        dock.currentHolds = { [holdWatcher] in holdWatcher.holds }
         self.dock = dock
 
-        bridge.onMessage = { [store, favicons] type, payload, object in
+        bridge.onMessage = { [store, favicons] message in
             favicons.extensionIsReachable()
-            if type == "icon", let url = object["url"] as? String {
-                favicons.receive(url: url, data: (object["data"] as? String).flatMap { Data(base64Encoded: $0) })
+            if message.type == "icon", let url = message.object["url"] as? String {
+                favicons.receive(url: url, data: (message.object["data"] as? String).flatMap { Data(base64Encoded: $0) })
             }
-            return store.handleMessage(type: type, payload: payload, object: object)
+            return store.handleMessage(message)
         }
         bridge.start()
 
@@ -85,7 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ExtensionRegistration.repair(reported: reported, done: done)
         }
         store.currentHolds = { [holdWatcher] in holdWatcher.holds }
-        holdWatcher.onChange = { [store] in store.holdsMayHaveChanged() }
+        holdWatcher.onChange = { [store, weak self] in
+            store.holdsMayHaveChanged()
+            self?.dock?.holdsMayHaveChanged()
+        }
         holdWatcher.start()
         store.holdsMayHaveChanged()
         favicons.requestIcons = { [weak self] urls in

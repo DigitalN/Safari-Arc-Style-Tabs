@@ -79,14 +79,26 @@ final class TabStore {
         var atMilliseconds: Double { (at.timeIntervalSince1970 * 1000).rounded(.down) }
     }
 
+    /// Each copy's windows, as the sidebar shows them. Set only when what it shows changes: a snapshot that shows
+    /// the same as before leaves it alone, so nothing that watches it runs again for nothing (#81). So a snapshot's
+    /// `seq` and `startedAt` here may be an older one's; the newest applied is in `appliedSeq`.
     private(set) var snapshots: [String: Snapshot] = [:] {
         // Any change to which tab is active (a snapshot, a report of a switch, a click) starts or
         // stops a tab's cleanup clock.
         didSet {
+            refreshShown()
             cleanup.snapshotsChanged(from: oldValue, to: snapshots)
             settleSwitchPreview()
         }
     }
+    /// The number of the newest snapshot (or changes) applied for each copy, which reports and heartbeats are
+    /// compared with.
+    @ObservationIgnored private var appliedSeq: [String: Int] = [:]
+    /// Each copy's windows exactly as its last snapshot or changes said, untouched by reports of tab switches or the
+    /// sidebar's own changes: what the copy counts its next changes from (#81).
+    @ObservationIgnored private var copyStates: [String: Snapshot] = [:]
+    /// When each copy was last asked for a full snapshot because changes didn't follow from what the app has.
+    @ObservationIgnored private var fullSnapshotAskedAt: [String: Date] = [:]
     /// Each copy's windows as it last reported them: its last snapshot, with the highlight where its reports of
     /// tab switches since have put it. `snapshots` also has what the sidebar changed at once for a click, a
     /// close, a move or a mute; a window goes back to this when its command can't reach the extension (#67).
@@ -94,8 +106,14 @@ final class TabStore {
     /// Closes tabs nobody has looked at for a while, when that's turned on, and keeps the list for
     /// reopening them (TabCleanup.swift).
     let cleanup = TabCleanup()
-    /// When the extension last sent anything, on the awake clock (`uptime`), so sleep isn't silence (#45).
-    private(set) var lastMessageAt: TimeInterval?
+    /// When the extension last sent anything, on the awake clock (`uptime`), so sleep isn't silence (#45). Not
+    /// observed: it changes with every message, and views only need `isConnected` (#83).
+    @ObservationIgnored private(set) var lastMessageAt: TimeInterval?
+    /// Whether the extension has sent anything in the last `connectedFor` seconds of awake time, for the menu bar
+    /// menu and the empty sidebar. Set only when it changes, so a message doesn't update them (#83).
+    private(set) var isConnected = false
+    /// The one pending look at whether the extension has gone silent (`checkConnection`).
+    @ObservationIgnored private var connectionCheck: DispatchWorkItem?
     /// Favorites, shared by every profile, and each profile's Pinned list (#34, BookmarkLists.swift).
     private(set) var bookmarkLists = BookmarkLists()
     private(set) var customNames: [TabKey: CustomName] = [:]
@@ -117,34 +135,53 @@ final class TabStore {
     var dockedWindowTitle: String? {
         didSet {
             if dockedWindowTitle != oldValue {
-                requestSnapshotIfUnknown(title: dockedWindowTitle)
+                refreshShown()
+                dockedTitleChanged(from: oldValue)
                 logShownSpace()
             }
         }
     }
-    @ObservationIgnored private var lastSnapshotRequest = Date.distantPast
     /// The docked window's profile, read from its toolbar by SafariProfiles (#33), as `ProfileKey.rawValue`:
     /// "default", or the profile's UUID as its copy's snapshots carry it. Nil while it isn't known, in a private
     /// window, and where Safari has no profiles. `currentWindow` takes the docked window from that profile's copy.
-    var dockedWindowProfile: String?
+    var dockedWindowProfile: String? {
+        didSet {
+            if dockedWindowProfile != oldValue { refreshShown() }
+        }
+    }
     /// The docked window is a private window: in a Safari with profiles, the one kind of window without a
     /// profile button (SafariProfiles). Its copy is the default profile's.
-    var dockedWindowIsPrivate = false
+    var dockedWindowIsPrivate = false {
+        didSet {
+            if dockedWindowIsPrivate != oldValue { refreshShown() }
+        }
+    }
     /// How many of Safari's windows are like the docked one, from their toolbars (SafariProfiles): of its
     /// profile, or private. A copy that lists that many can see them all, and is only behind on a title.
     var dockedLikeWindowCount: Int? {
-        didSet { settleSwitchPreview() }
+        didSet {
+            refreshShown()
+            settleSwitchPreview()
+            // A window like it opened: a title that fits nothing may now be a window its copy hasn't listed.
+            if dockedLikeWindowCount != oldValue { scheduleDockedWindowCheck(restart: false) }
+        }
     }
     /// The docked window has been open long enough for its copy to have reported it: about 2 s, and longer
     /// right after Side Tabs starts (SafariProfiles). Before that, a copy that doesn't list it yet says nothing.
     var dockedWindowSettled = false {
-        didSet { settleSwitchPreview() }
+        didSet {
+            refreshShown()
+            settleSwitchPreview()
+        }
     }
     /// The front window's profile while Side Tabs is off in it (SafariProfiles' id): the sidebar shows the row to turn
     /// it on in place of the sections (#33).
     var profileToTurnOn: UUID? {
         didSet {
-            if profileToTurnOn != oldValue { settleSwitchPreview() }
+            if profileToTurnOn != oldValue {
+                refreshShown()
+                settleSwitchPreview()
+            }
         }
     }
 
@@ -165,12 +202,24 @@ final class TabStore {
         var swiped = false
     }
     /// Nil when the sidebar follows Safari, as it does but for a switch's window coming back from the Dock.
-    private(set) var switchPreview: SwitchPreview?
+    private(set) var switchPreview: SwitchPreview? {
+        didSet {
+            if switchPreview != oldValue { refreshShown() }
+        }
+    }
     /// The sidebar's fade over to a switch's profile (SidebarFade): one set of sections, faded out over what was
     /// shown, swapped while nothing shows, and faded back in. Only a preview's start sets it going.
-    private(set) var sidebarFade = SidebarFade()
+    private(set) var sidebarFade = SidebarFade() {
+        didSet {
+            if sidebarFade != oldValue { refreshShown() }
+        }
+    }
     /// What the sidebar showed when the fade began, kept on screen while it fades out.
-    private(set) var fadingOutContent: ShownContent?
+    private(set) var fadingOutContent: ShownContent? {
+        didSet {
+            if fadingOutContent != oldValue { refreshShown() }
+        }
+    }
 
     /// Sends a command to the extension (ExtensionBridge.send). The closure it's given runs on the main thread
     /// if Safari couldn't take the command (#67).
@@ -225,19 +274,26 @@ final class TabStore {
         cleanup.onChange = { [weak self] in self?.scheduleSave() }
         // Copies already running haven't spoken to this launch of Side Tabs yet (#45).
         noteChance(at: uptime())
-        scheduleQuietCheck()
+        scheduleCopyCheck()
     }
 
     // MARK: - Messages from the extension
 
+    /// Handles a message given as JSON, read the way the app reads it (ExtensionMessage). For the checks in Tests/.
     func handleMessage(type: String, payload: Data, object: [String: Any]) -> [String: Any] {
-        lastMessageAt = uptime()
+        guard let message = ExtensionMessage(data: payload) else { return [:] }
+        return handleMessage(message)
+    }
+
+    func handleMessage(_ message: ExtensionMessage) -> [String: Any] {
+        let object = message.object
+        noteMessageArrived()
         noteExtensionPath(object["extensionPath"] as? String)
         let sender = hear(from: object)
         if sender == .replaced {
             return [:]
         }
-        var reply = answer(type: type, payload: payload, object: object)
+        var reply = answer(message)
         if sender == .backFromQuiet, let instance = object["instance"] as? String {
             // Its snapshot is from before it went quiet. The extension acts on `needSnapshot` in any reply,
             // but replies get lost (#37), so it's asked with a command too.
@@ -247,14 +303,27 @@ final class TabStore {
         return reply
     }
 
-    private func answer(type: String, payload: Data, object: [String: Any]) -> [String: Any] {
-        switch type {
+    private func answer(_ message: ExtensionMessage) -> [String: Any] {
+        let object = message.object
+        switch message.type {
         case "snapshot":
-            do {
-                apply(try JSONDecoder().decode(Snapshot.self, from: payload))
-            } catch {
-                NSLog("Side Tabs: bad snapshot: \(error)")
+            if let snapshot = message.snapshot {
+                apply(snapshot)
+            } else {
+                NSLog("Side Tabs: bad snapshot: \(message.error.map(String.init(describing:)) ?? "?")")
             }
+            return [:]
+
+        case "changes":
+            // What changed since a state of the copy's that the app took before (#81).
+            guard let changes = message.changes else {
+                NSLog("Side Tabs: bad changes: \(message.error.map(String.init(describing:)) ?? "?")")
+                return [:]
+            }
+            return applyChanges(changes)
+
+        case "icon":
+            noteIcon(url: object["url"] as? String, data: object["data"] as? String)
             return [:]
 
         case "activated":
@@ -276,13 +345,14 @@ final class TabStore {
             return [:]
 
         case "hello":
-            return ["needSnapshot": true]
+            // A new copy: its first snapshot is on its way, unless it's here already.
+            return ["needSnapshot": appliedSeq[object["instance"] as? String ?? ""] == nil]
 
         case "heartbeat":
-            // The extension reports the last snapshot it delivered; ask again if we missed one.
+            // The extension reports the last snapshot or changes it delivered; ask again if we missed one.
             let instance = object["instance"] as? String ?? ""
             let seq = object["seq"] as? Int ?? 0
-            let applied = snapshots[instance]?.seq ?? -1
+            let applied = appliedSeq[instance] ?? -1
             if !instance.isEmpty, applied < seq || snapshots[instance] == nil {
                 // A snapshot is missing. The reply asks for it, but replies can be lost for minutes after
                 // the extension reloads (#37), so a command asks too: it doesn't depend on the reply.
@@ -310,13 +380,66 @@ final class TabStore {
         }
     }
 
+    /// Turns changes back into the snapshot they stand for, and applies it as one (#81): every rule between
+    /// snapshots and reports holds for them as it does for snapshots. If the app hasn't got the state they're counted
+    /// from (it missed a message, or started since), the copy is asked for a full snapshot.
+    private func applyChanges(_ changes: SnapshotChanges) -> [String: Any] {
+        let instance = changes.instance
+        // Older than what the app has: already overtaken (a full snapshot sent after these got no reply in time).
+        if let applied = appliedSeq[instance], changes.seq <= applied {
+            log.info("ignoring older changes (\(changes.seq)) from \(instance.prefix(8), privacy: .public)")
+            return [:]
+        }
+        guard let snapshot = copyStates[instance]?.applying(changes) else {
+            let have = copyStates[instance].map { "\($0.seq)" } ?? "nothing"
+            log.notice("changes \(changes.seq) from \(instance.prefix(8), privacy: .public) are counted from \(changes.base), but the app has \(have, privacy: .public); asking for a full snapshot")
+            // The reply asks for it, but replies can be lost (#37), so a command asks too, once a second at most.
+            if Date().timeIntervalSince(fullSnapshotAskedAt[instance] ?? .distantPast) > 1 {
+                fullSnapshotAskedAt[instance] = Date()
+                send(["action": "snapshot"], to: instance)
+            }
+            return ["needSnapshot": true]
+        }
+        apply(snapshot)
+        return [:]
+    }
+
+    /// The icons the extension sent by a short name in place of a page's `data:` URL (#81), as base64, oldest first,
+    /// so a favorite, a pinned item or a closed tab made from such a tab can keep its icon (`savedIconURL`).
+    @ObservationIgnored private var namedIcons: [(name: String, data: String)] = []
+    /// The prefix of those names (DATA_ICON_PREFIX in background.js).
+    static let namedIconPrefix = "sidetabs-icon:"
+
+    private func noteIcon(url: String?, data: String?) {
+        guard let url, url.hasPrefix(Self.namedIconPrefix), let data, !data.isEmpty else { return }
+        namedIcons.removeAll { $0.name == url }
+        namedIcons.append((url, data))
+        if namedIcons.count > 100 {
+            namedIcons.removeFirst()
+        }
+    }
+
+    /// A tab's icon URL as kept with a favorite, a pinned item or a closed tab, which outlive the extension's copy:
+    /// a name for a `data:` icon (#81) becomes that `data:` URL again when the icon is here. Without it, the name
+    /// still works while the copy that gave it runs.
+    func savedIconURL(_ url: String?) -> String? {
+        guard let url, url.hasPrefix(Self.namedIconPrefix),
+              let data = namedIcons.last(where: { $0.name == url })?.data else { return url }
+        return "data:application/octet-stream;base64," + data
+    }
+
     private func apply(_ snapshot: Snapshot) {
-        if let existing = snapshots[snapshot.instance], existing.seq > snapshot.seq {
+        if let applied = appliedSeq[snapshot.instance], applied > snapshot.seq {
             return
         }
         let isNewInstance = snapshots[snapshot.instance] == nil
+        appliedSeq[snapshot.instance] = snapshot.seq
+        copyStates[snapshot.instance] = snapshot
         reportedSnapshots[snapshot.instance] = snapshot
-        snapshots[snapshot.instance] = snapshot
+        // Only when it shows something else (#81): the same windows again, as most snapshots are, change nothing.
+        if snapshots[snapshot.instance].map({ !$0.hasSameContent(as: snapshot) }) ?? true {
+            snapshots[snapshot.instance] = snapshot
+        }
         let tabCounts = snapshot.windows.map { String($0.tabs.count) }.joined(separator: "+")
         log.info("snapshot \(snapshot.seq) from \(snapshot.instance.prefix(8), privacy: .public): \(snapshot.windows.count) windows, tabs \(tabCounts, privacy: .public), focused \(snapshot.focusedWindowId ?? -1)")
         compareWithReplaced(snapshot)
@@ -408,7 +531,7 @@ final class TabStore {
         if let seq {
             // Reports are separate messages and can arrive out of order. One older than a
             // snapshot or report already applied describes a tab Safari has since left.
-            if seq <= (snapshots[instance]?.seq ?? -1) || seq <= (lastActivation[instance]?.seq ?? -1) {
+            if seq <= (appliedSeq[instance] ?? -1) || seq <= (lastActivation[instance]?.seq ?? -1) {
                 log.info("ignoring an older tab switch report (\(seq)) from \(instance.prefix(8), privacy: .public)")
                 return
             }
@@ -596,6 +719,9 @@ final class TabStore {
     func safariDidTerminate() {
         snapshots.removeAll()
         reportedSnapshots.removeAll()
+        appliedSeq.removeAll()
+        copyStates.removeAll()
+        fullSnapshotAskedAt.removeAll()
         lastActivation.removeAll()
         switchAsks.removeAll()
         anchors.removeAll()
@@ -607,29 +733,160 @@ final class TabStore {
         copies.removeAll()
         replacedCopies.removeAll()
         replacedIds.removeAll()
+        dockedAsks.removeAll()
+        dockedCheck?.cancel()
+        dockedCheck = nil
+        dockedUnknownSince = nil
         if !liveInstances.isEmpty {
             liveInstances.removeAll()
         }
-    }
-
-    func requestSnapshot() {
-        lastSnapshotRequest = Date()
-        sendCommand?(["action": "snapshot"]) {}
-    }
-
-    /// Safari doesn't always tell extensions about windows it restores (Reopen Last Closed
-    /// Window, relaunch), so when the docked window matches nothing we know, ask again.
-    private func requestSnapshotIfUnknown(title: String?) {
-        guard let title, !title.isEmpty else { return }
-        guard dockedWindows(title: title).isEmpty, Date().timeIntervalSince(lastSnapshotRequest) > 0.5 else { return }
-        requestSnapshot()
-        // Titles can lag behind while a page loads; check once more shortly after.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self, self.dockedWindowTitle == title else { return }
-            if self.dockedWindows(title: title).isEmpty {
-                self.requestSnapshot()
-            }
+        // Its extension went with it; the next message from a new launch connects it again.
+        connectionCheck?.cancel()
+        connectionCheck = nil
+        if isConnected {
+            isConnected = false
+            bridgeLog.notice("Safari quit; the extension no longer counts as connected")
         }
+        scheduleCopyCheck()
+    }
+
+    /// Asks the extension for a full snapshot: only copy `copy` (#47), or every copy when it's nil, which is
+    /// for when none can be told apart: Side Tabs starting, Safari launching, the Mac waking.
+    func requestSnapshot(of copy: String? = nil) {
+        if let copy {
+            send(["action": "snapshot"], to: copy)
+        } else {
+            sendCommand?(["action": "snapshot"]) {}
+        }
+    }
+
+    // MARK: - Asking about the docked window (#82, #47)
+    //
+    // Safari doesn't always tell extensions about windows it restores (Reopen Last Closed Window, a relaunch),
+    // so when the docked window's title fits no window the copies list, its copy may have to be asked for a
+    // snapshot. But a title nearly always fits nothing only for a moment: Accessibility reports a new title
+    // before the extension reports the change (its lazy snapshot, 30–250 ms after the change and longer under
+    // load), and before a copy's `activated` report of a tab switch made in Safari. A full snapshot costs Safari
+    // a query of every window and tab, the app a decode, and the sidebar a redraw, and a page can change its
+    // title every second. So the docked window's copy is asked only:
+    //
+    // - once the title has fitted nothing for `dockedAskWait`, longer than those reports take to arrive (and
+    //   no later than `dockedAskLatest` after the docked window's title stopped fitting, however often it
+    //   changes, so a restored window is asked about before it counts as unseen);
+    // - while the docked window isn't one its copy can't see (`unseenDockedWindow`, #41): asking never helps;
+    // - while its copy doesn't list as many windows as Safari has like it (`dockedLikeWindowCount`): a copy
+    //   that does can see them all, and is only behind on a title;
+    // - of the docked window's copy alone (`dockedCopiesToAsk`): every copy only when none can be told;
+    // - at most `dockedAsksPerListing` times while the copy lists the same windows and the window stays docked,
+    //   so a title that never fits (Safari titles the window other than its page) doesn't ask again and again.
+
+    /// How long the docked window's title has to fit nothing before its copy is asked: longer than the
+    /// extension's lazy snapshot of a change and a copy's `activated` report take to arrive. Also how long
+    /// after an ask its copy is asked once more, if the window still fits nothing.
+    static let dockedAskWait: TimeInterval = 0.7
+    /// The longest the docked window's titles can go on fitting nothing before its copy is asked, counted from
+    /// the first of them: under `ProfileRules.offAfter`, when a window its copy doesn't list counts as unseen.
+    static let dockedAskLatest: TimeInterval = 1.3
+    /// How many times a copy is asked about the docked window while it lists the same windows: once, and
+    /// once more in case Safari was still restoring the window.
+    static let dockedAsksPerListing = 2
+
+    /// The pending look at whether to ask about the docked window.
+    @ObservationIgnored private var dockedCheck: DispatchWorkItem?
+    /// Since when the docked window's title has fitted no window, through any changes to it.
+    @ObservationIgnored private var dockedUnknownSince: Date?
+    /// The asks about the docked window since it was docked, by copy ("" for every copy): the windows the copy
+    /// listed when it was last asked, and how many times it was asked while it listed them.
+    @ObservationIgnored private var dockedAsks: [String: (listing: Set<String>, count: Int)] = [:]
+
+    /// Another window is docked, or none (SafariProfiles): its copy may be asked about it afresh.
+    func dockedWindowChanged() {
+        dockedAsks.removeAll()
+        dockedUnknownSince = nil
+        scheduleDockedWindowCheck(restart: true)
+    }
+
+    private func dockedTitleChanged(from oldTitle: String?) {
+        // The wait starts afresh unless the title before this one still fits nothing either.
+        let wasUnknown = oldTitle.map { !$0.isEmpty && dockedWindows(title: $0).isEmpty } ?? false
+        if !wasUnknown {
+            dockedUnknownSince = nil
+        }
+        scheduleDockedWindowCheck(restart: true)
+    }
+
+    /// Looks at whether to ask about the docked window once its title has fitted nothing for `dockedAskWait`.
+    /// A new title (`restart`) puts the look off until it has waited that long too, but no later than
+    /// `dockedAskLatest` after the titles stopped fitting; anything else leaves a pending look where it is.
+    private func scheduleDockedWindowCheck(restart: Bool) {
+        guard let title = dockedWindowTitle, !title.isEmpty, dockedWindows(title: title).isEmpty else {
+            dockedCheck?.cancel()
+            dockedCheck = nil
+            dockedUnknownSince = nil
+            return
+        }
+        let now = Date()
+        let since = dockedUnknownSince ?? now
+        dockedUnknownSince = since
+        if dockedCheck != nil, !restart { return }
+        var wait = Self.dockedAskWait
+        if restart {
+            wait = max(0, min(wait, since.addingTimeInterval(Self.dockedAskLatest).timeIntervalSince(now)))
+        }
+        dockedCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.dockedCheck = nil
+            self.askAboutDockedWindowIfUnknown()
+        }
+        dockedCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
+    }
+
+    private func askAboutDockedWindowIfUnknown() {
+        guard let title = dockedWindowTitle, !title.isEmpty, dockedWindows(title: title).isEmpty else {
+            dockedUnknownSince = nil
+            return
+        }
+        guard unseenDockedWindow == nil, !dockedCopyListsEveryLikeWindow else { return }
+        var asked: [String] = []
+        for copy in dockedCopiesToAsk.map({ $0 as [String?] }) ?? [nil] {
+            let key = copy ?? ""
+            let listing = Set(snapshots.values.filter { copy == nil || $0.instance == copy }.flatMap { snapshot in
+                snapshot.windows.map { "\(snapshot.instance)/\($0.id)" }
+            })
+            let before = dockedAsks[key].flatMap { $0.listing == listing ? $0.count : nil } ?? 0
+            guard before < Self.dockedAsksPerListing else { continue }
+            dockedAsks[key] = (listing, before + 1)
+            requestSnapshot(of: copy)
+            asked.append(copy.map { "copy \($0.prefix(8))" } ?? "every copy")
+        }
+        guard !asked.isEmpty else { return }
+        let waited = Int(Date().timeIntervalSince(dockedUnknownSince ?? Date()) * 1000)
+        log.notice("the docked window has fitted no window the extension lists for \(waited) ms; asked \(asked.joined(separator: ", "), privacy: .public) for a snapshot")
+        // In case Safari was still restoring the window, its copy is asked once more if it still fits nothing.
+        scheduleDockedWindowCheck(restart: false)
+    }
+
+    /// The copies to ask about the docked window: its profile's (the default profile's for a private window),
+    /// else the copy of the window the sidebar shows (#47). Empty when its profile's copy hasn't spoken yet: it
+    /// sends a snapshot when it starts. Nil when no copy can be told: Side Tabs or Safari starting.
+    private var dockedCopiesToAsk: [String]? {
+        if let profile = dockedWindowIsPrivate ? "default" : dockedWindowProfile {
+            let own = snapshots.values.filter { Self.isCopy($0, of: profile) }.map(\.instance).sorted()
+            return own.isEmpty && snapshots.isEmpty ? nil : own
+        }
+        return currentWindow.map { [$0.instance] }
+    }
+
+    /// The docked window's live copy lists as many windows as Safari has like it (`dockedLikeWindowCount`): it
+    /// can see them all, and is only behind on a title.
+    private var dockedCopyListsEveryLikeWindow: Bool {
+        guard let likeWindows = dockedLikeWindowCount, let profile = dockedWindowIsPrivate ? "default" : dockedWindowProfile else {
+            return false
+        }
+        let windows = liveSnapshots.values.filter { Self.isCopy($0, of: profile) }.flatMap(\.windows)
+        return windows.filter { $0.incognito == dockedWindowIsPrivate }.count >= max(likeWindows, 1)
     }
 
     // MARK: - Copies of the extension
@@ -641,9 +898,11 @@ final class TabStore {
     //
     // - Quiet: nothing of any kind from it for `quietAfter`, while it could have spoken (#45, CopySilence):
     //   the Mac asleep, the screen locked and the like don't count, and when they end every copy starts
-    //   over. Its windows aren't shown. Its snapshot stays in `snapshots`, and with it its bookmarks' tabs
-    //   and cleanup's clocks, because under heavy load a copy that is running has gone that long without a
-    //   word. Anything it sends shows its windows again.
+    //   over. Nor does a pause in heartbeats the app asked for during one of them (#80). One timer looks at
+    //   the moment the first live copy could go quiet (`scheduleCopyCheck`). Its windows aren't shown. Its
+    //   snapshot stays in `snapshots`, and with it its bookmarks' tabs and cleanup's clocks, because under
+    //   heavy load a copy that is running has gone that long without a word. Anything it sends shows its
+    //   windows again.
     // - Gone: a newer copy of the same profile has reported (`replace`), or Safari quit
     //   (`safariDidTerminate`). Only then does its snapshot go, through the paths for an instance that's
     //   gone: its clocks are dropped and its bookmarks' tabs wait to be re-linked to the new copy's.
@@ -664,6 +923,11 @@ final class TabStore {
         var quietInBackground = false
         /// It's live again on that extra chance, without having spoken.
         var onExtraChance = false
+        /// Until when its heartbeats are paused, as its last message said (`heartbeatsPausedFor`, #80). Nil
+        /// when they aren't.
+        var pausedUntil: TimeInterval?
+        /// It has been told to start heartbeating again since it last said it was paused.
+        var toldToResume = false
     }
 
     /// What a message says about the copy that sent it (see `hear`).
@@ -677,11 +941,9 @@ final class TabStore {
     }
 
     /// How long a copy can go without sending anything, while it could speak, before it counts as quiet and
-    /// its windows are hidden. It sends a heartbeat every 5 s, but under heavy load the extension has run up
-    /// to 20 s late (#16–#22).
+    /// its windows are hidden. It sends something at least every 10 s, but under heavy load the extension has
+    /// run up to 20 s late (#16–#22).
     static let quietAfter = CopySilence.allowance
-    /// How often copies are checked for having gone quiet, while there are any.
-    static let quietCheckInterval: TimeInterval = 5
 
     /// The copies of the extension that are running now: heard from within `quietAfter`, and not replaced by a
     /// newer copy of their profile. By instance id, as in `snapshots` and `TabKey`. Read-only.
@@ -690,7 +952,11 @@ final class TabStore {
     /// live may still have a snapshot in `snapshots` (a quiet copy keeps it), but its windows aren't shown.
     /// Quiet usually means stopped, but it can also be a copy held up by heavy load: it's live again as soon
     /// as it sends anything.
-    private(set) var liveInstances: Set<String> = []
+    private(set) var liveInstances: Set<String> = [] {
+        didSet {
+            if liveInstances != oldValue { refreshShown() }
+        }
+    }
 
     /// Whether a live copy (see `liveInstances`) reports for `profile`: a profile's UUID string as
     /// `Snapshot.profile` has it, or nil for the default profile.
@@ -728,9 +994,12 @@ final class TabStore {
     /// For a copy that replaced another: the replaced copy's window and tab ids, and the most of them it has
     /// reported so far (see `compareWithReplaced`).
     @ObservationIgnored private var replacedIds: [String: (since: TimeInterval, windows: Set<Int>, tabs: Set<Int>, most: Int)] = [:]
-    @ObservationIgnored private var quietCheckScheduled = false
-    /// A look at `copiesHaveHadTheirChance` for when they will have.
-    @ObservationIgnored private var chanceCheck: DispatchWorkItem?
+    /// The one timer for looking at the copies (`noteQuietCopies`), and when it's set for, on the awake clock:
+    /// the moment the first live copy could go quiet, the copies will all have had their chance, or, during a
+    /// hold, they're to be asked to stop heartbeating again. Nil when there's nothing to look at. Read by the
+    /// checks in Tests/.
+    @ObservationIgnored private var copyCheckTimer: DispatchSourceTimer?
+    @ObservationIgnored private(set) var nextCopyCheck: TimeInterval?
 
     /// Notes a message from a copy of the extension.
     ///
@@ -741,6 +1010,11 @@ final class TabStore {
     private func hear(from object: [String: Any]) -> Sender {
         guard let instance = object["instance"] as? String else { return .live }
         let now = uptime()
+        // The moment this copy could go quiet has moved.
+        defer {
+            notePause(of: instance, from: object, at: now)
+            scheduleCopyCheck()
+        }
         let profile = object["profile"] as? String
         if let replacedAt = replacedCopies[instance] {
             let since = now - replacedAt
@@ -761,7 +1035,6 @@ final class TabStore {
             }
             copies[instance] = Copy(profile: profile, lastHeard: now)
             liveInstances.insert(instance)
-            scheduleQuietCheck()
             return .live
         }
         let silence = now - copy.lastHeard
@@ -782,6 +1055,26 @@ final class TabStore {
         return .backFromQuiet
     }
 
+    /// Takes what a message from a copy says about a pause in its heartbeats (#80). A copy that's still paused
+    /// with no hold on missed the word that the hold ended, and is told again, once per pause.
+    private func notePause(of instance: String, from object: [String: Any], at now: TimeInterval) {
+        guard var copy = copies[instance] else { return }
+        let milliseconds = (object["heartbeatsPausedFor"] as? NSNumber)?.doubleValue ?? 0
+        guard milliseconds > 0 else {
+            copy.pausedUntil = nil
+            copy.toldToResume = false
+            copies[instance] = copy
+            return
+        }
+        copy.pausedUntil = now + min(milliseconds / 1000, CopySilence.pauseLength)
+        if silence.holds.isEmpty, !copy.toldToResume {
+            copy.toldToResume = true
+            log.notice("extension copy \(instance.prefix(8), privacy: .public) still has heartbeats paused, \(Int(milliseconds / 1000)) s more; telling it to start again")
+            send(["action": "resumeHeartbeats"], to: instance)
+        }
+        copies[instance] = copy
+    }
+
     /// `old` has stopped for good, because `new`, a newer copy of the same profile, has reported. Its snapshot
     /// goes, and with it cleanup's clocks for its tabs (TabCleanup.noteViewing). Its bookmarks' tabs and its
     /// tabs' custom names go to `new`'s tabs on the same pages when `new` sends its first snapshot
@@ -793,6 +1086,9 @@ final class TabStore {
             liveInstances.remove(old)
         }
         lastActivation[old] = nil
+        appliedSeq[old] = nil
+        copyStates[old] = nil
+        fullSnapshotAskedAt[old] = nil
         anchors = anchors.filter { $0.key.instance != old }
         switchAsks.removeAll { $0.key.instance == old }
         if pendingActivation?.key.instance == old {
@@ -829,13 +1125,16 @@ final class TabStore {
     }
 
     /// Hides the windows of copies that have sent nothing for `quietAfter` while they could have spoken.
-    /// Runs every few seconds while there are copies, while they may not all have spoken yet, and during a
-    /// hold.
+    /// Runs when the first live copy could have gone quiet, when every copy will have had its chance to speak,
+    /// and during a hold when it's time to ask the copies to stop heartbeating, if any are known
+    /// (`scheduleCopyCheck`). Reads the holds afresh first, so one that began or ended without a notification
+    /// is noticed.
     func noteQuietCopies() {
         noteHolds()
         let now = uptime()
+        defer { scheduleCopyCheck() }
         for (instance, copy) in copies where liveInstances.contains(instance) {
-            let counted = silence.silence(lastHeard: copy.lastHeard, extraChance: copy.extraChance, at: now)
+            let counted = silence.silence(lastHeard: copy.lastHeard, extraChance: copy.extraChance, pausedUntil: copy.pausedUntil, at: now)
             guard counted >= Self.quietAfter else { continue }
             liveInstances.remove(instance)
             copies[instance]?.quietInBackground = !safariIsFrontmost
@@ -845,6 +1144,9 @@ final class TabStore {
             log.notice("extension copy \(instance.prefix(8), privacy: .public) has sent nothing for \(Int(counted)) s\(before, privacy: .public)\(self.safariIsFrontmost ? "" : ", Safari in the background", privacy: .public); hiding its \(self.snapshots[instance]?.windows.count ?? 0) windows until it does")
         }
         noteChance(at: now)
+        if !copies.isEmpty, let ask = silence.nextPauseAsk, now >= ask {
+            askCopiesToPause(at: now)
+        }
     }
 
     /// Something that can hold Safari's copies back has changed (HoldWatcher): the Mac slept or woke, the
@@ -853,7 +1155,7 @@ final class TabStore {
     func holdsMayHaveChanged() {
         noteHolds()
         noteChance(at: uptime())
-        scheduleQuietCheck()
+        scheduleCopyCheck()
     }
 
     /// Safari has launched: its copies are all new, and none has spoken yet. Until they've had the time to,
@@ -863,7 +1165,7 @@ final class TabStore {
         silence.startListening(at: now)
         log.notice("Safari launched; no profile counts as off for \(Int(Self.quietAfter)) s while its extension copies start")
         noteChance(at: now)
-        scheduleQuietCheck()
+        scheduleCopyCheck()
     }
 
     /// Takes what's holding the copies back now. When the last hold ends, every copy starts over with a whole
@@ -873,8 +1175,19 @@ final class TabStore {
         let held = currentHolds()
         let before = silence.holds
         guard held != before else { return }
-        if silence.update(holds: held, at: uptime()) {
-            log.notice("the extension's copies are no longer held back by \(CopySilence.describe(before), privacy: .public): each has \(Int(Self.quietAfter)) s to speak before it counts as quiet; asking each for a snapshot")
+        let paused = silence.pauseAskedDuringHold
+        let now = uptime()
+        if silence.update(holds: held, at: now) {
+            let missed = silence.missedResumeUntil.map { ", or until \(Int($0 - now + Self.quietAfter)) s from now if it isn't heard from first, since it may have missed this" } ?? ""
+            log.notice("the extension's copies are no longer held back by \(CopySilence.describe(before), privacy: .public): each has \(Int(Self.quietAfter)) s to speak before it counts as quiet\(missed, privacy: .public); asking each for a snapshot\(paused ? " and to heartbeat again" : "", privacy: .public)")
+            // The connection's silence counts again, from the same moment.
+            if isConnected {
+                checkConnection()
+            }
+            if paused {
+                // A copy that misses this is silent until its pause runs out, which `silence` allows for.
+                sendCommand?(["action": "resumeHeartbeats"]) {}
+            }
             requestSnapshot()
         } else if before.isEmpty {
             log.notice("the extension's copies are held back by \(CopySilence.describe(held), privacy: .public); their silence doesn't count until that ends")
@@ -883,7 +1196,8 @@ final class TabStore {
         }
     }
 
-    /// Updates `copiesHaveHadTheirChance`, and looks again when they will have.
+    /// Updates `copiesHaveHadTheirChance`. The copy check looks again when they will have
+    /// (`scheduleCopyCheck`).
     private func noteChance(at now: TimeInterval) {
         let had = silence.copiesHaveHadTheirChance(at: now)
         if copiesHaveHadTheirChance != had {
@@ -892,18 +1206,23 @@ final class TabStore {
                 log.notice("every extension copy has had \(Int(Self.quietAfter)) s to speak; Side Tabs can count as off in a profile again")
             }
         }
-        chanceCheck?.cancel()
-        chanceCheck = nil
-        // During a hold it can't be told; the hold's end looks again.
-        guard !had, let wait = silence.timeUntilCopiesHaveHadTheirChance(at: now) else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.chanceCheck = nil
-            self.noteHolds()
-            self.noteChance(at: self.uptime())
+    }
+
+    /// A hold has lasted `CopySilence.pauseAfter`, or `CopySilence.pauseRenewal` since the last ask: asks every
+    /// copy to stop heartbeating for `CopySilence.pauseLength`, while their silence doesn't count anyway (#80).
+    /// The ask says until when on the wall clock and for how long, and a copy stops at whichever comes first,
+    /// so a copy never stays silent past `pauseLength` after the ask (the Mac sleeping in between only shortens
+    /// it), nor long past it if the command was delivered late. A copy that misses an ask goes on heartbeating.
+    /// Only while copies are known: with none (Safari not running, say), nothing is asked, and no timer runs for
+    /// it.
+    private func askCopiesToPause(at now: TimeInterval) {
+        if !silence.pauseAskedDuringHold {
+            log.notice("the extension's copies have been held back by \(CopySilence.describe(self.silence.holds), privacy: .public) for \(Int(CopySilence.pauseAfter)) s; asking them to stop heartbeating until that ends")
         }
-        chanceCheck = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + wait + 0.05, execute: work)
+        silence.notePauseAsked(at: now)
+        let milliseconds = Int(CopySilence.pauseLength * 1000)
+        let until = Int(clock().timeIntervalSince1970 * 1000) + milliseconds
+        sendCommand?(["action": "pauseHeartbeats", "until": until, "ms": milliseconds]) {}
     }
 
     /// Safari came to the front. In the background, Safari can hold its extensions' timers back (its windows
@@ -925,19 +1244,60 @@ final class TabStore {
                 send(["action": "snapshot"], to: instance)
             }
         }
+        scheduleCopyCheck()
     }
 
-    private func scheduleQuietCheck() {
-        guard !quietCheckScheduled else { return }
-        quietCheckScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.quietCheckInterval) { [weak self] in
-            guard let self else { return }
-            self.quietCheckScheduled = false
-            self.noteQuietCopies()
-            if !self.copies.isEmpty || !self.copiesHaveHadTheirChance || !self.silence.holds.isEmpty {
-                self.scheduleQuietCheck()
+    /// When the copies next need looking at (see `nextCopyCheck`), on the awake clock, or nil for never.
+    private func nextCopyCheckTime(at now: TimeInterval) -> TimeInterval? {
+        var times: [TimeInterval] = []
+        for (instance, copy) in copies where liveInstances.contains(instance) {
+            if let quiet = silence.quietAt(lastHeard: copy.lastHeard, extraChance: copy.extraChance, pausedUntil: copy.pausedUntil) {
+                times.append(quiet)
             }
         }
+        if !copiesHaveHadTheirChance, let wait = silence.timeUntilCopiesHaveHadTheirChance(at: now) {
+            times.append(now + wait)
+        }
+        // During a hold, only to ask copies to pause: with none known there's nothing to ask, and the hold's end
+        // comes from HoldWatcher's notifications.
+        if !copies.isEmpty, let ask = silence.nextPauseAsk {
+            times.append(ask)
+        }
+        return times.min()
+    }
+
+    /// Sets the copy check's one timer for when the copies next need looking at, or stops it when they don't
+    /// (#80). Called whenever that moment may have moved: a message from a copy, a hold beginning or ending,
+    /// Safari launching, quitting or coming to the front, and each check. The timer has leeway, so macOS can
+    /// line it up with other wakeups; it's never early, and a check that finds it a moment early sets it again.
+    private func scheduleCopyCheck() {
+        let now = uptime()
+        guard let next = nextCopyCheckTime(at: now) else {
+            copyCheckTimer?.cancel()
+            copyCheckTimer = nil
+            nextCopyCheck = nil
+            return
+        }
+        guard next != nextCopyCheck || copyCheckTimer == nil else { return }
+        nextCopyCheck = next
+        // A moment past it, so the check doesn't find the copy a hair short of quiet.
+        let delay = max(0, next - now) + 0.05
+        let leeway = DispatchTimeInterval.milliseconds(Int(min(5, max(0.1, delay / 10)) * 1000))
+        if let copyCheckTimer {
+            copyCheckTimer.schedule(deadline: .now() + delay, repeating: .never, leeway: leeway)
+            return
+        }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.nextCopyCheck = nil
+                self.noteQuietCopies()
+            }
+        }
+        timer.schedule(deadline: .now() + delay, repeating: .never, leeway: leeway)
+        copyCheckTimer = timer
+        timer.resume()
     }
 
     /// A profile for the log: its UUID's first characters, never its name.
@@ -1019,21 +1379,99 @@ final class TabStore {
 
     var hasData: Bool { !snapshots.isEmpty }
 
-    var isConnected: Bool {
-        guard let lastMessageAt else { return false }
-        return uptime() - lastMessageAt < 60
+    /// How long the extension can be silent, in awake time, before it counts as not connected. Well above the
+    /// heartbeat's interval, so a missed heartbeat or two doesn't flip it.
+    static let connectedFor: TimeInterval = 60
+
+    /// A message from the extension: it's connected. `isConnected` is written only when it changes, and one
+    /// check is pending at a time, for when the silence would reach `connectedFor` (#83).
+    private func noteMessageArrived() {
+        lastMessageAt = uptime()
+        if !isConnected {
+            isConnected = true
+            bridgeLog.notice("the extension is connected")
+        }
+        if connectionCheck == nil {
+            scheduleConnectionCheck(after: Self.connectedFor)
+        }
+    }
+
+    /// Whether the extension has been silent for `connectedFor` seconds of awake time; if not, looks again when it
+    /// would have been. Silence counts as for a copy going quiet (CopySilence, #80): sleep doesn't count, as the
+    /// awake clock stops, nor does a hold, a pause in heartbeats a copy said it was in, or, after a hold, the
+    /// pause a copy may have missed the end of. During a hold nothing is counted, and the hold's end looks again
+    /// (`noteHolds`). The checks in Tests/ call this directly.
+    func checkConnection() {
+        connectionCheck?.cancel()
+        connectionCheck = nil
+        guard isConnected else { return }
+        // A hold that began or ended without a notification is noticed first.
+        noteHolds()
+        scheduleCopyCheck()
+        guard silence.holds.isEmpty else { return }
+        let paused = copies.values.compactMap(\.pausedUntil).max()
+        let silent = lastMessageAt.map { silence.silence(lastHeard: $0, pausedUntil: paused, at: uptime()) } ?? .infinity
+        if silent >= Self.connectedFor {
+            isConnected = false
+            bridgeLog.notice("the extension has been silent for \(Int(silent)) s; it no longer counts as connected")
+        } else {
+            scheduleConnectionCheck(after: Self.connectedFor - silent)
+        }
+    }
+
+    private func scheduleConnectionCheck(after wait: TimeInterval) {
+        connectionCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.checkConnection() }
+        connectionCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait + 0.05, execute: work)
     }
 
     /// True when Safari reports tabs but no URLs or titles, which means the extension
-    /// hasn't been allowed on websites yet.
-    var lacksWebsiteAccess: Bool {
-        let tabs = liveSnapshots.values.flatMap { $0.windows.flatMap(\.tabs) }
-        return !tabs.isEmpty && tabs.allSatisfy { $0.url == nil && $0.title == nil }
+    /// hasn't been allowed on websites yet. Kept (see `refreshShown`).
+    private(set) var lacksWebsiteAccess = false
+
+    private func computeLacksWebsiteAccess() -> Bool {
+        var anyTab = false
+        for snapshot in liveSnapshots.values {
+            for window in snapshot.windows {
+                for tab in window.tabs {
+                    if tab.url != nil || tab.title != nil { return false }
+                    anyTab = true
+                }
+            }
+        }
+        return anyTab
+    }
+
+    /// `currentWindow`, `shownContent`, `displayedContent` and `lacksWebsiteAccess` are kept rather than worked out
+    /// at every read: views read them in every body run, and each sorted the snapshots or went through every tab
+    /// (#81). This works them out again whenever something they depend on changes (each of those calls it), and sets
+    /// each only when it differs, so views aren't told of a change that isn't one.
+    private func refreshShown() {
+        let window = computeCurrentWindow()
+        if window != currentWindow {
+            currentWindow = window
+        }
+        let shown = computeShownContent()
+        if shown != shownContent {
+            shownContent = shown
+        }
+        let displayed = sidebarFade.showsOldContents ? fadingOutContent : shown
+        if displayed != displayedContent {
+            displayedContent = displayed
+        }
+        let lacks = computeLacksWebsiteAccess()
+        if lacks != lacksWebsiteAccess {
+            lacksWebsiteAccess = lacks
+        }
     }
 
     /// The Safari window the sidebar shows: the one most recently focused, cross-checked
     /// against the title of the window the panel is docked to. Only live copies' windows count.
-    var currentWindow: WindowSelection? {
+    /// Kept (see `refreshShown`).
+    private(set) var currentWindow: WindowSelection?
+
+    private func computeCurrentWindow() -> WindowSelection? {
         // Another profile's window is never shown for one its own copy can't see (#41).
         if unseenDockedWindow != nil { return nil }
         let ordered = liveSnapshots.values.sorted { $0.focusChangedAt > $1.focusChangedAt }
@@ -1438,7 +1876,8 @@ final class TabStore {
         DispatchQueue.main.asyncAfter(deadline: .now() + PendingActivation.lifetime) { [weak self] in
             guard let self, self.pendingActivation?.id == request.id else { return }
             self.log.notice("tab switch wasn't confirmed within a second; asking Safari where it is")
-            self.requestSnapshot()
+            // Only the clicked tab's copy can say (#47).
+            self.requestSnapshot(of: request.key.instance)
             // The extension may be too starved to answer (under load its snapshots came back seconds old,
             // or not at all), so Safari's tab bar is asked too, and settles the highlight and the wait.
             self.checkSelectedTab(
@@ -1626,6 +2065,8 @@ final class TabStore {
         guard var snapshot = snapshots[instance],
               let index = snapshot.windows.firstIndex(where: { $0.id == windowId }) else { return }
         body(&snapshot.windows[index])
+        // A change that changes nothing (the highlight already where it's moved to) isn't one (#81).
+        guard snapshot.windows[index] != snapshots[instance]?.windows[index] else { return }
         snapshots[instance] = snapshot
     }
 
@@ -1758,8 +2199,10 @@ final class TabStore {
         }
     }
 
-    /// What the sidebar's sections show, or nil for none.
-    var shownContent: ShownContent? {
+    /// What the sidebar's sections show, or nil for none. Kept (see `refreshShown`).
+    private(set) var shownContent: ShownContent?
+
+    private func computeShownContent() -> ShownContent? {
         if let preview = switchPreview {
             return content(for: preview.guess, profile: preview.profile, profileID: preview.profileID)
         }
@@ -1778,10 +2221,9 @@ final class TabStore {
         return unseenDockedWindow.map { .unseen(profile: $0.profile) }
     }
 
-    /// What the sections have on screen: while the old contents fade out, those; then `shownContent`.
-    var displayedContent: ShownContent? {
-        sidebarFade.showsOldContents ? fadingOutContent : shownContent
-    }
+    /// What the sections have on screen: while the old contents fade out, those; then `shownContent`. Kept (see
+    /// `refreshShown`).
+    private(set) var displayedContent: ShownContent?
 
     /// The profile whose Favorites and Pinned the sidebar shows.
     var shownProfile: ProfileKey? {
@@ -2142,7 +2584,7 @@ final class TabStore {
         let bookmark = Bookmark(
             title: displayTitle(for: tab, instance: instance),
             url: url,
-            faviconURL: tab.favIconUrl
+            faviconURL: savedIconURL(tab.favIconUrl)
         )
         guard insert(bookmark, into: list, in: place) else { return }
         // The tab moves up as the new bookmark's tab, unless it's another bookmark's, or its window
@@ -2261,7 +2703,7 @@ final class TabStore {
               bookmarkIds(shownIn: selection.window, instance: selection.instance).contains(bookmark.id) else { return }
         bookmarkLists.update(bookmark.id) { saved in
             saved.url = url
-            saved.faviconURL = tab.favIconUrl
+            saved.faviconURL = savedIconURL(tab.favIconUrl)
         }
         // The tab showing the page becomes the bookmark's too, if the bookmark has none in this window
         // (and the tab isn't another bookmark's). The bookmark's own tab is already.

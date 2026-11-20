@@ -14,8 +14,11 @@ import os
 // - which of the Dock's items is Safari's: the app item whose AXURL is Safari's bundle, never by title
 //   (translated) and never a minimized window's tile, a folder or another app
 // - whether a press was a plain click on it: started and ended on the icon, short enough that the
-//   Dock didn't open the icon's menu, barely moved, without Command or Control, and confirmed by the
-//   Dock in time
+//   Dock didn't open the icon's menu, ended within a few points of where it started, without Command
+//   or Control, and confirmed by the Dock in time
+// - whether to ask the Dock about a press at all (#85): only in the strip along the screen's edge where
+//   the Dock is, or near where Safari's icon was last time. Anywhere else the press can't be on the
+//   icon, and the Dock isn't asked about every click on the screen.
 
 /// One element of the Dock's Accessibility tree, as far as finding Safari's item needs to know it.
 /// The real ones read their attributes from the Dock (DockItemReader); the checks use constructed ones.
@@ -62,10 +65,22 @@ nonisolated struct DockPress: Equatable {
     /// When the watcher heard about the mouse-up, on ProcessInfo.systemUptime's clock: what the
     /// deadline for reporting the click is measured from.
     var upSeenAt: TimeInterval
-    /// The farthest the mouse got from `downPoint` during the press, the mouse-up included.
-    var farthest: CGFloat
     var withCommand: Bool
     var withControl: Bool
+}
+
+/// Which edge of the screen the Dock is on. Never the top.
+nonisolated enum DockEdge: String, CaseIterable {
+    case left, bottom, right
+}
+
+/// A display, as far as where the Dock can be on it goes: NSScreen's frame and visible frame, in AppKit's
+/// screen coordinates (origin at the bottom left of the main display, y up).
+nonisolated struct DockScreen: Equatable {
+    var frame: CGRect
+    /// The frame without the menu bar and the Dock. While the Dock shows, it leaves the Dock out; while
+    /// the Dock hides itself, a sliver along its edge.
+    var visibleFrame: CGRect
 }
 
 /// Why a press wasn't counted as a click on Safari's Dock icon. Logged, so a live test can tell.
@@ -196,6 +211,83 @@ nonisolated enum DockIconRules {
         CGPoint(x: point.x, y: primaryScreenHeight - point.y)
     }
 
+    /// A rectangle in AppKit's screen coordinates in Accessibility's, like `quartzPoint`.
+    static func quartzRect(cocoa rect: CGRect, primaryScreenHeight: CGFloat) -> CGRect {
+        CGRect(x: rect.minX, y: primaryScreenHeight - rect.maxY, width: rect.width, height: rect.height)
+    }
+
+    // MARK: - Whether to ask the Dock at all
+
+    /// The Dock's edge from its `orientation` preference: the bottom when it isn't set, as the Dock takes
+    /// it. Nil for a value the Dock doesn't have.
+    static func edge(orientation: String?) -> DockEdge? {
+        guard let orientation else { return .bottom }
+        return DockEdge(rawValue: orientation)
+    }
+
+    /// How far in from `edge` a display keeps room for the Dock: the Dock's thickness while it shows, a
+    /// sliver while it hides itself, nothing on an edge without it.
+    static func reserved(_ edge: DockEdge, on screen: DockScreen) -> CGFloat {
+        switch edge {
+        case .left: max(0, screen.visibleFrame.minX - screen.frame.minX)
+        case .right: max(0, screen.frame.maxX - screen.visibleFrame.maxX)
+        case .bottom: max(0, screen.visibleFrame.minY - screen.frame.minY)
+        }
+    }
+
+    /// The edges the Dock may be on: the one its preference names, and any edge a display keeps room on
+    /// (the preference may be a moment old when the Dock has just moved). All three when neither says.
+    static func dockEdges(orientation: DockEdge?, screens: [DockScreen]) -> Set<DockEdge> {
+        var edges: Set<DockEdge> = []
+        if let orientation {
+            edges.insert(orientation)
+        }
+        for screen in screens {
+            for edge in DockEdge.allCases where reserved(edge, on: screen) > 0 {
+                edges.insert(edge)
+            }
+        }
+        return edges.isEmpty ? Set(DockEdge.allCases) : edges
+    }
+
+    /// The thickest a Dock without magnification gets, whatever a display keeps for it (nothing while it
+    /// hides itself): icons as large as System Settings makes them are 128 points.
+    static let largestDock: CGFloat = 128
+
+    /// How deep the Dock's strip is from the edge: the Dock as thick as it gets, or as a display keeps room
+    /// for it, and as far again as a magnified icon reaches beyond it (`askRadius`).
+    static func stripDepth(reserved: CGFloat) -> CGFloat {
+        max(reserved, largestDock) + askRadius
+    }
+
+    /// Whether `point` (in Accessibility's coordinates) is in the strip along one of `edges` of the display
+    /// it's on, where the Dock is or can come out: on any display, since the Dock moves to whichever one
+    /// the pointer is at the edge of. With no displays to go by, every point is.
+    static func isInDockStrip(_ point: CGPoint, edges: Set<DockEdge>, screens: [DockScreen],
+                              primaryScreenHeight: CGFloat) -> Bool {
+        guard !screens.isEmpty else { return true }
+        return screens.contains { screen in
+            let frame = quartzRect(cocoa: screen.frame, primaryScreenHeight: primaryScreenHeight)
+            guard contains(frame, point) else { return false }
+            return edges.contains { edge in
+                let depth = stripDepth(reserved: reserved(edge, on: screen))
+                switch edge {
+                case .left: return point.x <= frame.minX + depth
+                case .right: return point.x >= frame.maxX - depth
+                case .bottom: return point.y >= frame.maxY - depth
+                }
+            }
+        }
+    }
+
+    /// Whether to ask the Dock about a press at `point`. In the Dock's strip always, and afresh: its icons
+    /// shift as apps open and quit, and the Dock moves, changes size and hides. Elsewhere only near where
+    /// Safari's icon was at the last reading (`lastFrames`). Anywhere else the press can't be on the
+    /// icon, and isn't worth a round trip to the Dock.
+    static func shouldAsk(_ point: CGPoint, inDockStrip: Bool, lastFrames: [CGRect]) -> Bool {
+        inDockStrip || isNear(point, frames: lastFrames)
+    }
+
     // MARK: - Whether a press was a click
 
     /// The Dock's menu delay when nobody has changed it: a press on an icon held this long opens the
@@ -218,10 +310,19 @@ nonisolated enum DockIconRules {
         min(menuDelay * 0.8, 1)
     }
 
-    /// How far the mouse may move during a click, in points. A click wobbles by a point or two; a
-    /// press that moves further is the start of a drag (taking the icon out of the Dock, or moving it
+    /// How far the mouse-up may be from the mouse-down in a click, in points. A click wobbles by a point
+    /// or two; a press that ends further away was a drag (taking the icon out of the Dock, or moving it
     /// along), which the Dock doesn't count as a click. Small next to the smallest icon (16 points).
+    ///
+    /// The watcher doesn't follow the mouse between the two (#85): that would wake Side Tabs for every
+    /// movement of every drag on the screen. A drag that comes back to within a few points of where it
+    /// started, in under `longestClick`, would count; nobody drags an icon out and back that fast.
     static let farthestMove: CGFloat = 6
+
+    /// How far the mouse-up was from the mouse-down.
+    static func moved(_ press: DockPress) -> CGFloat {
+        hypot(press.upPoint.x - press.downPoint.x, press.upPoint.y - press.downPoint.y)
+    }
 
     /// How long after the mouse-up a click may still be reported. The core waits about a second for
     /// the window macOS brings back, so a click the Dock was slow to confirm is dropped.
@@ -232,7 +333,7 @@ nonisolated enum DockIconRules {
         let held = press.upTime - press.downTime
         if press.withCommand || press.withControl { return .withModifier }
         if held < 0 || held >= longestClick(menuDelay: menuDelay) { return .heldTooLong }
-        if press.farthest > farthestMove { return .moved }
+        if moved(press) > farthestMove { return .moved }
         return nil
     }
 
@@ -267,10 +368,11 @@ nonisolated enum DockIconRules {
 
 /// Watches for a plain click on Safari's own icon in the Dock, while armed.
 ///
-/// `arm()` installs a global mouse monitor (mouse events only, never keys) and `disarm()` removes it.
-/// Each press is checked against Safari's item, read through the Dock's Accessibility on a queue of
-/// its own at the mouse-down and the mouse-up, so the frame is wherever the Dock is at that moment
-/// (any side, any display, shown after hiding, magnified). The main thread never waits for the Dock.
+/// `arm()` installs a global mouse monitor (mouse-downs and mouse-ups only, never keys or drags) and
+/// `disarm()` removes it. A press in the Dock's strip or near Safari's icon is checked against Safari's
+/// item, read through the Dock's Accessibility on a queue of its own at the mouse-down and the mouse-up,
+/// so the frame is wherever the Dock is at that moment (any side, any display, shown after hiding,
+/// magnified). A press anywhere else isn't asked about (#85). The main thread never waits for the Dock.
 @MainActor
 final class SafariDockIconWatcher {
     /// Called on the main thread after a plain click on Safari's Dock icon: a few milliseconds after
@@ -292,7 +394,6 @@ final class SafariDockIconWatcher {
         let time: TimeInterval
         let withCommand: Bool
         let withControl: Bool
-        var farthest: CGFloat = 0
     }
 
     init() {}
@@ -308,7 +409,8 @@ final class SafariDockIconWatcher {
         guard monitor == nil else { return }
         generation += 1
         let generation = generation
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+        // No `.leftMouseDragged`: how far the mouse went is taken from the mouse-down and the mouse-up (#85).
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { [weak self] event in
             MainActor.assumeIsolated {
                 self?.handle(event, generation: generation)
             }
@@ -337,11 +439,10 @@ final class SafariDockIconWatcher {
             let flags = event.modifierFlags
             press = Press(id: lastPressID, point: point, time: event.timestamp,
                           withCommand: flags.contains(.command), withControl: flags.contains(.control))
-            dock.pressBegan(lastPressID, at: point)
-        case .leftMouseDragged:
-            if let start = press {
-                press?.farthest = max(start.farthest, Self.distance(start.point, point))
-            }
+            let screens = NSScreen.screens
+            dock.pressBegan(lastPressID, at: point,
+                            screens: screens.map { DockScreen(frame: $0.frame, visibleFrame: $0.visibleFrame) },
+                            primaryScreenHeight: screens.first?.frame.height ?? 0)
         case .leftMouseUp:
             guard let start = press else { return }
             press = nil
@@ -349,7 +450,6 @@ final class SafariDockIconWatcher {
             let finished = DockPress(
                 downPoint: start.point, downTime: start.time, upPoint: point, upTime: event.timestamp,
                 upSeenAt: ProcessInfo.processInfo.systemUptime,
-                farthest: max(start.farthest, Self.distance(start.point, point)),
                 withCommand: start.withCommand || flags.contains(.command),
                 withControl: start.withControl || flags.contains(.control))
             dock.pressEnded(start.id, finished) { [weak self] in
@@ -378,10 +478,6 @@ final class SafariDockIconWatcher {
         let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
         return DockIconRules.quartzPoint(cocoa: event.locationInWindow, primaryScreenHeight: primaryHeight)
     }
-
-    private static func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
-        hypot(b.x - a.x, b.y - a.y)
-    }
 }
 
 // MARK: - Reading the Dock
@@ -391,8 +487,10 @@ final class SafariDockIconWatcher {
 /// answer in time, the press isn't counted.
 ///
 /// Safari's item is found once (a search reads every item in the Dock) and kept. Its frame and menu
-/// are read again at every mouse-down and mouse-up, in one round trip, so they're never out of date;
-/// when the kept item has gone (the Dock restarted) it's looked for again.
+/// are read again at the mouse-down and mouse-up of every press in the Dock's strip or near the icon,
+/// in one round trip, so they're never out of date there; when the kept item has gone (the Dock
+/// restarted) it's looked for again. A press anywhere else costs no round trip at all (#85): it's
+/// checked against the strip and the frames from the last reading first.
 nonisolated final class DockItemReader: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.digitaln.sidetabs.accessibility-dock", qos: .userInteractive)
     /// How long one Accessibility call to the Dock may take.
@@ -412,18 +510,27 @@ nonisolated final class DockItemReader: @unchecked Sendable {
     private var menuDelay = DockIconRules.defaultMenuDelay
     private var lastFailedSearch: TimeInterval = -.infinity
     private var down: (id: UInt64, hit: DockHit, detail: String)?
+    /// Safari's item's frames at the last reading that found them, for telling a press far from the icon.
+    private var lastFrames: [CGRect] = []
+    /// The Dock's edge from its preferences, and when they were last read.
+    private var orientation: DockEdge? = .bottom
+    private var orientationReadAt: TimeInterval = -.infinity
+    /// How often the Dock's `orientation` preference is read again while presses come in, so a Dock
+    /// moved to another edge is found there soon even while it hides itself. A read from the preferences
+    /// daemon, far cheaper than one from the Dock.
+    private static let orientationRefresh: TimeInterval = 5
 
-    /// Gets ready for clicks: the Dock's menu delay, where Safari is, and Safari's item if it isn't
-    /// known yet, so the first click doesn't wait for a search.
+    /// Gets ready for clicks: the Dock's menu delay and edge, where Safari is, and Safari's item (found
+    /// if it isn't known yet, so the first click doesn't wait for a search) and its frames.
     func prepare() {
         queue.async { [self] in
             menuDelay = DockIconRules.menuDelay(preference: Self.menuDelayPreference())
             knownSafariPaths = Self.safariPaths()
+            readOrientation()
             down = nil
             lastFailedSearch = -.infinity
-            if items.isEmpty {
-                search()
-            }
+            // Where Safari's icon is to begin with, so the first press away from the Dock isn't asked about.
+            _ = sample(at: nil)
         }
     }
 
@@ -433,8 +540,18 @@ nonisolated final class DockItemReader: @unchecked Sendable {
         }
     }
 
-    func pressBegan(_ id: UInt64, at point: CGPoint) {
+    /// `screens` and `primaryScreenHeight` as NSScreen has them at the mouse-down, for the Dock's strip.
+    func pressBegan(_ id: UInt64, at point: CGPoint, screens: [DockScreen], primaryScreenHeight: CGFloat) {
         queue.async { [self] in
+            if ProcessInfo.processInfo.systemUptime - orientationReadAt >= Self.orientationRefresh {
+                readOrientation()
+            }
+            let edges = DockIconRules.dockEdges(orientation: orientation, screens: screens)
+            let inStrip = DockIconRules.isInDockStrip(point, edges: edges, screens: screens, primaryScreenHeight: primaryScreenHeight)
+            guard DockIconRules.shouldAsk(point, inDockStrip: inStrip, lastFrames: lastFrames) else {
+                down = (id, .elsewhere, "far from the Dock, not asked")
+                return
+            }
             let sample = sample(at: point)
             down = (id, DockIconRules.hit(point, sample: sample), Self.describe(sample, at: point))
         }
@@ -448,7 +565,7 @@ nonisolated final class DockItemReader: @unchecked Sendable {
             // A press anywhere else on the screen: nothing to say. A Dock that didn't answer said so already.
             guard down.hit == .onIcon || down.hit == .menuOpen else { return }
             let held = Int(((press.upTime - press.downTime) * 1000).rounded())
-            let moved = Int(press.farthest.rounded())
+            let moved = Int(DockIconRules.moved(press).rounded())
             var up: DockHit?
             var upDetail = "not read"
             if down.hit == .onIcon, DockIconRules.pressRefusal(press, menuDelay: menuDelay) == nil {
@@ -479,9 +596,10 @@ nonisolated final class DockItemReader: @unchecked Sendable {
 
     // MARK: Reading
 
-    /// What the Dock says about Safari's item now, for a press at `point`. Nil when the Dock didn't
-    /// answer in time or Safari's item can't be found.
-    private func sample(at point: CGPoint) -> DockSample? {
+    /// What the Dock says about Safari's item now, for a press at `point` (nil: only the frames and
+    /// menu, without asking the Dock what's under a point). Nil when the Dock didn't answer in time or
+    /// Safari's item can't be found. Keeps the frames it read in `lastFrames`.
+    private func sample(at point: CGPoint?) -> DockSample? {
         for _ in 0..<2 {
             if items.isEmpty, !search() {
                 return nil
@@ -507,8 +625,11 @@ nonisolated final class DockItemReader: @unchecked Sendable {
                 items = []
                 continue
             }
+            if !frames.isEmpty {
+                lastFrames = frames
+            }
             var sample = DockSample(frames: frames, menuOpen: menuOpen, dockSaysOnItem: nil)
-            if !menuOpen, DockIconRules.isNear(point, frames: frames) {
+            if let point, !menuOpen, DockIconRules.isNear(point, frames: frames) {
                 guard let says = isItem(at: point) else {
                     log.info("the Dock didn't answer in time")
                     return nil
@@ -613,6 +734,14 @@ nonisolated final class DockItemReader: @unchecked Sendable {
             urls.append(installed)
         }
         return Set(urls.flatMap { [$0, $0.resolvingSymlinksInPath()] }.compactMap(DockIconRules.bundlePath))
+    }
+
+    /// The Dock's edge, from its `orientation` preference read afresh.
+    private func readOrientation() {
+        CFPreferencesAppSynchronize(DockIconRules.dockBundleID as CFString)
+        let value = CFPreferencesCopyAppValue("orientation" as CFString, DockIconRules.dockBundleID as CFString)
+        orientation = DockIconRules.edge(orientation: value as? String)
+        orientationReadAt = ProcessInfo.processInfo.systemUptime
     }
 
     /// The Dock's `popup-delay` preference, if it's set. Side Tabs isn't sandboxed, so it can read

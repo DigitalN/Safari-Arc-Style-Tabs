@@ -85,12 +85,33 @@ final class SafariTracker {
     /// that starts when it finishes, so a burst of window events costs Safari two reads at most.
     private struct RefreshRequest {
         var full: Bool
+        /// Something the user waits on: read at `.userInitiated` rather than the reader's `.utility`.
+        var urgent: Bool
+        /// Read Safari's bars again too, where they're read at all (`SafariWindowReader.read`).
+        var bars: Bool
         var completions: [(Bool) -> Void]
+
+        mutating func merge(_ other: RefreshRequest) {
+            full = full || other.full
+            urgent = urgent || other.urgent
+            bars = bars || other.bars
+            completions += other.completions
+        }
     }
     private var refreshRunning = false
     private var queuedRefresh: RefreshRequest?
     /// Bumped when attaching or detaching, so a read that started before can be told apart.
     private var attachment = 0
+    /// Attaching again after Safari refused to report its notifications (it was still starting up). The
+    /// dock's periodic look only runs while the sidebar is on and Safari in front (#78), and the profiles
+    /// need the tracker attached either way.
+    private var attachRetry: DispatchWorkItem?
+    private var attachRetries = 0
+    /// Picking the window again after a read Safari didn't answer in time, which kept what was known. The
+    /// notification that asked for it won't come again, and the dock's periodic look may not be running.
+    private var timedOutRetry: DispatchWorkItem?
+    private var timedOutRetries = 0
+    private static let retryDelays: [TimeInterval] = [1, 2, 4, 8]
 
     private static let appNotifications = [
         kAXFocusedWindowChangedNotification,
@@ -130,6 +151,7 @@ final class SafariTracker {
         observe(NSWorkspace.didLaunchApplicationNotification) { tracker, app in
             guard let app, app.bundleIdentifier == Self.safariBundleID else { return }
             tracker.app = app
+            tracker.attachRetries = 0
             // Give Safari a moment to create its accessibility hierarchy.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 tracker.attach(app)
@@ -138,6 +160,9 @@ final class SafariTracker {
         }
         observe(NSWorkspace.didTerminateApplicationNotification) { tracker, app in
             guard app?.bundleIdentifier == Self.safariBundleID else { return }
+            tracker.attachRetry?.cancel()
+            tracker.attachRetry = nil
+            tracker.attachRetries = 0
             tracker.detach()
             tracker.app = nil
             tracker.onEvent?(.terminated)
@@ -158,8 +183,9 @@ final class SafariTracker {
         attachIfNeeded()
     }
 
-    /// Attaches to a running Safari once Accessibility access is granted. Safe to call often.
-    func attachIfNeeded() {
+    /// Attaches to a running Safari once Accessibility access is granted. Safe to call often. With
+    /// `readingWindow`, also picks the window to dock to if none is known.
+    func attachIfNeeded(readingWindow: Bool = true) {
         if app == nil || app?.isTerminated == true {
             app = NSRunningApplication.runningApplications(withBundleIdentifier: Self.safariBundleID).first
         }
@@ -167,7 +193,7 @@ final class SafariTracker {
         if observer == nil {
             attach(app)
         }
-        if window == nil {
+        if readingWindow && window == nil {
             refreshWindow { [weak self] changed in
                 if changed {
                     self?.onEvent?(.windowChanged)
@@ -194,6 +220,7 @@ final class SafariTracker {
         let createError = AXObserverCreate(app.processIdentifier, callback, &created)
         guard createError == .success, let created else {
             log.error("AXObserverCreate failed: \(createError.rawValue)")
+            scheduleAttachRetry()
             return
         }
 
@@ -211,19 +238,40 @@ final class SafariTracker {
         let names = Self.appNotifications
         let reader = windowReader
         let epoch = attachment
-        reader.queue.async { [weak self, log] in
+        reader.queue.async(qos: .userInitiated, flags: .enforceQoS) { [weak self, log] in
             reader.use(observer: registration.observer, refcon: registration.refcon)
             let failures = reader.register(names, on: element, observer: registration.observer, refcon: registration.refcon)
             log.notice("attached to Safari pid \(pid); notification failures: \(failures.isEmpty ? "none" : failures.joined(separator: ", "), privacy: .public)")
-            guard failures.count >= names.count else { return }
+            let refused = failures.count >= names.count
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if let self, self.attachment == epoch {
+                    guard let self, self.attachment == epoch else { return }
+                    if refused {
                         self.detach()
+                        self.scheduleAttachRetry()
+                    } else {
+                        self.attachRetries = 0
                     }
                 }
             }
         }
+    }
+
+    /// Tries attaching again after a moment, backing off to every 8 s, for as long as Safari runs and the
+    /// tracker isn't attached.
+    private func scheduleAttachRetry() {
+        guard attachRetry == nil, isTrusted else { return }
+        let delay = Self.retryDelays[min(attachRetries, Self.retryDelays.count - 1)]
+        attachRetries += 1
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.attachRetry = nil
+            guard !self.isAttached, let app = self.app, !app.isTerminated else { return }
+            self.log.notice("attaching to Safari again, attempt \(self.attachRetries + 1)")
+            self.attachIfNeeded()
+        }
+        attachRetry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// An observer and the pointer its callback gets back, which can cross to the reader's queue.
@@ -243,8 +291,11 @@ final class SafariTracker {
         reading = WindowReading()
         focusedWindow = nil
         clickActions.forgetMenuItem()
+        timedOutRetry?.cancel()
+        timedOutRetry = nil
+        timedOutRetries = 0
         let reader = windowReader
-        reader.queue.async { reader.stopWatching() }
+        reader.queue.async(qos: .userInitiated, flags: .enforceQoS) { reader.stopWatching() }
     }
 
     private func handle(_ name: String, element: AXUIElement) {
@@ -283,12 +334,16 @@ final class SafariTracker {
     /// Only one read runs at a time. Requests made while it does are merged into the next.
     /// `full: false` only looks at the docked window's frame and the like, which is all a move or
     /// resize needs.
-    func refreshWindow(full: Bool = true, then completion: ((Bool) -> Void)? = nil) {
-        let request = RefreshRequest(full: full || window == nil, completions: completion.map { [$0] } ?? [])
+    ///
+    /// `urgent: false` is for the dock's periodic look (#78), which nobody waits on: it reads at the
+    /// reader queue's `.utility`. `bars: false`, also for the look while the overlay sidebar is away, reads
+    /// Safari's bars only if the window moved, changed size or went into or out of full screen since they
+    /// were last read (`SafariBars.readsAgain`).
+    func refreshWindow(full: Bool = true, urgent: Bool = true, bars: Bool = true, then completion: ((Bool) -> Void)? = nil) {
+        let request = RefreshRequest(full: full || window == nil, urgent: urgent, bars: bars, completions: completion.map { [$0] } ?? [])
         guard !refreshRunning else {
             if var queued = queuedRefresh {
-                queued.full = queued.full || request.full
-                queued.completions += request.completions
+                queued.merge(request)
                 queuedRefresh = queued
             } else {
                 queuedRefresh = request
@@ -314,8 +369,12 @@ final class SafariTracker {
         let previous = reading
         let reader = windowReader
         let toolbarInWindows = readsToolbarInWindows
-        reader.queue.async { [weak self] in
-            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full, toolbarInWindows: toolbarInWindows)
+        // Unspecified, the block runs at the queue's own `.utility`.
+        let qos: DispatchQoS = request.urgent ? .userInitiated : .unspecified
+        let flags: DispatchWorkItemFlags = request.urgent ? .enforceQoS : []
+        reader.queue.async(qos: qos, flags: flags) { [weak self] in
+            let outcome = reader.read(application: appElement, current: current, previous: previous, full: request.full,
+                                      toolbarInWindows: toolbarInWindows, bars: request.bars)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self?.finish(request, outcome: outcome, epoch: epoch)
@@ -339,11 +398,39 @@ final class SafariTracker {
             window = outcome.window
             reading = outcome.reading
         }
+        if request.full && epoch == attachment {
+            if outcome.keepPrevious {
+                scheduleTimedOutRetry()
+            } else {
+                timedOutRetry?.cancel()
+                timedOutRetry = nil
+                timedOutRetries = 0
+            }
+        }
         request.completions.forEach { $0(changed) }
         if let next = queuedRefresh {
             queuedRefresh = nil
             beginRefresh(next)
         }
+    }
+
+    /// Picks the window again after a read Safari didn't answer in time: after 1, 2, 4 and 8 s, then not until
+    /// a read succeeds, so a Safari that stays busy isn't asked over and over.
+    private func scheduleTimedOutRetry() {
+        guard timedOutRetry == nil, timedOutRetries < Self.retryDelays.count else { return }
+        let delay = Self.retryDelays[timedOutRetries]
+        timedOutRetries += 1
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.timedOutRetry = nil
+            self.refreshWindow(urgent: false) { [weak self] changed in
+                if changed {
+                    self?.onEvent?(.windowChanged)
+                }
+            }
+        }
+        timedOutRetry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     // MARK: - Window geometry (AX coordinates: origin top-left of the main display, y down)
@@ -383,7 +470,7 @@ final class SafariTracker {
         let previous = reading
         let reader = windowReader
         let toolbarInWindows = readsToolbarInWindows
-        reader.queue.async { [weak self] in
+        reader.queue.async(qos: .userInitiated, flags: .enforceQoS) { [weak self] in
             let reading = reader.setFrame(frame, of: window, previous: previous, toolbarInWindows: toolbarInWindows)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
