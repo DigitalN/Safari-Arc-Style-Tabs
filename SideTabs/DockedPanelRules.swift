@@ -33,3 +33,49 @@ nonisolated enum DockedPanelRules {
         return frontToBack[index + 1] == panel
     }
 }
+
+/// What ordering the panel behind Safari's window takes on one layout.
+nonisolated enum PanelOrdering: Equatable {
+    /// Order it behind Safari's window: it isn't on screen.
+    case order
+    /// Ask the window server for the windows' order, and order it only if it isn't directly behind.
+    case check
+    /// Nothing: Safari's window is being dragged.
+    case skip
+}
+
+/// When the docked panel is ordered behind Safari's window again (#85).
+///
+/// While Safari's window is dragged or resized with the mouse button held, every move lays the sidebar out
+/// again. Safari's window moving doesn't change what's stacked between it and the panel, and asking the
+/// window server for every app's windows on each move costs about what skipping the re-order saves, so a
+/// move during a drag does neither. Once the drag settles (the mouse button is up), the order is checked
+/// once. Every other layout (Safari activated, its window focused or new, a change of Space, the health
+/// look) checks it as before, and a panel that isn't on screen is always ordered in.
+nonisolated struct PanelOrderingRule: Equatable {
+    /// A drag skipped the check, so the drag's end has to make it.
+    private(set) var checkWhenSettled = false
+
+    /// For a layout of the docked panel. `dragging` is a move or resize of Safari's window with the mouse
+    /// button held.
+    mutating func layout(panelVisible: Bool, dragging: Bool) -> PanelOrdering {
+        if !panelVisible {
+            checkWhenSettled = false
+            return .order
+        }
+        if dragging {
+            checkWhenSettled = true
+            return .skip
+        }
+        checkWhenSettled = false
+        return .check
+    }
+
+    /// When a move or resize of Safari's window has settled with the mouse button up: the one check a
+    /// drag put off, if it put one off.
+    mutating func settled() -> PanelOrdering {
+        guard checkWhenSettled else { return .skip }
+        checkWhenSettled = false
+        return .check
+    }
+}

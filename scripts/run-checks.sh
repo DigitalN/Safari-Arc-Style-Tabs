@@ -111,8 +111,8 @@ echo "== docked window notifications"
 swiftc -o "$WORK/docked-window-checks" Tests/DockedWindowChecks/main.swift SideTabs/DockedWindowNotifications.swift
 "$WORK/docked-window-checks"
 
-# Dragging Safari's window moves the docked sidebar without working its shadow out again or ordering it
-# behind Safari's window again when it's already directly behind (#85).
+# Dragging Safari's window moves the docked sidebar without working its shadow out again, and without
+# checking or redoing its order behind Safari's window until the drag settles (#85).
 echo "== docked panel"
 swiftc -o "$WORK/docked-panel-checks" Tests/DockedPanelChecks/main.swift SideTabs/DockedPanelRules.swift
 "$WORK/docked-panel-checks"

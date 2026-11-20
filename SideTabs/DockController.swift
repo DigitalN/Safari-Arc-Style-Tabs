@@ -50,6 +50,8 @@ final class DockController {
 
     /// What the panel's shadow was last worked out for (`shapePanel`).
     private var shadowShape: PanelShadowShape?
+    /// When the panel is ordered behind Safari's window again (`orderPanel`).
+    private var ordering = PanelOrderingRule()
 
     /// Below this, narrowing Safari to fit the sidebar would make it unusable.
     private let minimumSafariWidth: CGFloat = 480
@@ -153,7 +155,8 @@ final class DockController {
         }
         switch event {
         case .moved, .resized:
-            update(makeRoom: false)
+            // With the mouse button held, the user is dragging or resizing Safari's window (#85).
+            update(makeRoom: false, dragging: NSEvent.pressedMouseButtons & 1 != 0)
             scheduleMakeRoom()
         case .launched:
             store.safariDidLaunch()
@@ -209,7 +212,8 @@ final class DockController {
 
     // MARK: - Layout
 
-    func update(makeRoom: Bool) {
+    /// `dragging`: for a move or resize of Safari's window while the user drags it (`PanelOrderingRule`).
+    func update(makeRoom: Bool, dragging: Bool = false) {
         store.safariIsFrontmost = tracker.isSafariFrontmost
 
         let hideReason: String?
@@ -271,7 +275,7 @@ final class DockController {
         if panel.level != .normal {
             panel.level = .normal
         }
-        orderPanel(below: window)
+        orderPanel(below: window, dragging: dragging)
         mode = .docked
         appliedInset = settings.width
         note("docked: Safari at \(axFrame.integral), panel at \(panel.frame), on screen: \(panel.isVisible && panel.isOnActiveSpace)")
@@ -357,16 +361,23 @@ final class DockController {
 
     /// Keeps the panel directly behind Safari's window: in front of everything Safari is in
     /// front of, and with its corner fill hidden under Safari.
-    private func orderPanel(below window: AXUIElement) {
+    ///
+    /// While Safari's window is dragged (`dragging`), a panel on screen is left where it is: the drag
+    /// doesn't change what's between the two windows, and the check waits until the drag settles
+    /// (`scheduleMakeRoom`). Otherwise a panel already directly behind stays there, and anything between
+    /// the two windows puts it back (#85).
+    private func orderPanel(below window: AXUIElement, dragging: Bool = false) {
         // Left on another Space (such as the one Safari just left full screen from), the panel
         // has to be ordered out and back in to move to the Space being shown.
         if panel.isVisible && !tracker.isOnActiveSpace(windowNumber: panel.windowNumber) {
             panel.orderOut(nil)
         }
-        // Already directly behind Safari's window, it stays there (#85): ordering it again on every
-        // move while Safari's window is dragged would ask the window server to re-order windows that
-        // are where they should be. Anything between the two windows still puts it back.
-        if let number = tracker.windowNumber(of: window), !(panel.isVisible && isDirectlyBehind(number)) {
+        order(below: window, ordering.layout(panelVisible: panel.isVisible, dragging: dragging))
+    }
+
+    private func order(below window: AXUIElement, _ ordering: PanelOrdering) {
+        if ordering != .skip, let number = tracker.windowNumber(of: window),
+           ordering == .order || !isDirectlyBehind(number) {
             panel.order(.below, relativeTo: number)
         }
         if !panel.isVisible {
@@ -415,7 +426,12 @@ final class DockController {
                 self?.scheduleMakeRoom()
                 return
             }
+            // The one check of the windows' order that a drag of Safari's window put off.
+            let settled = self.ordering.settled()
             if let window = self.tracker.window {
+                if self.mode == .docked {
+                    self.order(below: window, settled)
+                }
                 self.makeRoom(for: window)
             }
         }
