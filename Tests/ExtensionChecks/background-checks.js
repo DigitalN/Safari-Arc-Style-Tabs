@@ -1044,6 +1044,46 @@ async function settled(page) {
     }
 
     {
+        // A data: URL is hashed once, not every time the tab list is built (#84 review).
+        const page = load();
+        await settled(page);
+        page.state("globalThis.hashed = 0; { const real = hashOf; hashOf = (text) => { hashed++; return real(text); }; }");
+        const dataURL = "data:image/png;base64," + "QUJD".repeat(2000);
+        page.fire("runtime.message", { type: "favicon", url: dataURL }, { tab: { id: 2 } });
+        page.fire("runtime.message", { type: "favicon", url: dataURL }, { tab: { id: 4 } });
+        await sleep(200);
+        check(page.state("hashed") === 1, `the first tab list with the icon hashes it once, for both tabs that show it (${page.state("hashed")} times)`);
+        updateTab(page, 2, { title: "Again" });
+        await page.run({ action: "snapshot" });
+        await sleep(400);
+        updateTab(page, 4, { title: "And again" });
+        await sleep(400);
+        check(page.state("hashed") === 1, `later tab lists, full or changes, don't hash it again (${page.state("hashed")} times)`);
+        const name = lastState(page)?.tabs?.find((tab) => tab.id === 4)?.favIconUrl
+            ?? page.states().filter((message) => message.type === "snapshot").at(-1)?.windows[0].tabs[3].favIconUrl;
+        check(typeof name === "string" && name.startsWith("sidetabs-icon:"), `and they carry the same name (${name?.slice(0, 40)})`);
+
+        // Past DATA_ICON_LIMIT the oldest icon is forgotten, by both maps at once.
+        const limit = page.state("DATA_ICON_LIMIT");
+        const urls = Array.from({ length: limit + 5 }, (_, i) => `data:image/png;base64,${i}`);
+        page.state(`globalThis.urls = ${JSON.stringify(urls)}; globalThis.names = urls.map(iconForApp);`);
+        const inStep = () => page.state(`dataIcons.size === dataIconNames.size
+            && [...dataIcons].every(([name, url]) => dataIconNames.get(url) === name)
+            && [...dataIconNames].every(([url, name]) => dataIcons.get(name) === url)`);
+        check(page.state("dataIcons.size") === limit, `no more than ${limit} icons are kept (${page.state("dataIcons.size")})`);
+        check(inStep(), "the names and the URLs stay in step past the limit");
+        check(page.state("!dataIconNames.has(" + JSON.stringify(dataURL) + ") && !dataIcons.has(" + JSON.stringify(name) + ")"),
+            "the oldest icon is gone from both");
+        check(page.state("!sentDataIcons.has(" + JSON.stringify(name) + ")"), "and from the icons sent to the app");
+        const hashedBefore = page.state("hashed");
+        check(page.state("iconForApp(urls.at(-1)) === names.at(-1)") && page.state("hashed") === hashedBefore,
+            "a kept icon is named again without hashing");
+        check(page.state("iconForApp(" + JSON.stringify(dataURL) + ")") === name && page.state("hashed") === hashedBefore + 1,
+            "a forgotten one is hashed again, to the same name");
+        check(inStep() && page.state("dataIcons.size") === limit, "and the two maps are still in step");
+    }
+
+    {
         // Changes in a window the sidebar isn't showing wait longer: about a second after the last state, rather than
         // a quarter of one.
         const page = load();

@@ -715,20 +715,27 @@ const DATA_ICON_PREFIX = "sidetabs-icon:";
 // The `data:` URL behind each name given out, oldest first.
 const dataIcons = new Map();
 const DATA_ICON_LIMIT = 200;
+// The name given out for each `data:` URL in dataIcons, so a URL that's often several KB is hashed once, not
+// every time the tab list is built. The two always hold the same icons: they're only changed together.
+const dataIconNames = new Map();
 // The names whose icon has been sent to the app.
 const sentDataIcons = new Set();
 
 // The icon URL as the app is sent it: a `data:` URL's name, any other URL as it is.
 function iconForApp(url) {
     if (typeof url !== "string" || !url.startsWith("data:")) return url;
+    const known = dataIconNames.get(url);
+    if (known) return known;
     const name = DATA_ICON_PREFIX + hashOf(url);
-    if (!dataIcons.has(name)) {
-        dataIcons.set(name, url);
-        if (dataIcons.size > DATA_ICON_LIMIT) {
-            const oldest = dataIcons.keys().next().value;
-            dataIcons.delete(oldest);
-            sentDataIcons.delete(oldest);
-        }
+    // Another URL with the same hash keeps the name (see hashOf); this one is just hashed each time.
+    if (dataIcons.has(name)) return name;
+    dataIcons.set(name, url);
+    dataIconNames.set(url, name);
+    if (dataIcons.size > DATA_ICON_LIMIT) {
+        const [oldest, oldestURL] = dataIcons.entries().next().value;
+        dataIcons.delete(oldest);
+        dataIconNames.delete(oldestURL);
+        sentDataIcons.delete(oldest);
     }
     return name;
 }
