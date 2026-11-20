@@ -47,7 +47,8 @@ again at Safari's window for changes macOS doesn't announce (only while it's on 
 and what each look reads;
 where the sidebar slides out over the page in full screen or when it hides automatically, below which
 of Safari's bars (against trees in `Tests/SidebarOverlayChecks/trees`), and what
-brings it out and puts it away, and which pointer movements it needs to look at; which tabs cleanup closes, the clocks it keeps, its list of closed tabs
+brings it out and puts it away, which pointer movements it needs to look at, and when it reads Safari's bars
+again (only while it's out, right after it comes out, and as the pointer nears the edge); which tabs cleanup closes, the clocks it keeps, its list of closed tabs
 and where they reopen; with *Minimize other profiles' windows* on, which windows a change of profile
 minimizes and brings back, which window a switch brings forward, the list of windows Side Tabs minimized
 and how it's matched after a restart, and when a click on Safari's Dock icon opens a window and which presses

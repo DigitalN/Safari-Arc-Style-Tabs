@@ -26,6 +26,14 @@ nonisolated struct SafariBar: Equatable {
     var frame: CGRect
 }
 
+/// What Safari's bars were last read against: the window's frame and whether it was full screen. The bars
+/// are where they were as long as these are and nothing else changed them (#78 review).
+nonisolated struct BarsBasis: Equatable {
+    /// In Accessibility coordinates.
+    var frame: CGRect
+    var isFullScreen: Bool
+}
+
 nonisolated enum SafariBars {
     /// Taller than this, it's the page or Safari's own sidebar, not a bar. The full-screen toolbar,
     /// with the Favourites bar, the tab bar and the find bar in it, is still well under.
@@ -38,6 +46,20 @@ nonisolated enum SafariBars {
     /// The Favourites bar's identifier. Its description ("Favourites Bar") is translated, so it plays
     /// no part.
     static let favoritesBarIdentifier = "FavoritesBarView"
+
+    /// Whether a read of the docked window reads its bars again, 10 to 15 round trips to Safari's main thread.
+    ///
+    /// - `wanted`: the bars are read at all for this window: in full screen, and in a normal window while the
+    ///   sidebar hides automatically. Otherwise never.
+    /// - `asked`: the read is for something that can move them or needs them right: a window event, the sidebar
+    ///   coming out, the pointer nearing the edge, a look while the sidebar is out.
+    /// - Otherwise (a look while the sidebar is away) only when the window's frame or full-screen state isn't
+    ///   what they were last read against (`lastRead`): entering or leaving full screen finishing after the last
+    ///   event about it, a window never read, or one whose last read of them didn't finish.
+    static func readsAgain(wanted: Bool, asked: Bool, basis: BarsBasis?, lastRead: BarsBasis?) -> Bool {
+        guard wanted, let basis else { return false }
+        return asked || basis != lastRead
+    }
 
     /// The bars Safari shows between the top of the window at `windowFrame` and the page, top first.
     /// Empty if Safari reports none: the caller keeps its own distance from the top then.

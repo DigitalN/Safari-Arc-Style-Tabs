@@ -117,6 +117,8 @@ echo "== docked panel"
 swiftc -o "$WORK/docked-panel-checks" Tests/DockedPanelChecks/main.swift SideTabs/DockedPanelRules.swift
 "$WORK/docked-panel-checks"
 
+# Also when the overlay reads Safari's bars again (#78 review): not on looks while it's away; at once out at the last
+# layout, then a fresh read; and as the pointer nears the edge, so a strip whose top moved isn't followed.
 echo "== sidebar overlay"
 swiftc -o "$WORK/overlay-checks" Tests/SidebarOverlayChecks/main.swift SideTabs/SidebarOverlay.swift \
     SideTabs/SafariBars.swift SideTabs/TabBarFinder.swift SideTabs/TabBarMatcher.swift

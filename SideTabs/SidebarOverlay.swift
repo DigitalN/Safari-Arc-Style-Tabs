@@ -52,6 +52,12 @@ nonisolated struct RevealStrip: Equatable {
 nonisolated struct OverlayLayout: Equatable {
     var panel: CGRect
     var strip: RevealStrip
+    /// Where the pointer is nearing the strip: beside it, from its foot up to the top of the screen or window,
+    /// and `approachDistance` into the page. Safari's bars are read again when the pointer comes into it while
+    /// the sidebar is away (`OverlayBars`), so the strip's top and the panel's are fresh by the time it gets
+    /// there. Up to the top, since that's where the full-screen toolbar slides down from, and bars that have
+    /// grown or shrunk since the last read move the strip's top.
+    var approach: CGRect
 
     /// Space between the panel and the edges around it, Safari's bars included.
     static let inset: CGFloat = 8
@@ -69,6 +75,9 @@ nonisolated struct OverlayLayout: Equatable {
     /// unless another display is there. Only enough to allow for rounding: beyond it is the other
     /// display, whose every point is left of this screen's edge (#30).
     static let screenStripOutside: CGFloat = 1
+    /// How far into the page past the strip the pointer counts as nearing it: about a fast flick's worth of the
+    /// time a read of the bars takes.
+    static let approachDistance: CGFloat = 160
 
     /// Full screen: the panel runs down the screen's left side below Safari's toolbar and the bars
     /// under it, and the strip is the screen's left edge beside it. Not above that: pointing at the
@@ -81,10 +90,8 @@ nonisolated struct OverlayLayout: Equatable {
     static func fullScreen(screen: CGRect, toolbarBottom: CGFloat?, mainHeight: CGFloat, width: CGFloat) -> OverlayLayout {
         let top = belowToolbar(areaTop: screen.maxY, toolbarBottom: toolbarBottom, mainHeight: mainHeight)
         let panel = panelFrame(left: screen.minX, bottom: screen.minY, top: top, width: width)
-        return OverlayLayout(
-            panel: panel,
-            strip: RevealStrip(minX: screen.minX - screenStripOutside, maxX: screen.minX + 2, minY: screen.minY, maxY: max(top, panel.maxY))
-        )
+        let strip = RevealStrip(minX: screen.minX - screenStripOutside, maxX: screen.minX + 2, minY: screen.minY, maxY: max(top, panel.maxY))
+        return OverlayLayout(panel: panel, strip: strip, approach: approach(beside: strip, top: screen.maxY))
     }
 
     /// A normal window: the panel runs down the window's left side below its bars, over the
@@ -97,10 +104,16 @@ nonisolated struct OverlayLayout: Equatable {
         let area = shown.isNull || shown.isEmpty ? frame : shown
         let top = min(belowToolbar(areaTop: frame.maxY, toolbarBottom: toolbarBottom, mainHeight: mainHeight), area.maxY)
         let panel = panelFrame(left: area.minX, bottom: area.minY, top: top, width: width)
-        return OverlayLayout(
-            panel: panel,
-            strip: RevealStrip(minX: area.minX - stripOutside, maxX: area.minX + stripInside, minY: area.minY, maxY: max(top, panel.maxY))
-        )
+        let strip = RevealStrip(minX: area.minX - stripOutside, maxX: area.minX + stripInside, minY: area.minY, maxY: max(top, panel.maxY))
+        return OverlayLayout(panel: panel, strip: strip, approach: approach(beside: strip, top: area.maxY))
+    }
+
+    /// Up to the top of the screen or window (`top`), or the strip's own top if that's higher. A little past
+    /// the strip's edges, so the pointer on the strip, edges included, is in it too.
+    private static func approach(beside strip: RevealStrip, top: CGFloat) -> CGRect {
+        let minX = strip.minX - 1
+        let maxY = max(top, strip.maxY) + 1
+        return CGRect(x: minX, y: strip.minY - 1, width: strip.maxX + approachDistance - minX, height: maxY - (strip.minY - 1))
     }
 
     private static func panelFrame(left: CGFloat, bottom: CGFloat, top: CGFloat, width: CGFloat) -> CGRect {
@@ -211,5 +224,54 @@ nonisolated struct OverlayReveal: Equatable {
         isRevealed = false
         isPinned = false
         return .conceal
+    }
+}
+
+/// When the overlay reads Safari's bars again (#78 review). Where they end decides the panel's top and the
+/// strip's (`OverlayLayout`), and nothing announces them coming and going (#35). Reading them is 10 to 15 round
+/// trips to Safari's main thread, so not on every look while the sidebar is away; it comes out at once where
+/// the last layout says, and the bars are made fresh around that:
+///
+/// - while it's out, every look reads them, so a change is fixed within about a second;
+/// - when it comes out, by the pointer or the shortcut, they're read right after, and the panel moves if they
+///   changed;
+/// - when the pointer comes near the strip while it's away (`OverlayLayout.approach`), they're read then, so the
+///   layout is fresh by the time the pointer gets to the edge, and a strip whose top moved neither brings the
+///   sidebar out over Safari's toolbar nor misses the edge;
+/// - every read for a window event reads them, and so does a look whose window has moved, changed size or
+///   gone into or out of full screen since they were last read (`SafariBars.readsAgain`): a new window, and
+///   entering or leaving full screen, are laid out fresh before the first reveal.
+nonisolated struct OverlayBars: Equatable {
+    /// Coming near the strip again sooner than this after the last read doesn't read again.
+    static let minimumInterval: TimeInterval = 1
+
+    /// The pointer was near the strip at the last movement.
+    private(set) var pointerNear = false
+    /// When the bars were last read for the overlay, by the system's uptime.
+    private(set) var lastRead: TimeInterval?
+
+    /// Whether a look reads the bars: only while the sidebar is out.
+    static func lookReadsBars(revealed: Bool) -> Bool {
+        revealed
+    }
+
+    /// The pointer moved to `pointer` while the sidebar is away. Whether to read the bars now: when it has just
+    /// come into `approach`, unless they were read less than `minimumInterval` ago.
+    mutating func pointerMoved(to pointer: CGPoint, approach: CGRect, now: TimeInterval) -> Bool {
+        let near = approach.contains(pointer)
+        let arrived = near && !pointerNear
+        pointerNear = near
+        guard arrived else { return false }
+        if let lastRead, now - lastRead < Self.minimumInterval {
+            return false
+        }
+        lastRead = now
+        return true
+    }
+
+    /// The sidebar came out, at the last layout. Always read the bars right after.
+    mutating func revealed(now: TimeInterval) -> Bool {
+        lastRead = now
+        return true
     }
 }
